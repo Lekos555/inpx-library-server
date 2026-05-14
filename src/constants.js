@@ -30,6 +30,12 @@ export const SYSTEM_EVENTS_MAX_COUNT = 1000;
 export const SYSTEM_EVENTS_RETAIN_COUNT = 200;
 export const ONLINE_THRESHOLD_MS = 5 * 60 * 1000;      // 5 min
 
+// --- Browse rate limiter (token-bucket) ---
+export const BROWSE_WINDOW_MS = 60 * 1000;              // 1 min window
+export const BROWSE_MAX_HITS_DEFAULT = 120;              // tokens per window (overridable via BROWSE_RATE_LIMIT env)
+export const BROWSE_MAX_TRACKED = 10_000;                // max tracked IPs
+export const BROWSE_PRUNE_INTERVAL_MS = 2 * 60 * 1000;  // prune stale records every 2 min
+
 // --- Batch operations (скачивание архива, email, выбор на клиенте) ---
 export const BATCH_DOWNLOAD_MAX = 20;
 
@@ -42,26 +48,6 @@ export const UPDATE_PROTECTED_DIRS = new Set(['data', 'node_modules', 'runtime',
 export const UPDATE_PROTECTED_FILES = new Set(['converter/fbc', 'converter/fbc.exe', 'converter/mhl-connector.exe']);
 export const MAX_UNCOMPRESSED_TOTAL = 500 * 1024 * 1024; // 500 MB
 export const MAX_SINGLE_FILE = 50 * 1024 * 1024;         // 50 MB
-
-// --- Rate limiting (browse) ---
-export const BROWSE_WINDOW_MS = 60_000; // 1 minute
-export const BROWSE_MAX_HITS_DEFAULT = 120; // requests per minute
-export const BROWSE_MAX_TRACKED = 20_000;
-export const BROWSE_PRUNE_INTERVAL_MS = 2 * 60_000; // 2 minutes
-
-// --- Rate limiting (login) ---
-export const LOGIN_MAX_ATTEMPTS = 10;
-export const LOGIN_WINDOW_MS = 5 * 60_000; // 5 minutes
-export const LOGIN_LOCKOUT_MS = 15 * 60_000; // 15 minutes
-
-// --- Cover image processing ---
-export const COVER_WIDTH_DEFAULT = 220;
-export const COVER_HEIGHT_DEFAULT = 320;
-export const COVER_QUALITY_DEFAULT = 86;
-
-// --- Cache limits ---
-export const CARD_CACHE_MAX = 3000;
-export const CARD_CACHE_TTL_MS = 10 * 60_000; // 10 minutes
 
 // --- CSRF ---
 export const CSRF_EXEMPT_PATHS = new Set(['/login', '/register', '/admin/login', '/set-lang']);

@@ -42,7 +42,6 @@ export {
 export {
   renderOpdsRoot,
   renderOpdsOpenSearch,
-  renderOpdsSearchHelp,
   renderOpdsSectionFeed,
   renderOpdsBooksFeed,
   renderOpdsBookDetail

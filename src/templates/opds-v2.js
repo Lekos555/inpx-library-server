@@ -27,8 +27,7 @@ export function renderOpds2Root(baseUrl) {
       { href: '/opds/v2/authors', title: t('opds.nav.authors'), type: 'application/opds+json' },
       { href: '/opds/v2/series', title: t('opds.nav.series'), type: 'application/opds+json' },
       { href: '/opds/v2/titles', title: t('opds.nav.books'), type: 'application/opds+json' },
-      { href: '/opds/v2/genres', title: t('opds.nav.genres'), type: 'application/opds+json' },
-      { href: '/opds/v2/search', title: t('opds.nav.search'), type: 'application/opds+json' }
+      { href: '/opds/v2/genres', title: t('opds.nav.genres'), type: 'application/opds+json' }
     ]
   });
 }
@@ -53,14 +52,20 @@ export function renderOpds2NavigationFeed(baseUrl, { title, selfPath, entries, n
 function formatPublication(book) {
   const authors = String(book.authors || '').split(':').map(a => a.trim()).filter(Boolean);
   const extLower = String(book.ext || 'fb2').toLowerCase();
-  const sourceMime = OPDS_MIME_FOR_SOURCE[extLower] || 'application/octet-stream';
   const dl = `/download/${encodeURIComponent(book.id)}?opds=1`;
 
-  const links = [
-    { rel: 'http://opds-spec.org/acquisition', href: dl, type: sourceMime, title: FORMAT_LABELS[extLower] || extLower.toUpperCase() }
-  ];
+  // Download links — source format + conversion to epub for fb2
+  const links = [];
   if (extLower === 'fb2') {
+    links.push({ rel: 'http://opds-spec.org/acquisition', href: dl, type: 'application/fb2+zip', title: 'FB2+ZIP' });
     links.push({ rel: 'http://opds-spec.org/acquisition', href: `${dl}&format=epub2`, type: 'application/epub+zip', title: 'EPUB' });
+  } else if (extLower === 'epub') {
+    links.push({ rel: 'http://opds-spec.org/acquisition', href: dl, type: 'application/epub+zip', title: 'EPUB' });
+  } else if (extLower === 'mobi') {
+    links.push({ rel: 'http://opds-spec.org/acquisition', href: dl, type: 'application/x-mobipocket-ebook', title: 'MOBI' });
+  } else {
+    const sourceMime = OPDS_MIME_FOR_SOURCE[extLower] || 'application/octet-stream';
+    links.push({ rel: 'http://opds-spec.org/acquisition', href: dl, type: sourceMime, title: FORMAT_LABELS[extLower] || extLower.toUpperCase() });
   }
   if (book.id) {
     links.push({ rel: 'http://opds-spec.org/image', href: `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`, type: 'image/webp' });
@@ -71,7 +76,8 @@ function formatPublication(book) {
       '@type': 'http://schema.org/Book',
       title: book.title || t('opds.noTitle'),
       author: authors.length ? authors.map(a => ({ name: a })) : [{ name: t('book.authorUnknown') }],
-      language: book.lang || 'ru'
+      language: book.lang || 'ru',
+      format: extLower
     },
     links,
     images: book.id ? [{ href: `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`, type: 'image/webp' }] : []
@@ -81,7 +87,14 @@ function formatPublication(book) {
     pub.metadata.description = String(book.annotation).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
   }
 
-  if (book.series) {
+  if (book.seriesList?.length) {
+    pub.metadata.belongsTo = {
+      series: book.seriesList.map((s) => ({
+        name: s.displayName || s.name,
+        position: s.seriesNo ? Number(s.seriesNo) || undefined : undefined
+      }))
+    };
+  } else if (book.series) {
     pub.metadata.belongsTo = { series: [{ name: book.series, position: book.seriesNo ? Number(book.seriesNo) || undefined : undefined }] };
   }
 
@@ -93,7 +106,7 @@ function formatPublication(book) {
   return pub;
 }
 
-export function renderOpds2PublicationsFeed(baseUrl, { title, selfPath, items, nextHref = null, total = null }) {
+export function renderOpds2PublicationsFeed(baseUrl, { title, selfPath, items, nextHref = null, total = null, navEntries = [] }) {
   const feed = {
     metadata: { title },
     links: baseLinks(baseUrl, selfPath),
@@ -101,6 +114,14 @@ export function renderOpds2PublicationsFeed(baseUrl, { title, selfPath, items, n
   };
   if (total !== null) {
     feed.metadata.numberOfItems = total;
+  }
+  if (navEntries.length) {
+    feed.navigation = navEntries.map((e) => ({
+      href: e.href,
+      title: e.title,
+      type: 'application/opds+json',
+      properties: e.count !== undefined ? { numberOfItems: e.count } : undefined
+    }));
   }
   if (nextHref) {
     feed.links.push({ rel: 'next', href: nextHref, type: 'application/opds+json' });

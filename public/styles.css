@@ -1314,6 +1314,37 @@ html[data-theme="light"] .cover-fallback-overlay {
   flex-shrink: 0;
 }
 
+/* ── Cover rating stars ── */
+.cover-rating {
+  position: absolute;
+  bottom: 5px;
+  left: 5px;
+  z-index: 3;
+  display: inline-flex;
+  gap: 2px;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.85);
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.cover-star {
+  font-size: 15px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.55);
+}
+.cover-star.is-active {
+  color: #e6b422;
+}
+html[data-theme="light"] .cover-rating {
+  background: rgba(255, 255, 255, 0.95);
+}
+html[data-theme="light"] .cover-star {
+  color: rgba(0, 0, 0, 0.35);
+}
+html[data-theme="light"] .cover-star.is-active {
+  color: #e6b422;
+}
+
 /* ── Read badge (large checkmark stamp on covers) ── */
 .read-badge {
   position: absolute;
@@ -2896,23 +2927,9 @@ button.download-format-link {
   font-size: 22px;
   line-height: 1;
   color: var(--border);
-  cursor: pointer;
-  transition: color .15s, transform .15s;
-}
-.star-btn:hover,
-.star-btn.is-hovered {
-  color: #e0a820;
-  transform: scale(1.15);
 }
 .star-btn.is-active {
   color: #d4a017;
-}
-.star-btn:disabled {
-  cursor: default;
-  opacity: .6;
-}
-.star-btn:disabled:hover {
-  transform: none;
 }
 .rating-info {
   font-size: 13px;

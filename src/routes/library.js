@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import path from 'node:path';
 import sharp from 'sharp';
 import iconv from 'iconv-lite';
 import { config } from '../config.js';
@@ -13,7 +16,7 @@ import {
   HOME_SECTIONS_CACHE_TTL_MS,
   PAGE_CACHE_TTL_MS
 } from '../constants.js';
-import { getUserShelves, getShelfById, getShelfBooks, getSetting, setBookRating, removeBookRating, getBookRating, getBookAverageRating, getReadBookIdSet, getFullyReadSeriesNames } from '../db.js';
+import { getUserShelves, getShelfById, getShelfBooks, getSetting, getReadBookIdSet, getFullyReadSeriesNames } from '../db.js';
 import {
   getBookById,
   getBooksByIds,
@@ -40,6 +43,8 @@ import {
   listGenres,
   listAuthorsByGenre,
   listSeriesByGenre,
+  listAuthorsByLanguage,
+  listSeriesByLanguage,
   listLanguages,
   listSeries,
   resolveAuthorName,
@@ -65,20 +70,176 @@ import {
 import { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, getGenreGroup, getGenreGroups } from '../genre-map.js';
 import { clearCardHtmlCache } from '../templates/shared.js';
 
-import {
-  getCachedCoverThumb,
-  setCachedCoverThumb,
-  getDiskCachedCoverThumb,
-  setDiskCachedCoverThumb,
-  invalidateCoverThumbCaches,
-  detectImageMimeFromBuffer,
-  normalizeBookImageForClient,
-  ALLOWED_BOOK_IMAGE_TYPES,
-  getCoverWidth,
-  getCoverHeight,
-  acquireSharpSlot,
-  releaseSharpSlot,
-} from '../services/cover.js';
+// --- Sharp concurrency limiter ---
+
+const SHARP_CONCURRENCY_LIMIT = 6;
+let _sharpActiveCount = 0;
+const _sharpQueue = [];
+
+function acquireSharpSlot() {
+  if (_sharpActiveCount < SHARP_CONCURRENCY_LIMIT) {
+    _sharpActiveCount++;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => _sharpQueue.push(resolve));
+}
+
+function releaseSharpSlot() {
+  if (_sharpQueue.length > 0) {
+    const next = _sharpQueue.shift();
+    next();
+  } else {
+    _sharpActiveCount--;
+  }
+}
+
+// --- Cover thumbnail caching ---
+
+const ALLOWED_BOOK_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp']);
+const COVER_THUMB_WIDTH = config.coverMaxWidth;
+const COVER_THUMB_HEIGHT = config.coverMaxHeight;
+
+function getCoverWidth() {
+  const db = Number(getSetting('cover_max_width'));
+  return db > 0 ? db : COVER_THUMB_WIDTH;
+}
+function getCoverHeight() {
+  const db = Number(getSetting('cover_max_height'));
+  return db > 0 ? db : COVER_THUMB_HEIGHT;
+}
+function getCoverQuality() {
+  const db = Number(getSetting('cover_quality'));
+  return (db >= 1 && db <= 100) ? db : config.coverQuality;
+}
+const COVER_THUMB_CACHE_TTL_MS = 30 * 60_000;
+const COVER_THUMB_DISK_TTL_MS = 7 * 24 * 60 * 60_000;
+const COVER_THUMB_DISK_DIR = path.join(config.dataDir, 'cover-thumb-cache');
+const coverThumbCache = new Map();
+let coverThumbDiskReady = false;
+
+function detectImageMimeFromBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+  if (buf[0] === 0xff && buf[1] === 0x0a) return 'image/jxl';
+  if (
+    buf.length >= 12 &&
+    buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0x00 && buf[3] === 0x0c &&
+    buf[4] === 0x4a && buf[5] === 0x4c && buf[6] === 0x4c && buf[7] === 0x20 &&
+    buf[8] === 0x0d && buf[9] === 0x0a && buf[10] === 0x87 && buf[11] === 0x0a
+  ) {
+    return 'image/jxl';
+  }
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf.length >= 12 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  return null;
+}
+
+async function normalizeBookImageForClient(img) {
+  const sourceType = detectImageMimeFromBuffer(img?.data) || String(img?.contentType || '').toLowerCase();
+  if (ALLOWED_BOOK_IMAGE_TYPES.has(sourceType)) {
+    return { contentType: sourceType, data: img.data };
+  }
+  await acquireSharpSlot();
+  try {
+    const converted = await sharp(img.data, { failOn: 'none' })
+      .webp({ quality: getCoverQuality(), effort: 4 })
+      .toBuffer();
+    return { contentType: 'image/webp', data: converted };
+  } catch {
+    if (sourceType && sourceType.startsWith('image/')) {
+      return { contentType: sourceType, data: img.data };
+    }
+    return null;
+  } finally {
+    releaseSharpSlot();
+  }
+}
+
+function getCachedCoverThumb(bookId) {
+  const key = String(bookId || '').trim();
+  if (!key) return null;
+  const item = coverThumbCache.get(key);
+  if (!item) return null;
+  if (Date.now() - item.ts > COVER_THUMB_CACHE_TTL_MS) {
+    coverThumbCache.delete(key);
+    return null;
+  }
+  // LRU promotion: move to end of insertion order
+  coverThumbCache.delete(key);
+  coverThumbCache.set(key, item);
+  return item;
+}
+
+function setCachedCoverThumb(bookId, contentType, data) {
+  const key = String(bookId || '').trim();
+  if (!key || !data?.length) return;
+  coverThumbCache.set(key, { contentType, data, ts: Date.now() });
+  if (coverThumbCache.size > 4000) {
+    const oldest = coverThumbCache.keys().next().value;
+    coverThumbCache.delete(oldest);
+  }
+}
+
+function ensureCoverThumbDiskDir() {
+  if (coverThumbDiskReady) return;
+  fs.mkdirSync(COVER_THUMB_DISK_DIR, { recursive: true });
+  coverThumbDiskReady = true;
+}
+
+/** Hierarchical path: cover-thumb-cache/ab/abcdef....webp */
+function coverThumbDiskPath(bookId) {
+  const key = String(bookId || '').trim();
+  const hash = crypto.createHash('sha1').update(key).digest('hex');
+  const subDir = hash.slice(0, 2);
+  return path.join(COVER_THUMB_DISK_DIR, subDir, `${hash}.webp`);
+}
+
+async function getDiskCachedCoverThumb(bookId) {
+  try {
+    ensureCoverThumbDiskDir();
+    const diskPath = coverThumbDiskPath(bookId);
+    const stat = await fs.promises.stat(diskPath);
+    if (Date.now() - stat.mtimeMs > COVER_THUMB_DISK_TTL_MS) {
+      void fs.promises.unlink(diskPath).catch(() => {});
+      return null;
+    }
+    const data = await fs.promises.readFile(diskPath);
+    return data?.length ? { contentType: 'image/webp', data } : null;
+  } catch {
+    return null;
+  }
+}
+
+function setDiskCachedCoverThumb(bookId, contentType, data) {
+  if (!data?.length) return;
+  try {
+    const diskPath = coverThumbDiskPath(bookId);
+    fs.mkdirSync(path.dirname(diskPath), { recursive: true });
+    fs.promises.writeFile(diskPath, data).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
+
+function invalidateCoverThumbCaches(bookId) {
+  const key = String(bookId || '').trim();
+  if (!key) return;
+  coverThumbCache.delete(key);
+  try {
+    ensureCoverThumbDiskDir();
+    void fs.promises.unlink(coverThumbDiskPath(bookId)).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
 
 // --- Book details cache ---
 
@@ -284,17 +445,18 @@ export function registerLibraryRoutes(app, deps) {
     const year = Number(req.query.year) || 0;
     const field = ['books', 'authors', 'series'].includes(String(req.query.field || '')) ? String(req.query.field) : 'books';
     const isBookField = field === 'books';
-    const sort = String(req.query.sort || (isBookField ? 'recent' : 'count'));
+    const sort = String(req.query.sort || (isBookField ? 'title' : 'name'));
+    const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 24;
     const stats = getCachedStats();
-    const cacheKey = `catalog:${field}:${sort}:${genre}:${letter}:${lang}:${format}:${year}:${query}:p${page}`;
-    const result = getCachedPageData(cacheKey, () => searchCatalog({ query, field, page, pageSize, sort, genre, letter, lang, format, year }));
+    const cacheKey = `catalog:${field}:${sort}:${order}:${genre}:${letter}:${lang}:${format}:${year}:${query}:p${page}`;
+    const result = getCachedPageData(cacheKey, () => searchCatalog({ query, field, page, pageSize, sort, order, genre, letter, lang, format, year }));
     const user = req.user || null;
     const readBookIds = user ? getReadBookIdSet(user.username) : null;
     const langs = getDistinctLanguages();
     const formats = getDistinctFormats();
-    res.send(renderCatalog({ ...result, page, pageSize, query, field, sort, genre, letter, lang, format, year, langs, formats, user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds }));
+    res.send(renderCatalog({ ...result, page, pageSize, query, field, sort, order, genre, letter, lang, format, year, langs, formats, user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds }));
   });
 
   // --- Library views ---
@@ -303,6 +465,8 @@ export function registerLibraryRoutes(app, deps) {
     const page = safePage(req.query.page);
     const pageSize = 24;
     const type = String(req.query.type || '').trim();
+    const sort = ['recent', 'title', 'author', 'series', 'rating'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
+    const order = String(req.query.order || '');
     const user = req.user || null;
     const stats = getCachedStats();
     const titles = {
@@ -319,10 +483,10 @@ export function registerLibraryRoutes(app, deps) {
     };
     const canUseSharedCache = view === 'recent';
     const result = canUseSharedCache
-      ? getStaleOrSchedule(`library:${view}:page:${page}:size:${pageSize}`, () => getLibraryView(view, { page, pageSize }), PAGE_CACHE_TTL_MS, { total: 0, items: [] })
+      ? getStaleOrSchedule(`library:${view}:sort:${sort}:${order}:page:${page}:size:${pageSize}`, () => getLibraryView(view, { page, pageSize, sort, order }), PAGE_CACHE_TTL_MS, { total: 0, items: [] })
       : view === 'recommended'
         ? getRecommendedLibraryView({ page, pageSize, username: user?.username || '' })
-        : getLibraryView(view, { page, pageSize, username: user?.username || '', type });
+        : getStaleOrSchedule(`library:${view}:${user?.username || ''}:sort:${sort}:${order}:p${page}:s${pageSize}`, () => getLibraryView(view, { page, pageSize, username: user?.username || '', type, sort, order }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
     const readBookIds = user ? getReadBookIdSet(user.username) : null;
     const readSeriesNames = user ? getFullyReadSeriesNames(user.username) : null;
     res.send(renderLibraryView({
@@ -333,6 +497,8 @@ export function registerLibraryRoutes(app, deps) {
       page,
       pageSize,
       type,
+      sort,
+      order,
       user,
       stats,
       indexStatus: getIndexStatus(),
@@ -347,35 +513,37 @@ export function registerLibraryRoutes(app, deps) {
     const query = String(req.query.q || '');
     const letter = String(req.query.letter || '').trim().slice(0, 2);
     const sort = String(req.query.sort || 'name');
+    const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 50;
     const startsWith = query.length <= 2;
     const stats = getCachedStats();
-    const cacheKey = `browse:authors:${page}:${sort}:${letter}:${query}`;
-    const result = getStaleOrSchedule(cacheKey, () => listAuthors({ query, page, pageSize, sort, startsWith, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
+    const cacheKey = `browse:authors:${page}:${sort}:${order}:${letter}:${query}`;
+    const result = getStaleOrSchedule(cacheKey, () => listAuthors({ query, page, pageSize, sort, order, startsWith, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
     res.send(renderBrowsePage({
       title: t('nav.authors'),
       ...result, page, pageSize, user: req.user || null, stats, query, letter,
       path: '/authors', facetBasePath: '/facet/authors',
-      indexStatus: getIndexStatus(), sort, csrfToken: req.csrfToken || ''
+      indexStatus: getIndexStatus(), sort, order, csrfToken: req.csrfToken || ''
     }));
   });
 
   app.get('/series', requireBrowseAuth, (req, res) => {
     const query = String(req.query.q || '');
     const letter = String(req.query.letter || '').trim().slice(0, 2);
-    const sort = String(req.query.sort || 'count');
+    const sort = String(req.query.sort || 'name');
+    const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 50;
     const stats = getCachedStats();
-    const cacheKey = `browse:series:${page}:${sort}:${letter}:${query}`;
-    const result = getStaleOrSchedule(cacheKey, () => listSeries({ query, page, pageSize, sort, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
+    const cacheKey = `browse:series:${page}:${sort}:${order}:${letter}:${query}`;
+    const result = getStaleOrSchedule(cacheKey, () => listSeries({ query, page, pageSize, sort, order, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
     const username = req.user?.username || '';
     res.send(renderBrowsePage({
       title: t('nav.series'),
       ...result, page, pageSize, user: req.user || null, stats, query, letter,
       path: '/series', facetBasePath: '/facet/series',
-      indexStatus: getIndexStatus(), sort, csrfToken: req.csrfToken || '',
+      indexStatus: getIndexStatus(), sort, order, csrfToken: req.csrfToken || '',
       readSeriesNames: username ? getFullyReadSeriesNames(username) : null
     }));
   });
@@ -384,7 +552,8 @@ export function registerLibraryRoutes(app, deps) {
   app.get('/genres', requireBrowseAuth, (req, res) => {
     const query = String(req.query.q || '');
     const letter = String(req.query.letter || '').trim().slice(0, 2);
-    const sort = String(req.query.sort || 'count');
+    const sort = String(req.query.sort || 'name');
+    const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 50;
     const stats = getCachedStats();
@@ -409,42 +578,44 @@ export function registerLibraryRoutes(app, deps) {
         items: allGenres, total: allGenres.length, page, pageSize: allGenres.length,
         user: req.user || null, stats, query, letter,
         path: '/genres', facetBasePath: '/facet/genres',
-        indexStatus: getIndexStatus(), sort, csrfToken: req.csrfToken || '',
+        indexStatus: getIndexStatus(), sort, order, csrfToken: req.csrfToken || '',
         genreGroups: grouped
       }));
       return;
     }
 
-    const cacheKey = `browse:genres:${page}:${sort}:${letter}:${query}`;
-    const result = getStaleOrSchedule(cacheKey, () => listGenres({ query, page, pageSize, sort, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
+    const cacheKey = `browse:genres:${page}:${sort}:${order}:${letter}:${query}`;
+    const result = getStaleOrSchedule(cacheKey, () => listGenres({ query, page, pageSize, sort, order, letter }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
     res.send(renderBrowsePage({
       title: t('nav.genres'),
       ...result, page, pageSize, user: req.user || null, stats, query, letter,
       path: '/genres', facetBasePath: '/facet/genres',
-      indexStatus: getIndexStatus(), sort, csrfToken: req.csrfToken || ''
+      indexStatus: getIndexStatus(), sort, order, csrfToken: req.csrfToken || ''
     }));
   });
 
   app.get('/languages', requireBrowseAuth, (req, res) => {
     const query = String(req.query.q || '');
-    const sort = String(req.query.sort || 'count');
+    const sort = String(req.query.sort || 'name');
+    const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 50;
     const stats = getCachedStats();
-    const cacheKey = `browse:languages:${page}:${sort}:${query}`;
-    const result = getStaleOrSchedule(cacheKey, () => listLanguages({ query, page, pageSize, sort }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
+    const cacheKey = `browse:languages:${page}:${sort}:${order}:${query}`;
+    const result = getStaleOrSchedule(cacheKey, () => listLanguages({ query, page, pageSize, sort, order }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
     res.send(renderBrowsePage({
       title: t('nav.languages'),
       ...result, page, pageSize, user: req.user || null, stats, query,
       path: '/languages', facetBasePath: '/facet/languages',
-      indexStatus: getIndexStatus(), sort, csrfToken: req.csrfToken || ''
+      indexStatus: getIndexStatus(), sort, order, csrfToken: req.csrfToken || ''
     }));
   });
 
   // --- Facet pages ---
   app.get('/facet/authors/:value/outside-series', requireBrowseAuth, async (req, res, next) => {
     try {
-    const sort = String(req.query.sort || 'recent');
+    const sort = String(req.query.sort || 'title');
+    const order = String(req.query.order || '');
     const stats = getCachedStats();
     const value = String(req.params.value || '');
     const displayValue = formatAuthorLabel(value);
@@ -461,7 +632,7 @@ export function registerLibraryRoutes(app, deps) {
     ];
     const p = safePage(req.query.page, 1);
     const pageSize = 48;
-    const grouped = await getAuthorBooksGroupedCoalesced(value, sort, { page: p, pageSize });
+    const grouped = await getAuthorBooksGroupedCoalesced(value, sort, order, { page: p, pageSize });
     const facetPath = `/facet/authors/${encodeURIComponent(value)}/outside-series`;
     res.send(
       renderAuthorOutsideSeriesPage({
@@ -470,7 +641,7 @@ export function registerLibraryRoutes(app, deps) {
         books: grouped.standaloneBooks,
         total: grouped.standaloneBooks.length,
         user: req.user || null, stats,
-        indexStatus: getIndexStatus(), sort, facetPath, breadcrumbs,
+        indexStatus: getIndexStatus(), sort, order, facetPath, breadcrumbs,
         favorite, facetValue: value, csrfToken: req.csrfToken || '',
         page: p, pageSize, hasMore: grouped.standaloneBooks.length >= pageSize,
         readBookIds: username ? getReadBookIdSet(username) : null
@@ -483,7 +654,8 @@ export function registerLibraryRoutes(app, deps) {
 
   app.get('/facet/:facet/:value', requireBrowseAuth, async (req, res, next) => {
     try {
-      const sort = String(req.query.sort || 'recent');
+      const sort = String(req.query.sort || 'title');
+    const order = String(req.query.order || '');
       const page = safePage(req.query.page);
       const pageSize = 24;
       const stats = getCachedStats();
@@ -545,7 +717,7 @@ export function registerLibraryRoutes(app, deps) {
         const pageSize = 48;
 
         const [grouped, fullSummary, authorPortraitUrl, authorBioHtml] = await Promise.all([
-          getAuthorBooksGroupedCoalesced(value, sort, { page: p, pageSize }),
+          getAuthorBooksGroupedCoalesced(value, sort, order, { page: p, pageSize }),
           Promise.resolve(getFacetSummary(facet, value)),
           flibSourceId != null
             ? readFlibustaAuthorPortraitForAuthorName(value, facetRoot)
@@ -566,7 +738,7 @@ export function registerLibraryRoutes(app, deps) {
             standaloneBooks: grouped.standaloneBooks,
             total: grouped.total,
             user: req.user || null, stats, facetPath,
-            indexStatus: getIndexStatus(), sort, breadcrumbs, summary,
+            indexStatus: getIndexStatus(), sort, order, breadcrumbs, summary,
             facetValue: value, favorite, authorPortraitUrl, authorBioHtml,
             csrfToken: req.csrfToken || '',
             page: p, pageSize, hasMore: grouped.standaloneBooks.length >= pageSize,
@@ -576,25 +748,33 @@ export function registerLibraryRoutes(app, deps) {
         return;
       }
 
-      // Mode switcher for genre pages: ?view=authors|series groups the genre's books by entity
+      // Mode switcher for genre/language pages: ?view=authors|series groups books by entity
       // so big sub-genres (10k+ books) become navigable instead of a flat dump.
-      const allowedViews = facet === 'genres' ? ['books', 'authors', 'series'] : ['books'];
-      const requestedView = String(req.query.view || 'books');
+      const hasEntityView = facet === 'genres' || facet === 'languages';
+      const allowedViews = hasEntityView ? ['books', 'authors', 'series'] : ['books'];
+      const requestedView = String(req.query.view || (hasEntityView ? 'authors' : 'books'));
       const view = allowedViews.includes(requestedView) ? requestedView : 'books';
 
-      if (facet === 'genres' && view !== 'books') {
+      if (hasEntityView && view !== 'books') {
         const entityPageSize = 50;
         const entitySort = ['count', 'name'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'count';
-        const entityResult = view === 'authors'
-          ? listAuthorsByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort })
-          : listSeriesByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort });
+        let entityResult;
+        if (facet === 'genres') {
+          entityResult = view === 'authors'
+            ? listAuthorsByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort })
+            : listSeriesByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort });
+        } else {
+          entityResult = view === 'authors'
+            ? listAuthorsByLanguage({ lang: value, page, pageSize: entityPageSize, sort: entitySort })
+            : listSeriesByLanguage({ lang: value, page, pageSize: entityPageSize, sort: entitySort });
+        }
         const summary = getFacetSummary(facet, value);
         res.send(renderFacetBooks({
           title: tp('facet.titleWithValue', { label: facetLabels[facet] || t('facet.sectionFallback'), value: displayValue }),
           items: [], total: entityResult.total, page, pageSize: entityPageSize,
           summary,
           user: req.user || null, stats, facetPath,
-          indexStatus: getIndexStatus(), sort: entitySort, facet, facetValue: value,
+          indexStatus: getIndexStatus(), sort: entitySort, order, facet, facetValue: value,
           favorite, seriesRead: false, breadcrumbs, csrfToken: req.csrfToken || '',
           readBookIds: null,
           view, entityItems: entityResult.items
@@ -602,17 +782,17 @@ export function registerLibraryRoutes(app, deps) {
         return;
       }
 
-      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort });
+      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort, order });
       const summary = getFacetSummary(facet, value);
       const seriesRead = facet === 'series' && username ? isSeriesFullyRead(username, value) : false;
       res.send(renderFacetBooks({
         title: tp('facet.titleWithValue', { label: facetLabels[facet] || t('facet.sectionFallback'), value: displayValue }),
         ...result, summary, page, pageSize,
         user: req.user || null, stats, facetPath,
-        indexStatus: getIndexStatus(), sort, facet, facetValue: value,
+        indexStatus: getIndexStatus(), sort, order, facet, facetValue: value,
         favorite, seriesRead, breadcrumbs, csrfToken: req.csrfToken || '',
         readBookIds: username ? getReadBookIdSet(username) : null,
-        view
+        view, order
       }));
     } catch (error) {
       next(error);
@@ -631,8 +811,6 @@ export function registerLibraryRoutes(app, deps) {
       const details = await getDetails(book);
       const bookmarked = username ? isBookmarked(username, book.id) : false;
       const isRead = username ? isBookRead(username, book.id) : false;
-      const userRating = username ? getBookRating(username, book.id) : 0;
-      const avgRating = getBookAverageRating(book.id);
       const similarBooks = buildSimilarBooks(book);
 
       res.send(
@@ -644,8 +822,6 @@ export function registerLibraryRoutes(app, deps) {
           authorBioHtml: '', authorPortraitUrl: '',
           illustrationUrls: [],
           flash: String(req.query.flash || ''),
-          userRating,
-          avgRating,
           readBookIds: username ? getReadBookIdSet(username) : null
         })
       );
@@ -683,14 +859,15 @@ export function registerLibraryRoutes(app, deps) {
   app.get('/favorites', requireWebAuth, (req, res) => {
     const stats = getCachedStats();
     const view = ['books', 'read', 'authors', 'series'].includes(String(req.query.view || '')) ? String(req.query.view) : 'books';
-    const sort = ['title', 'author', 'date', 'name', 'count'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'date';
-    const books = getBookmarks(req.user.username, sort);
-    const readBooks = getReadBooks(req.user.username, sort);
-    const authors = getFavoriteAuthors(req.user.username, 50, sort);
-    const series = getFavoriteSeries(req.user.username, 50, sort);
+    const sort = ['title', 'author', 'date', 'rating', 'name', 'count'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
+    const order = String(req.query.order || '');
+    const books = getBookmarks(req.user.username, sort, order);
+    const readBooks = getReadBooks(req.user.username, sort, order);
+    const authors = getFavoriteAuthors(req.user.username, 50, sort, order);
+    const series = getFavoriteSeries(req.user.username, 50, sort, order);
     const readBookIds = getReadBookIdSet(req.user.username);
     const readSeriesNames = getFullyReadSeriesNames(req.user.username);
-    res.send(renderFavorites({ books, readBooks, authors, series, view, sort, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds, readSeriesNames }));
+    res.send(renderFavorites({ books, readBooks, authors, series, view, sort, order, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds, readSeriesNames }));
   });
 
   app.get('/shelves', requireWebAuth, (req, res) => {
@@ -756,29 +933,6 @@ export function registerLibraryRoutes(app, deps) {
     } catch (error) {
       next(error);
     }
-  });
-
-  // --- Book rating API ---
-  app.post('/api/books/:id/rating', requireWebAuth, (req, res, next) => {
-    try {
-      const book = getBookById(req.params.id);
-      if (!book) return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
-      const rating = parseInt(req.body.rating, 10);
-      if (!rating || rating < 1 || rating > 5) return apiFail(res, 400, ApiErrorCode.VALIDATION, t('book.rating.invalid'));
-      setBookRating(req.user.username, book.id, rating);
-      const avg = getBookAverageRating(book.id);
-      res.json({ ok: true, userRating: rating, average: avg.average, count: avg.count });
-    } catch (error) { next(error); }
-  });
-
-  app.delete('/api/books/:id/rating', requireWebAuth, (req, res, next) => {
-    try {
-      const book = getBookById(req.params.id);
-      if (!book) return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
-      removeBookRating(req.user.username, book.id);
-      const avg = getBookAverageRating(book.id);
-      res.json({ ok: true, userRating: 0, average: avg.average, count: avg.count });
-    } catch (error) { next(error); }
   });
 
   // --- Book review ---
@@ -1039,13 +1193,8 @@ export function registerLibraryRoutes(app, deps) {
         res.type('application/epub+zip');
         res.send(buffer);
       } else {
-        // Auto-detect and unwrap composite formats: pdf.zip / djvu.zip Flibusta
-        // wrapper packs (PDF + .fbd descriptor inside a zip), bare pdf/djvu, etc.
-        // The reader expects a real PDF stream, not a zip containing one.
-        const { detectBookFormat } = await import('../utils/book-format.js');
-        const detected = await detectBookFormat(buffer, ext);
-        res.type(detected.contentType);
-        res.send(detected.buffer);
+        res.type('application/octet-stream');
+        res.send(buffer);
       }
     } catch (error) {
       next(error);

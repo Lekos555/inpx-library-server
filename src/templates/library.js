@@ -3,7 +3,7 @@
  */
 import {
   escapeHtml, csrfHiddenField, pageShell,
-  renderBookGrid, renderFavoriteBookGrid, renderEntityGrid,
+  renderBookGrid, renderFavoriteBookGrid, renderEntityGrid, renderCover,
   renderPagination, renderSortControl, renderEmptyState,
   renderDownloadMenu, renderBatchDownloadToolbar,
   renderHomeShelf, renderMiniBookList, renderDiscoveryTiles,
@@ -60,7 +60,7 @@ export function renderHome({ user, stats, indexStatus, history = [], favoriteAut
   return pageShell({ title: t('home.title'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('nav.home') }], currentPath: '/', csrfToken, readBookIds });
 }
 
-export function renderCatalog({ items, total, page, pageSize, query, field, sort, genre = '', letter = '', lang = '', format = '', year = 0, langs = [], formats = [], user, stats, indexStatus, csrfToken = '', readBookIds = null }) {
+export function renderCatalog({ items, total, page, pageSize, query, field, sort, order = '', genre = '', letter = '', lang = '', format = '', year = 0, langs = [], formats = [], user, stats, indexStatus, csrfToken = '', readBookIds = null }) {
   const fieldLabels = {
     books: t('catalog.inBooks'),
     authors: t('catalog.inAuthors'),
@@ -73,7 +73,8 @@ export function renderCatalog({ items, total, page, pageSize, query, field, sort
         { value: 'recent', label: t('sort.recentFirst') },
         { value: 'title', label: t('sort.byTitle') },
         { value: 'author', label: t('sort.byAuthor') },
-        { value: 'series', label: t('sort.bySeries') }
+        { value: 'series', label: t('sort.bySeries') },
+        { value: 'rating', label: t('sort.byRating') }
       ]
     : [
         { value: 'count', label: t('sort.popularFirst') },
@@ -129,6 +130,7 @@ export function renderCatalog({ items, total, page, pageSize, query, field, sort
           ${renderSortControl({
             action: '/catalog',
             sort,
+            order,
             query,
             field,
             genre,
@@ -165,7 +167,7 @@ export function renderCatalog({ items, total, page, pageSize, query, field, sort
 }
 
 
-export function renderLibraryView({ view, title, subtitle = '', items, total, page, pageSize, type = '', itemType = '', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null }) {
+export function renderLibraryView({ view, title, subtitle = '', items, total, page, pageSize, type = '', itemType = '', sort = 'title', order = '', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null }) {
   const emptyStates = {
     recent: {
       title: t('library.empty.recent.title'),
@@ -186,19 +188,28 @@ export function renderLibraryView({ view, title, subtitle = '', items, total, pa
     }
   };
 
-  const currentPath = type ? `/library/${view}?type=${encodeURIComponent(type)}` : `/library/${view}`;
   const isSeries = itemType === 'series';
   const countHintLabel = view === 'continue' || view === 'recommended' || view === 'read' ? t('library.countInSection') : t('library.countInCatalog');
   const totalN = Math.max(0, Math.floor(Number(total) || 0));
   const totalNum = formatLocaleInt(totalN);
   const totalBookWord = isSeries ? plural('series', totalN) : plural('book', totalN);
   const libBatchJson = '';
+  const sortOptions = isSeries ? [] : [
+    { value: 'recent', label: t('sort.recentFirst') },
+    { value: 'title', label: t('sort.byTitle') },
+    { value: 'author', label: t('sort.byAuthor') },
+    { value: 'series', label: t('sort.bySeries') },
+    { value: 'rating', label: t('sort.byRating') }
+  ];
+  const sortControl = isSeries ? '' : `<div class="actions">${renderSortControl({ action: `/library/${view}`, sort, order, options: sortOptions, extraHidden: type ? { type } : {} })}</div>`;
+  const currentPath = type ? `/library/${view}?sort=${encodeURIComponent(sort)}&type=${encodeURIComponent(type)}` : `/library/${view}?sort=${encodeURIComponent(sort)}`;
   const content = `
     <section class="page-intro">
       <div class="page-intro-copy">
         <h1>${escapeHtml(title)}</h1>
         ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
       </div>
+      ${sortControl}
     </section>
     ${items.length
       ? `<div class="list-context-hint list-context-hint-spacious">${escapeHtml(countHintLabel)}: <strong>${totalNum}</strong> ${totalBookWord}${page > 1 ? ` ${escapeHtml(t('library.pageSep'))} <strong>${formatLocaleInt(page)}</strong>` : ''}</div>
@@ -208,7 +219,7 @@ export function renderLibraryView({ view, title, subtitle = '', items, total, pa
               <a class="table-row table-row-link" href="/facet/series/${encodeURIComponent(item.name)}">
                 <div style="display:flex;align-items:center"><span><strong>${escapeHtml(item.name)}</strong><br><span class="muted">${countLabel('book', item.bookCount)} ${escapeHtml(t('entity.inLibrary'))}</span></span>${readSeriesNames && readSeriesNames.has(item.name) ? `<span class="read-series-badge">${READ_CHECK_SVG}</span>` : ''}</div>
               </a>`).join('')}</div>`
-          : `<div data-load-more-grid data-load-more-api="/api/library/${encodeURIComponent(view)}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}">${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: false, user, readBookIds })}</div>`}
+          : `<div data-load-more-grid data-load-more-api="/api/library/${encodeURIComponent(view)}?sort=${encodeURIComponent(sort)}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}">${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: false, user, readBookIds })}</div>`}
       </section>`
       : `
     <div class="list-context-hint list-context-hint-spacious">${escapeHtml(countHintLabel)}: <strong>${totalNum}</strong> ${totalBookWord}${page > 1 ? ` ${escapeHtml(t('library.pageSep'))} <strong>${formatLocaleInt(page)}</strong>` : ''}</div>
@@ -253,8 +264,6 @@ export function renderBook({
   authorPortraitUrl = '',
   illustrationUrls = [],
   flash = '',
-  userRating = 0,
-  avgRating = { average: 0, count: 0 },
   readBookIds = null
 }) {
   const similar = similarBooks || { title: t('book.similar'), items: [] };
@@ -265,14 +274,19 @@ export function renderBook({
   const genreSummaryHtml = genreCodesSummary.length
     ? genreCodesSummary.map((code) => `<a href="/facet/genres/${encodeURIComponent(code)}">${escapeHtml(formatGenreLabel(code))}</a>`).join(', ')
     : '';
+  const seriesList = book.seriesList || [];
+  const seriesSummaryHtml = seriesList.length
+    ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')
+    : '';
+  const primarySeries = seriesList[0] || null;
   const summaryBits = [
-    book.series ? `<a href="/facet/series/${encodeURIComponent(book.series)}">${escapeHtml(book.series)}${book.seriesNo ? ` #${escapeHtml(book.seriesNo)}` : ''}</a>` : '',
+    seriesSummaryHtml,
     (book.lang || 'unknown') ? `<a href="/facet/languages/${encodeURIComponent(book.lang || 'unknown')}">${escapeHtml(formatLanguageLabel(book.lang || 'unknown'))}</a>` : '',
     genreSummaryHtml
   ].filter(Boolean);
-  const parentLibraryHref = book.series ? `/facet/series/${encodeURIComponent(book.series)}` : primaryAuthor ? `/facet/authors/${encodeURIComponent(primaryAuthor)}` : '/library/recent';
-  const parentLibraryLabel = book.series
-    ? tp('book.seriesPrefix', { name: book.series })
+  const parentLibraryHref = primarySeries ? `/facet/series/${encodeURIComponent(primarySeries.name)}` : primaryAuthor ? `/facet/authors/${encodeURIComponent(primaryAuthor)}` : '/library/recent';
+  const parentLibraryLabel = primarySeries
+    ? tp('book.seriesPrefix', { name: primarySeries.displayName || primarySeries.name })
     : primaryAuthor
       ? tp('book.authorPrefix', { name: formatAuthorLabel(book.authors) })
       : t('nav.recent');
@@ -280,8 +294,9 @@ export function renderBook({
     <section class="book-detail-shell">
       <div class="book-detail-main card-detail-panel">
         <div class="book-detail-cover">
-          <div class="cover">
-            <span class="cover-fallback">
+          <div class="cover ${hasRealCover ? '' : 'cover-fallback-active'}">
+            <img class="cover-image is-loaded" src="/api/books/${encodeURIComponent(book.id)}/cover" alt="${escapeHtml(book.title)}">
+            <span class="cover-fallback" ${hasRealCover ? 'hidden' : ''} aria-hidden="${hasRealCover ? 'true' : 'false'}">
               <img class="cover-fallback-image" src="/book-fallback.png" alt="">
               <span class="cover-fallback-overlay"></span>
               <span class="cover-fallback-copy">
@@ -289,19 +304,17 @@ export function renderBook({
                 <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
               </span>
             </span>
-            ${hasRealCover ? `<img class="cover-image" src="/api/books/${encodeURIComponent(book.id)}/cover" alt="${escapeHtml(book.title)}">` : ''}
           </div>
         </div>
         <div class="book-detail-content">
           <h2 class="book-detail-title">${escapeHtml(book.title)}</h2>
           <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
           ${summaryBits.length ? `<div class="book-detail-summary">${summaryBits.join('<span class="book-detail-sep">·</span>')}</div>` : ''}
-          <div class="book-detail-rating" data-rating-widget data-book-id="${escapeHtml(String(book.id))}" data-user-rating="${userRating}" data-avg="${avgRating.average}" data-count="${avgRating.count}"${user ? '' : ' data-readonly="true"'}>
+          ${book.libRate ? `<div class="book-detail-rating">
             <div class="star-rating">
-              ${[1,2,3,4,5].map(i => `<button type="button" class="star-btn${i <= userRating ? ' is-active' : ''}" data-star="${i}" aria-label="${i}"${user ? '' : ' disabled'}>★</button>`).join('')}
+              ${[1,2,3,4,5].map(i => `<span class="star-btn${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}
             </div>
-            <span class="rating-info">${avgRating.count ? `<span class="rating-avg">${avgRating.average}</span> <span class="rating-count">(${avgRating.count})</span>` : `<span class="rating-empty">${escapeHtml(t('book.rating.noRatings'))}</span>`}</span>
-          </div>
+          </div>` : ''}
           ${
             details.annotationIsHtml && String(details.annotation || '').trim()
               ? `<div class="book-detail-annotation book-detail-annotation--html">${details.annotation}</div>`
@@ -317,7 +330,7 @@ export function renderBook({
             ${renderDownloadMenu(book, { accent: true, user })}
             <a href="/read/${encodeURIComponent(book.id)}" class="button">${escapeHtml(t('book.read'))}</a>
           </div>
-          ${(primaryAuthor || book.series) ? `<div class="book-detail-links">${primaryAuthor ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(t('book.allByAuthor'))}</a>` : ''}${primaryAuthor && book.series ? '<span class="book-detail-sep">·</span>' : ''}${book.series ? `<a href="/facet/series/${encodeURIComponent(book.series)}">${escapeHtml(t('book.allInSeries'))}</a>` : ''}</div>` : ''}
+          ${(primaryAuthor || seriesList.length) ? `<div class="book-detail-links">${primaryAuthor ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(t('book.allByAuthor'))}</a>` : ''}${primaryAuthor && seriesList.length ? '<span class="book-detail-sep">·</span>' : ''}${seriesList.length ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(tp('book.allInSeriesNamed', { name: s.displayName || s.name }))}</a>`).join('<span class="book-detail-sep">·</span>') : ''}</div>` : ''}
           ${isAuthenticated ? `<div class="actions actions-secondary"><button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${escapeHtml(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button><button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${escapeHtml(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button><button class="button" type="button" data-add-to-shelf="${escapeHtml(book.id)}">${escapeHtml(t('book.toShelf'))}</button><button class="button" type="button" data-send-to-ereader="${escapeHtml(book.id)}">${escapeHtml(t('book.toEmail'))}</button></div>` : ''}
         </div>
       </div>
@@ -365,7 +378,7 @@ export function renderBook({
 }
 
 
-export function renderFavorites({ books = [], readBooks = [], authors = [], series = [], view = 'books', sort = 'date', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null, counts = null }) {
+export function renderFavorites({ books = [], readBooks = [], authors = [], series = [], view = 'books', sort = 'title', order = '', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null, counts = null }) {
   const currentView = ['books', 'read', 'authors', 'series'].includes(view) ? view : 'books';
   // `counts` — дешёвый агрегат из getUserStats; fallback на .length для старого поведения.
   const favoritesViews = [
@@ -380,7 +393,8 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
   const bookSortOptions = [
     { value: 'date', label: t('sort.byDateAdded') },
     { value: 'title', label: t('sort.byTitle') },
-    { value: 'author', label: t('sort.byAuthor') }
+    { value: 'author', label: t('sort.byAuthor') },
+    { value: 'rating', label: t('sort.byRating') }
   ];
   const entitySortOptions = [
     { value: 'date', label: t('sort.byDateAdded') },
@@ -391,7 +405,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
     <section class="library-shelf library-shelf-secondary favorites-section favorites-section-books">
       <div class="section-title">
         <h2>${escapeHtml(t('favorites.books'))}</h2>
-        <div class="actions">${renderSortControl({ action: '/favorites', sort, options: bookSortOptions, extraHidden: { view: 'books' } })}</div>
+        <div class="actions">${renderSortControl({ action: '/favorites', sort, order, options: bookSortOptions, extraHidden: { view: 'books' } })}</div>
       </div>
       ${books.length ? `<div class="batch-select-scope">${renderBatchDownloadToolbar({ adhoc: true }, { user })}${renderFavoriteBookGrid(books, { batchSelect: true, user, readBookIds })}</div>` : renderEmptyState({ title: t('favorites.emptyBooksTitle'), text: t('favorites.emptyBooksText'), actionHref: '/', actionLabel: t('favorites.toCatalog') })}
     </section>`;
@@ -399,7 +413,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
     <section class="library-shelf library-shelf-secondary favorites-section favorites-section-books">
       <div class="section-title">
         <h2>${escapeHtml(t('favorites.read'))}</h2>
-        <div class="actions">${renderSortControl({ action: '/favorites', sort, options: bookSortOptions, extraHidden: { view: 'read' } })}</div>
+        <div class="actions">${renderSortControl({ action: '/favorites', sort, order, options: bookSortOptions, extraHidden: { view: 'read' } })}</div>
       </div>
       ${readBooks.length ? `<div class="batch-select-scope">${renderBatchDownloadToolbar({ adhoc: true }, { user })}${renderFavoriteBookGrid(readBooks, { batchSelect: true, user, readBookIds })}</div>` : renderEmptyState({ title: t('favorites.emptyReadTitle'), text: t('favorites.emptyReadText'), actionHref: '/', actionLabel: t('favorites.toCatalog') })}
     </section>`;
@@ -407,7 +421,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
     <section class="library-shelf library-shelf-secondary favorites-section">
       <div class="section-title">
         <h2>${escapeHtml(t('favorites.authors'))}</h2>
-        <div class="actions">${renderSortControl({ action: '/favorites', sort, options: entitySortOptions, extraHidden: { view: 'authors' } })}</div>
+        <div class="actions">${renderSortControl({ action: '/favorites', sort, order, options: entitySortOptions, extraHidden: { view: 'authors' } })}</div>
       </div>
       <div class="table-list entity-list favorites-list">
         ${authors.map((item) => `
@@ -427,7 +441,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
     <section class="library-shelf library-shelf-secondary favorites-section">
       <div class="section-title">
         <h2>${escapeHtml(t('favorites.series'))}</h2>
-        <div class="actions">${renderSortControl({ action: '/favorites', sort, options: entitySortOptions, extraHidden: { view: 'series' } })}</div>
+        <div class="actions">${renderSortControl({ action: '/favorites', sort, order, options: entitySortOptions, extraHidden: { view: 'series' } })}</div>
       </div>
       <div class="table-list entity-list favorites-list">
         ${series.map((item) => `
@@ -488,7 +502,7 @@ function renderGroupedEntityGrid(groups, facetBasePath, readSeriesNames = null) 
   `).join('')}</div>`;
 }
 
-export function renderBrowsePage({ title, items, total, page, pageSize, user, stats, query, letter = '', path, facetBasePath, indexStatus, sort, csrfToken = '', genreGroups = null, readSeriesNames = null }) {
+export function renderBrowsePage({ title, items, total, page, pageSize, user, stats, query, letter = '', path, facetBasePath, indexStatus, sort, order = '', csrfToken = '', genreGroups = null, readSeriesNames = null }) {
   const letterParam = letter ? `&letter=${encodeURIComponent(letter)}` : '';
   const paginationBase = `${path}?sort=${encodeURIComponent(sort || 'count')}${letterParam}`;
   const browseLabels = { '/authors': t('nav.authors'), '/series': t('nav.series'), '/genres': t('nav.genres'), '/languages': t('nav.languages') };
@@ -505,6 +519,7 @@ export function renderBrowsePage({ title, items, total, page, pageSize, user, st
         ${renderSortControl({
           action: path,
           sort,
+          order,
           query,
           options: [
             { value: 'count', label: t('sort.byBookCount') },
@@ -530,7 +545,7 @@ export function renderBrowsePage({ title, items, total, page, pageSize, user, st
   return pageShell({ title, content, user, stats, query, indexStatus, breadcrumbs: [{ label: t('nav.home'), href: '/' }, { label: title }], alphabet, currentPath: path, csrfToken });
 }
 
-export function renderFacetBooks({ title, items, total, page, pageSize, user, stats, facetPath, indexStatus, sort, breadcrumbs, summary = {}, facet = '', facetValue = '', favorite = false, seriesRead = false, csrfToken = '', readBookIds = null, view = 'books', entityItems = null }) {
+export function renderFacetBooks({ title, items, total, page, pageSize, user, stats, facetPath, indexStatus, sort, order = '', breadcrumbs, summary = {}, facet = '', facetValue = '', favorite = false, seriesRead = false, csrfToken = '', readBookIds = null, view = 'books', entityItems = null }) {
   const isGenre = facet === 'genres';
   const isEntityView = isGenre && (view === 'authors' || view === 'series');
   const facetAction = user && (facet === 'authors' || facet === 'series')
@@ -570,7 +585,8 @@ export function renderFacetBooks({ title, items, total, page, pageSize, user, st
         { value: 'recent', label: t('sort.recentFirst') },
         { value: 'title', label: t('sort.byTitle') },
         { value: 'author', label: t('sort.byAuthor') },
-        { value: 'series', label: t('sort.bySeries') }
+        { value: 'series', label: t('sort.bySeries') },
+        { value: 'rating', label: t('sort.byRating') }
       ];
   const sortExtraHidden = isEntityView ? { view } : {};
   const paginationBase = isEntityView
@@ -602,6 +618,7 @@ export function renderFacetBooks({ title, items, total, page, pageSize, user, st
         ${renderSortControl({
           action: facetPath,
           sort,
+          order,
           options: sortOptions,
           extraHidden: sortExtraHidden
         })}
@@ -642,6 +659,7 @@ export function renderAuthorFacetPage({
   facetPath,
   indexStatus,
   sort,
+  order = '',
   breadcrumbs,
   summary = {},
   facetValue = '',
@@ -656,7 +674,7 @@ export function renderAuthorFacetPage({
     : '';
 
   const heroPortrait = authorPortraitUrl
-    ? `<img class="cover-image author-facet-portrait" src="${escapeHtml(authorPortraitUrl)}" alt="" loading="lazy">`
+    ? `<img class="cover-image is-loaded author-facet-portrait" src="${escapeHtml(authorPortraitUrl)}" alt="" loading="lazy">`
     : '';
   const heroFallback = authorPortraitUrl
     ? ''
@@ -676,9 +694,9 @@ export function renderAuthorFacetPage({
     <section class="book-detail-shell author-facet-hero">
       <div class="book-detail-main card-detail-panel">
         <div class="book-detail-cover">
-          <div class="cover">
-            ${heroFallback}
+          <div class="cover ${authorPortraitUrl ? '' : 'cover-fallback-active'}">
             ${heroPortrait}
+            ${heroFallback}
           </div>
         </div>
         <div class="book-detail-content">
@@ -696,6 +714,7 @@ export function renderAuthorFacetPage({
         ${renderSortControl({
           action: facetPath,
           sort,
+          order,
           options: [
             { value: 'recent', label: t('sort.recentFirst') },
             { value: 'title', label: t('sort.byTitle') },
@@ -758,6 +777,7 @@ export function renderAuthorOutsideSeriesPage({
   stats,
   indexStatus,
   sort,
+  order = '',
   facetPath,
   breadcrumbs = [],
   favorite = false,
@@ -780,6 +800,7 @@ export function renderAuthorOutsideSeriesPage({
         ${renderSortControl({
           action: facetPath,
           sort,
+          order,
           options: [
             { value: 'recent', label: t('sort.recentFirst') },
             { value: 'title', label: t('sort.byTitle') }
@@ -869,22 +890,11 @@ export function renderShelfDetail({ shelf, books = [], user, stats, indexStatus,
         ${uniqueBooks.map((book) => `
           <article class="card" data-book-id="${escapeHtml(book.id)}">
             ${shelfBatch ? `<label class="batch-select-hit" title="${escapeHtml(t('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" ${batchSelectInputAttrs(book.id)} data-batch-book-id="${escapeHtml(book.id)}" aria-label="${escapeHtml(t('batch.selectAria'))}"></label>` : ''}
-            <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-              <span class="cover-fallback">
-                <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
-                <span class="cover-fallback-overlay"></span>
-                <span class="cover-fallback-copy">
-                  <span class="cover-fallback-title">${escapeHtml(book.title)}</span>
-                  <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
-                </span>
-              </span>
-              <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${escapeHtml(book.title)}">
-            ${readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : ''}
-            </a>
+            ${renderCover(book, { readBookIds })}
             <div class="meta">
               <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
               <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-              ${book.series ? `<div class="card-series"><a href="/facet/series/${encodeURIComponent(book.series)}">${escapeHtml(book.series)}${book.seriesNo ? ` #${escapeHtml(book.seriesNo)}` : ''}</a></div>` : ''}
+              ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
               <div class="card-actions card-actions-favorites">
                 ${shelfBatch ? '' : renderDownloadMenu(book, { compact: true, user })}
                 <button class="button card-remove-favorite-action" type="button" data-shelf-remove-book="${escapeHtml(book.id)}" data-shelf-id="${shelf.id}">${escapeHtml(t('book.remove'))}</button>

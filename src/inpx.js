@@ -17,6 +17,8 @@ import {
   rebuildBooksFtsFromContent,
   beginFastSqliteImport,
   endFastSqliteImport,
+  dropBulkImportIndexes,
+  ensureBulkImportIndexes,
   beginExclusiveOperation,
   endExclusiveOperation,
   refreshCatalogBookCounts,
@@ -63,7 +65,6 @@ const MAX_INPX_LINE_CHARS = 256 * 1024;
  */
 const MAX_INP_ENTRY_BYTES = 80 * 1024 * 1024;
 const HEAP_WARNING_THRESHOLD_MB = 600;
-const HEAP_PRESSURE_THRESHOLD = 0.80; // 80% of max heap — triggers adaptive batch reduction
 const FACET_CACHE_TTL_MS = 120_000; // 20s → 120s:减少分面/系列/作者页面查询
 /** COUNT дедупа по фасету не зависит от страницы — кешируем отдельно, чтобы «далее» не гоняло тяжёлый подсчёт. */
 const FACET_DEDUP_TOTAL_TTL_MS = parseEnvTimeoutMs('FACET_DEDUP_TOTAL_TTL_MS', 300_000);
@@ -108,20 +109,9 @@ function resetInpxPreparedStatements() {
 }
 onViewRebuild(resetInpxPreparedStatements);
 
-function isAdaptiveInpxImportEnabled() {
-  const raw = String(process.env.INPX_ADAPTIVE_IMPORT || '1').trim().toLowerCase();
-  return !['0', 'false', 'off', 'no'].includes(raw);
-}
-
 function clampInt(value, min, max) {
   const n = Number.isFinite(value) ? Math.trunc(value) : min;
   return Math.max(min, Math.min(max, n));
-}
-
-async function measureEventLoopLagMs() {
-  const started = Date.now();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  return Date.now() - started;
 }
 
 function readTimedCache(cache, key) {
@@ -922,6 +912,7 @@ function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
   const ext = g('ext') || 'fb2';
   const date = g('date');
   const lang = g('lang');
+  const libRate = g('libRate');
   const keywords = g('keywords');
   const folder = g('folder');
 
@@ -955,6 +946,7 @@ function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
     ext: ext || 'fb2',
     date: date || '',
     lang: lang || '',
+    libRate: Number(libRate || 0) || 0,
     keywords
   };
 }
@@ -1505,6 +1497,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   }
   if (!incremental) {
     dropBooksFtsTriggers();
+    dropBulkImportIndexes();
     if (sourceId) {
       db.transaction(() => {
         db.prepare('DELETE FROM book_details_cache WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(sourceId);
@@ -1524,6 +1517,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
         db.exec('DELETE FROM books');
       })();
     }
+    db.exec('VACUUM');
     await yieldEventLoop();
   }
 
@@ -1570,7 +1564,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   const selectSeries = db.prepare('SELECT id FROM series_catalog WHERE name = ?');
   const selectGenre = db.prepare('SELECT id FROM genres_catalog WHERE name = ?');
   const linkAuthor = db.prepare('INSERT OR IGNORE INTO book_authors(book_id, author_id) VALUES(?, ?)');
-  const linkSeries = db.prepare('INSERT OR REPLACE INTO book_series(book_id, series_id) VALUES(?, ?)');
+  const linkSeries = db.prepare('INSERT OR IGNORE INTO book_series(book_id, series_id, series_no) VALUES(?, ?, ?)');
   const linkGenre = db.prepare('INSERT OR IGNORE INTO book_genres(book_id, genre_id) VALUES(?, ?)');
   const unlinkAuthors = db.prepare('DELETE FROM book_authors WHERE book_id = ?');
   const unlinkSeries = db.prepare('DELETE FROM book_series WHERE book_id = ?');
@@ -1581,12 +1575,12 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
       id, title, authors, genres, series, series_no, title_sort, author_sort,
       series_sort, series_index, title_search, authors_search, series_search,
       genres_search, keywords_search, file_name, archive_name, size, lib_id, deleted,
-      ext, date, lang, keywords, source_id
+      ext, date, lang, keywords, lib_rate, source_id
     ) VALUES (
       @id, @title, @authors, @genres, @series, @seriesNo, @titleSort, @authorSort,
       @seriesSort, @seriesIndex, @titleSearch, @authorsSearch, @seriesSearch,
       @genresSearch, @keywordsSearch, @fileName, @archiveName, @size, @libId, @deleted,
-      @ext, @date, @lang, @keywords, @sourceId
+      @ext, @date, @lang, @keywords, @libRate, @sourceId
     )
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
@@ -1612,6 +1606,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
       date = excluded.date,
       lang = excluded.lang,
       keywords = excluded.keywords,
+      lib_rate = excluded.lib_rate,
       source_id = excluded.source_id,
       imported_at = CURRENT_TIMESTAMP
   `);
@@ -1619,27 +1614,10 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   const newSizes = incremental ? { ...previousSizes } : {};
   const archiveRoot = sourceId ? getSourceRoot(sourceId) : getLibraryRoot();
 
-  /** Без FTS-триггеров: одна db.transaction() = синхронный участок. С ростом таблицы books индексы
-   *  обновляются дольше — фиксированный чанк даёт «зависание на середине» на разных архивах. */
   function inpxImportChunkTarget() {
-    if (!ftsBulkMode) return 120;
-    const n = indexState.importedBooks;
-    if (n > 450_000) return 35;
-    if (n > 300_000) return 45;
-    if (n > 200_000) return 60;
-    if (n > 120_000) return 80;
-    if (n > 60_000) return 110;
-    return 150;
+    return 500;
   }
-  const adaptiveImportEnabled = isAdaptiveInpxImportEnabled();
-  let adaptiveChunkTarget = inpxImportChunkTarget();
-  let adaptiveYieldEveryNChunks = 1;
-  const minChunkTarget = 25;
-  const maxChunkTarget = 220;
-  let slowChunkStreak = 0;
-  let fastChunkStreak = 0;
-  let highLagStreak = 0;
-  let lowLagStreak = 0;
+  const importChunkSize = inpxImportChunkTarget();
   const DIARY_CHUNK_LOG_EVERY = 20;
   const authorIdCache = new Map();
   const seriesIdCache = new Map();
@@ -1672,17 +1650,23 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
     return id;
   }
 
+  const archiveSeenIds = new Set();
   const processChunk = db.transaction((batch, archiveName) => {
     for (const line of batch) {
       const row = enrichBookRow(parseLine(line, archiveName, sourceId, fieldMap));
       if (row && !row.deleted && !suppressedIds.has(row.id)) {
         row.sourceId = sourceId;
         insert.run(row);
-        // Always unlink before re-linking: duplicate book IDs across .inp files
-        // may change authors/series/genres — stale junction rows must be removed.
-        unlinkAuthors.run(row.id);
-        unlinkSeries.run(row.id);
-        unlinkGenres.run(row.id);
+        // Incremental: duplicate book IDs across .inp files may change authors/series/genres
+        // — stale junction rows must be removed before re-linking.
+        // Full reindex: junction tables were already cleared at start, skip 3 pointless
+        // DELETEs per book (~2M saved operations for large libraries).
+        if (incremental && !archiveSeenIds.has(row.id)) {
+          archiveSeenIds.add(row.id);
+          unlinkAuthors.run(row.id);
+          unlinkSeries.run(row.id);
+          unlinkGenres.run(row.id);
+        }
         for (const authorName of splitAuthorValues(row.authors)) {
           const authorId = resolveAuthorId(authorName);
           if (authorId) {
@@ -1693,7 +1677,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
         if (row.series) {
           const seriesId = resolveSeriesId(row.series);
           if (seriesId) {
-            linkSeries.run(row.id, seriesId);
+            linkSeries.run(row.id, seriesId, row.seriesNo || '');
           }
         }
 
@@ -1710,6 +1694,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   });
 
   for (let ei = 0; ei < entriesToProcess.length; ei++) {
+    archiveSeenIds.clear();
     await checkIndexControlPoint();
     const entry = entriesToProcess[ei];
     indexState.currentArchive = entry.path;
@@ -1817,30 +1802,6 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
           `[index] INPX: медленный чанк ${nextChunk} (${archiveName}): ${ms} ms — при большой библиотеке это нормально, не обрывайте процесс`
         );
       }
-      if (adaptiveImportEnabled) {
-        if (ms > 3500) {
-          slowChunkStreak += 1;
-          fastChunkStreak = 0;
-        } else if (ms < 1400) {
-          fastChunkStreak += 1;
-          slowChunkStreak = 0;
-        } else {
-          slowChunkStreak = 0;
-          fastChunkStreak = 0;
-        }
-
-        if (slowChunkStreak >= 2 && adaptiveChunkTarget > minChunkTarget) {
-          adaptiveChunkTarget = clampInt(Math.round(adaptiveChunkTarget * 0.82), minChunkTarget, maxChunkTarget);
-          slowChunkStreak = 0;
-          fastChunkStreak = 0;
-          console.log(`[index] adaptive INPX chunk down -> ${adaptiveChunkTarget} (chunk ${nextChunk}, ${ms}ms)`);
-        } else if (fastChunkStreak >= 3 && adaptiveChunkTarget < maxChunkTarget) {
-          adaptiveChunkTarget = clampInt(Math.round(adaptiveChunkTarget * 1.12), minChunkTarget, maxChunkTarget);
-          slowChunkStreak = 0;
-          fastChunkStreak = 0;
-          console.log(`[index] adaptive INPX chunk up -> ${adaptiveChunkTarget} (chunk ${nextChunk}, ${ms}ms)`);
-        }
-      }
       batch = [];
       chunkSeq = nextChunk;
     };
@@ -1866,18 +1827,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
         continue;
       }
       batch.push(line);
-      // Adaptive heap pressure: reduce batch size when memory is high
-      const heapInfo = process.memoryUsage();
-      const heapRatio = heapInfo.heapUsed / (heapInfo.heapTotal || 1);
-      if (heapRatio > HEAP_PRESSURE_THRESHOLD && adaptiveImportEnabled) {
-        const prev = adaptiveChunkTarget;
-        adaptiveChunkTarget = Math.max(minChunkTarget, Math.floor(adaptiveChunkTarget / 2));
-        if (adaptiveChunkTarget !== prev) {
-          console.warn(`[index] heap pressure ${(heapRatio * 100).toFixed(0)}%, reducing batch ${prev} -> ${adaptiveChunkTarget}`);
-        }
-      }
-      const targetChunkSize = adaptiveImportEnabled ? adaptiveChunkTarget : inpxImportChunkTarget();
-      if (batch.length >= targetChunkSize) {
+      if (batch.length >= importChunkSize) {
         flush();
         if (chunkSeq % UI_LINE_PROGRESS_EVERY === 0) {
           indexState.currentArchive = `${archiveName} … импорт ~${lineCount} строк (чанк ${chunkSeq}, архив ${ei + 1}/${entriesToProcess.length})`;
@@ -1885,33 +1835,8 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
         if (chunkSeq % 120 === 0) {
           console.log(`[index] INPX: ${archiveName} … ~${lineCount} строк (чанк импорта ${chunkSeq})`);
         }
-        if (adaptiveImportEnabled) {
-          const loopLagMs = await measureEventLoopLagMs();
-          if (loopLagMs > 130) {
-            highLagStreak += 1;
-            lowLagStreak = 0;
-          } else if (loopLagMs < 35) {
-            lowLagStreak += 1;
-            highLagStreak = 0;
-          } else {
-            highLagStreak = 0;
-            lowLagStreak = 0;
-          }
-
-          if (highLagStreak >= 2) {
-            adaptiveYieldEveryNChunks = clampInt(adaptiveYieldEveryNChunks + 1, 1, 3);
-            highLagStreak = 0;
-            lowLagStreak = 0;
-          } else if (lowLagStreak >= 3) {
-            adaptiveYieldEveryNChunks = clampInt(adaptiveYieldEveryNChunks - 1, 1, 3);
-            highLagStreak = 0;
-            lowLagStreak = 0;
-          }
-        }
-        if (chunkSeq % adaptiveYieldEveryNChunks === 0) {
-          await yieldEventLoop();
-          await checkIndexControlPoint();
-        }
+        await yieldEventLoop();
+        await checkIndexControlPoint();
       }
     }
     flush();
@@ -2015,30 +1940,53 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
       }
     }
     if (ftsBulkMode) {
+      ensureBulkImportIndexes();
       endFastSqliteImport();
     }
     endExclusiveOperation('indexing');
   }
 }
 
-function resolveSort(sort) {
+const SORT_NATURAL_DIR = {
+  recent: 'DESC',
+  title: 'ASC',
+  author: 'ASC',
+  series: 'ASC',
+  rating: 'DESC',
+  date: 'DESC',
+  count: 'DESC',
+  name: 'ASC'
+};
+
+function applyOrder(sql, order) {
+  if (order !== 'asc' && order !== 'desc') return sql;
+  const natural = sql.includes(' DESC') ? 'DESC' : 'ASC';
+  if (natural === order.toUpperCase()) return sql;
+  // Инвертируем первое вхождение ASC/DESC (основное поле сортировки)
+  return sql.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
+    .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
+}
+
+function resolveSort(sort, order = '') {
   const sortMap = {
     recent: 'COALESCE(NULLIF(date, \'\'), imported_at) DESC, imported_at DESC, id DESC',
     title: 'title_sort ASC, title COLLATE NOCASE ASC, id DESC',
     author: 'author_sort ASC, title_sort ASC, id DESC',
-    series: 'series_sort ASC, series_index ASC, title_sort ASC, id DESC'
+    series: 'series_sort ASC, series_index ASC, title_sort ASC, id DESC',
+    rating: 'lib_rate DESC, title_sort ASC, id DESC'
   };
-  return sortMap[sort] || sortMap.recent;
+  return applyOrder(sortMap[sort] || sortMap.title, order);
 }
 
-function resolveBookAliasSort(sort, alias = 'b') {
+function resolveBookAliasSort(sort, alias = 'b', order = '') {
   const sortMap = {
     recent: `COALESCE(NULLIF(${alias}.date, ''), ${alias}.imported_at) DESC, ${alias}.imported_at DESC, ${alias}.id DESC`,
     title: `${alias}.title_sort ASC, ${alias}.title COLLATE NOCASE ASC, ${alias}.id DESC`,
     author: `${alias}.author_sort ASC, ${alias}.title_sort ASC, ${alias}.id DESC`,
-    series: `${alias}.series_sort ASC, ${alias}.series_index ASC, ${alias}.title_sort ASC, ${alias}.id DESC`
+    series: `${alias}.series_sort ASC, ${alias}.series_index ASC, ${alias}.title_sort ASC, ${alias}.id DESC`,
+    rating: `${alias}.lib_rate DESC, ${alias}.title_sort ASC, ${alias}.id DESC`
   };
-  return sortMap[sort] || sortMap.recent;
+  return applyOrder(sortMap[sort] || sortMap.title, order);
 }
 
 function mapBookListRow(row) {
@@ -2054,6 +2002,33 @@ function mapBookListRow(row) {
     authorsList: splitAuthorValues(row.authors),
     downloadFormats
   };
+}
+
+function attachSeriesListsToBooks(books) {
+  if (!books || books.length === 0) return;
+  const placeholders = books.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT bs.book_id AS bookId, sc.name, COALESCE(sc.display_name, sc.name) AS displayName, bs.series_no AS seriesNo
+    FROM book_series bs
+    JOIN series_catalog sc ON sc.id = bs.series_id
+    WHERE bs.book_id IN (${placeholders})
+    ORDER BY sc.sort_name ASC
+  `).all(...books.map((b) => b.id));
+  const map = new Map();
+  for (const r of rows) {
+    if (!map.has(r.bookId)) map.set(r.bookId, []);
+    map.get(r.bookId).push({ name: r.name, displayName: r.displayName, seriesNo: r.seriesNo || '' });
+  }
+  for (const b of books) {
+    b.seriesList = map.get(b.id) || [];
+    if (b.series && !b.seriesList.some((s) => s.name === b.series)) {
+      b.seriesList.push({ name: b.series, displayName: b.series, seriesNo: b.seriesNo || '' });
+    }
+    if (!b.series && b.seriesList.length > 0) {
+      b.series = b.seriesList[0].name;
+      b.seriesNo = b.seriesList[0].seriesNo;
+    }
+  }
 }
 
 function matchesBookSearchField(book, field, query) {
@@ -2244,7 +2219,7 @@ function buildAuthorWhereForBooks(query) {
     )`;
     params.push(tokens[0]);
   } else {
-    const clauses = tokens.map(() => `(' ' || COALESCE(a2.sort_name, '') || ' ') LIKE ?`);
+    const clauses = tokens.map(() => `(' ' || COALESCE(a2.search_name, '') || ' ') LIKE ?`);
     where = `EXISTS (
       SELECT 1 FROM book_authors ba2
       JOIN authors a2 ON a2.id = ba2.author_id
@@ -2314,9 +2289,9 @@ function buildCatalogSearchSql(column, query, { startsWith = false } = {}) {
   };
 }
 
-export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all', sort = 'recent', genre = '', letter = '', lang = '', format = '', year = 0 }) {
+export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all', sort = 'title', order = '', genre = '', letter = '', lang = '', format = '', year = 0 }) {
   const offset = (page - 1) * pageSize;
-  const orderBy = resolveSort(sort);
+  const orderBy = resolveSort(sort, order);
   const genreFilter = buildGenreFilterSql(genre);
   const langFilter = buildLanguageFilterSql(lang);
   const formatFilter = buildFormatFilterSql(format);
@@ -2334,8 +2309,8 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
     const gfParams = whereParams;
     const listOrderBy =
       sort === 'recent'
-        ? 'COALESCE(s.flibusta_sidecar, 0) DESC, COALESCE(NULLIF(b.date, \'\'), b.imported_at) DESC, b.imported_at DESC, b.id DESC'
-        : resolveBookAliasSort(sort, 'b');
+        ? applyOrder('COALESCE(s.flibusta_sidecar, 0) DESC, COALESCE(NULLIF(b.date, \'\'), b.imported_at) DESC, b.imported_at DESC, b.id DESC', order)
+        : resolveBookAliasSort(sort, 'b', order);
 
     const total = db
       .prepare(
@@ -2351,7 +2326,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
     const items = db
       .prepare(
         `
-      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName
       FROM active_books b
       LEFT JOIN sources s ON s.id = b.source_id
       ${whereSql}
@@ -2362,6 +2337,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
       .all(...gfParams, pageSize, offset)
       .map(mapBookListRow);
 
+    attachSeriesListsToBooks(items);
     return { total, items };
   }
 
@@ -2432,7 +2408,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
       const rankedOrderBy = `${rankSQL} ASC, ${orderBy}`;
       const items = db.prepare(`
         SELECT id, title, authors, genres, series, series_no AS seriesNo, ext, lang,
-               archive_name AS archiveName
+               lib_rate AS libRate, archive_name AS archiveName
         FROM active_books
         WHERE ${combinedWhere}
         ORDER BY ${rankedOrderBy}
@@ -2449,7 +2425,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
       const REGEX_SCAN_LIMIT = 5000;
       const items = db.prepare(`
         SELECT id, title, authors, genres, series, series_no AS seriesNo, ext, lang,
-               archive_name AS archiveName, keywords,
+               lib_rate AS libRate, archive_name AS archiveName, keywords,
                title_search AS titleSearch,
                authors_search AS authorsSearch,
                series_search AS seriesSearch,
@@ -2463,6 +2439,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
         .map(mapBookListRow)
         .filter((book) => matchesBookSearchField(book, field, query));
 
+      attachSeriesListsToBooks(items);
       return { total: items.length, items: items.slice(offset, offset + pageSize) };
     }
   }
@@ -2476,12 +2453,12 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
 
   const columnMap = {
     all: '',
-    title: 'title',
-    authors: 'authors',
-    series: 'series',
-    genres: 'genres',
+    title: 'title_search',
+    authors: 'authors_search',
+    series: 'series_search',
+    genres: 'genres_search',
     languages: 'lang',
-    keywords: 'keywords'
+    keywords: 'keywords_search'
   };
 
   const prefix = columnMap[field] ? `${columnMap[field]}:` : '';
@@ -2516,10 +2493,11 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
     LIMIT ? OFFSET ?
   `).all(...ftsBaseParams, pageSize, offset).map(mapBookListRow);
 
+  attachSeriesListsToBooks(items);
   return { total, items };
 }
 
-export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'books', sort = 'recent', genre = '', letter = '', lang = '', format = '', year = 0 }) {
+export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'books', sort = 'title', order = '', genre = '', letter = '', lang = '', format = '', year = 0 }) {
   const bookFields = new Set(['books', 'title', 'book-authors', 'book-series', 'genres', 'keywords']);
   const normalizedField = ['books', 'authors', 'series', 'title', 'book-authors', 'book-series', 'genres', 'keywords'].includes(field) ? field : 'books';
   if (!String(query || '').trim() && !String(genre || '').trim() && !String(letter || '').trim() && !lang && !format && !year) {
@@ -2527,12 +2505,12 @@ export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'bo
   }
 
   if (normalizedField === 'authors') {
-    const result = listAuthors({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', letter });
+    const result = listAuthors({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', order, letter });
     return { ...result, field: normalizedField };
   }
 
   if (normalizedField === 'series') {
-    const result = listSeries({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', letter });
+    const result = listSeries({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', order, letter });
     return { ...result, field: normalizedField };
   }
 
@@ -2551,6 +2529,7 @@ export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'bo
     pageSize,
     field: bookFields.has(normalizedField) ? bookFieldMap[normalizedField] : 'all',
     sort,
+    order,
     genre,
     letter,
     lang,
@@ -2565,7 +2544,7 @@ export function getBookById(id) {
   _stmtGetBookById ??= db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.file_name AS fileName,
            b.archive_name AS archiveName, b.size, b.lib_id AS libId, b.ext, b.date, b.lang, b.keywords,
-           b.source_id AS sourceId, b.imported_at AS importedAt,
+           b.lib_rate AS libRate, b.source_id AS sourceId, b.imported_at AS importedAt,
            COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta
     FROM active_books b
     LEFT JOIN sources s ON s.id = b.source_id
@@ -2574,7 +2553,9 @@ export function getBookById(id) {
   const row = _stmtGetBookById.get(id);
   if (!row) return null;
   const sourceFlibusta = effectiveSourceFlibustaForBook(row);
-  return mapBookListRow({ ...row, sourceFlibusta });
+  const book = mapBookListRow({ ...row, sourceFlibusta });
+  attachSeriesListsToBooks([book]);
+  return book;
 }
 
 /**
@@ -2587,17 +2568,21 @@ export function getBooksByIds(ids) {
   const rows = db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.file_name AS fileName,
            b.archive_name AS archiveName, b.size, b.lib_id AS libId, b.ext, b.date, b.lang, b.keywords,
-           b.source_id AS sourceId, b.imported_at AS importedAt,
+           b.lib_rate AS libRate, b.source_id AS sourceId, b.imported_at AS importedAt,
            COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta
     FROM active_books b
     LEFT JOIN sources s ON s.id = b.source_id
     WHERE b.id IN (${placeholders})
   `).all(...ids);
+  const books = [];
   const result = new Map();
   for (const row of rows) {
     const sourceFlibusta = effectiveSourceFlibustaForBook(row);
-    result.set(row.id, mapBookListRow({ ...row, sourceFlibusta }));
+    const book = mapBookListRow({ ...row, sourceFlibusta });
+    books.push(book);
+    result.set(row.id, book);
   }
+  attachSeriesListsToBooks(books);
   return result;
 }
 
@@ -2680,7 +2665,7 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo })
       `).run(seriesNorm, displayName, sortName, searchName);
       const seriesRow = db.prepare('SELECT id FROM series_catalog WHERE name = ?').get(seriesNorm);
       if (seriesRow) {
-        db.prepare('INSERT OR REPLACE INTO book_series(book_id, series_id) VALUES(?, ?)').run(String(bookId), seriesRow.id);
+        db.prepare('INSERT OR IGNORE INTO book_series(book_id, series_id, series_no) VALUES(?, ?, ?)').run(String(bookId), seriesRow.id, seriesNoNorm);
       }
     }
 
@@ -2702,6 +2687,7 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo })
   });
 
   doUpdate();
+  refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after updateBookMetadata:', err));
   return true;
 }
 
@@ -2763,6 +2749,7 @@ export function softDeleteBook(bookId) {
   if (!book) return 0;
   db.prepare('UPDATE books SET deleted = 1 WHERE id = ?').run(String(bookId));
   suppressBook(bookId, book.title || '', book.authors || '', 'user');
+  refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after softDeleteBook:', err));
   return 1;
 }
 
@@ -2827,6 +2814,7 @@ export function autoCleanDuplicates() {
     }
   });
   doClean();
+  refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after autoCleanDuplicates:', err));
   return { groupsCleaned: groups.length, totalDeleted };
 }
 
@@ -2871,7 +2859,7 @@ export function getStats() {
   return _stmtGetStats.get();
 }
 
-export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'count', startsWith = false, letter = '' }) {
+export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', startsWith = false, letter = '' }) {
   const offset = (page - 1) * pageSize;
   const parsed = parseSearchOperator(query);
   const needleKey = createSortKey(parsed.value || query);
@@ -2880,8 +2868,8 @@ export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'count
 
   if (!needleTokens.length) {
     const orderBy = sort === 'name'
-      ? 'COALESCE(a.sort_name, LOWER(a.name)) ASC'
-      : 'a.book_count DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC';
+      ? applyOrder('COALESCE(a.sort_name, LOWER(a.name)) ASC', order)
+      : applyOrder('a.book_count DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC', order);
     const whereParts = ['a.book_count > 0'];
     const whereParams = [];
     if (letterNorm) {
@@ -2931,10 +2919,10 @@ export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'count
     }
   } else {
     if (parsed.operator === '=') {
-      whereSQL = `COALESCE(a.sort_name, '') = ?`;
+      whereSQL = `COALESCE(a.search_name, '') = ?`;
       whereParams.push(needleKey);
     } else {
-      const clauses = needleTokens.map(() => `(' ' || COALESCE(a.sort_name, '') || ' ') LIKE ?`);
+      const clauses = needleTokens.map(() => `(' ' || COALESCE(a.search_name, '') || ' ') LIKE ?`);
       whereSQL = clauses.join(' AND ');
       for (const token of needleTokens) {
         whereParams.push(`% ${token}%`);
@@ -2958,8 +2946,8 @@ export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'count
   `).get(...whereParams).count;
 
   const orderBy = sort === 'name'
-    ? `${rankSQL} ASC, COALESCE(a.sort_name, LOWER(a.name)) ASC`
-    : `${rankSQL} ASC, a.book_count DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC`;
+    ? applyOrder(`${rankSQL} ASC, COALESCE(a.sort_name, LOWER(a.name)) ASC`, order)
+    : applyOrder(`${rankSQL} ASC, a.book_count DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC`, order);
 
   const items = db.prepare(`
     SELECT a.name AS name,
@@ -2975,7 +2963,7 @@ export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'count
   return { total, items };
 }
 
-export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'count', letter = '' }) {
+export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', letter = '' }) {
   const offset = (page - 1) * pageSize;
   const parsed = parseSearchOperator(query);
   const needleKey = createSortKey(parsed.value || query);
@@ -2985,8 +2973,8 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'count'
 
   if (!hasQuery) {
     const orderBy = sort === 'name'
-      ? 'COALESCE(s.sort_name, LOWER(s.name)) ASC'
-      : 's.book_count DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC';
+      ? applyOrder('COALESCE(s.sort_name, LOWER(s.name)) ASC', order)
+      : applyOrder('s.book_count DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC', order);
     const whereParts = ['s.book_count > 0'];
     const whereParams = [];
     if (letterNorm) {
@@ -3028,7 +3016,7 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'count'
     authorRankSQL = `(SELECT MIN(CASE WHEN ${snExpr} = ? THEN 1 WHEN ${snExpr} LIKE ? THEN 2 ELSE 5 END) FROM book_series bs2 JOIN active_books b2 ON b2.id = bs2.book_id JOIN book_authors ba2 ON ba2.book_id = b2.id JOIN authors a2 ON a2.id = ba2.author_id WHERE bs2.series_id = s.id)`;
     authorRankParams.push(authorTokens[0], `${authorTokens[0]}%`);
   } else {
-    const aClauses = authorTokens.map(() => `(' ' || COALESCE(a2.sort_name, '') || ' ') LIKE ?`);
+    const aClauses = authorTokens.map(() => `(' ' || COALESCE(a2.search_name, '') || ' ') LIKE ?`);
     authorWhere = `EXISTS (
       SELECT 1 FROM book_series bs2
       JOIN active_books b2 ON b2.id = bs2.book_id
@@ -3077,8 +3065,8 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'count'
   }
 
   const orderBy = sort === 'name'
-    ? `${rankSQL} ASC, COALESCE(s.sort_name, LOWER(s.name)) ASC`
-    : `${rankSQL} ASC, s.book_count DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC`;
+    ? applyOrder(`${rankSQL} ASC, COALESCE(s.sort_name, LOWER(s.name)) ASC`, order)
+    : applyOrder(`${rankSQL} ASC, s.book_count DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC`, order);
 
   const items = db.prepare(`
     SELECT s.name AS name,
@@ -3106,13 +3094,13 @@ export function listGenresGrouped() {
   return _stmtGenresGrouped.all();
 }
 
-export function listGenres({ page = 1, pageSize = 50, query = '', sort = 'count', letter = '' }) {
+export function listGenres({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', letter = '' }) {
   const offset = (page - 1) * pageSize;
   const searchSql = buildCatalogSearchSql('g.search_name', query);
   const letterNorm = String(letter || '').trim().toLowerCase();
   const orderBy = sort === 'name'
-    ? 'COALESCE(g.sort_name, LOWER(g.name)) ASC'
-    : 'g.book_count DESC, COALESCE(g.sort_name, LOWER(g.name)) ASC';
+    ? applyOrder('COALESCE(g.sort_name, LOWER(g.name)) ASC', order)
+    : applyOrder('g.book_count DESC, COALESCE(g.sort_name, LOWER(g.name)) ASC', order);
 
   const whereParts = ['g.book_count > 0'];
   const whereParams = [];
@@ -3143,13 +3131,13 @@ export function listGenres({ page = 1, pageSize = 50, query = '', sort = 'count'
  * Authors that have at least one book in the given genre, paginated.
  * Used by /facet/genres/:value?view=authors so big genres don't dump 27k books in one flat list.
  */
-export function listAuthorsByGenre({ genre, page = 1, pageSize = 50, sort = 'count' }) {
+export function listAuthorsByGenre({ genre, page = 1, pageSize = 50, sort = 'name', order = '' }) {
   const value = String(genre || '').trim();
   if (!value) return { total: 0, items: [] };
   const offset = (page - 1) * pageSize;
   const orderBy = sort === 'name'
-    ? 'COALESCE(a.sort_name, LOWER(a.name)) ASC'
-    : 'bookCount DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC';
+    ? applyOrder('COALESCE(a.sort_name, LOWER(a.name)) ASC', order)
+    : applyOrder('bookCount DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC', order);
 
   const total = db.prepare(`
     SELECT COUNT(DISTINCT a.id) AS count
@@ -3183,13 +3171,13 @@ export function listAuthorsByGenre({ genre, page = 1, pageSize = 50, sort = 'cou
  * Series that have at least one book in the given genre, paginated.
  * Used by /facet/genres/:value?view=series.
  */
-export function listSeriesByGenre({ genre, page = 1, pageSize = 50, sort = 'count' }) {
+export function listSeriesByGenre({ genre, page = 1, pageSize = 50, sort = 'name', order = '' }) {
   const value = String(genre || '').trim();
   if (!value) return { total: 0, items: [] };
   const offset = (page - 1) * pageSize;
   const orderBy = sort === 'name'
-    ? 'COALESCE(s.sort_name, LOWER(s.name)) ASC'
-    : 'bookCount DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC';
+    ? applyOrder('COALESCE(s.sort_name, LOWER(s.name)) ASC', order)
+    : applyOrder('bookCount DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC', order);
 
   const total = db.prepare(`
     SELECT COUNT(DISTINCT s.id) AS count
@@ -3219,7 +3207,77 @@ export function listSeriesByGenre({ genre, page = 1, pageSize = 50, sort = 'coun
   return { total, items };
 }
 
-export function listLanguages({ page = 1, pageSize = 50, query = '', sort = 'count' }) {
+/**
+ * Authors that have at least one book in the given language, paginated.
+ */
+export function listAuthorsByLanguage({ lang, page = 1, pageSize = 50, sort = 'name', order = '' }) {
+  const value = String(lang || '').trim();
+  if (!value) return { total: 0, items: [] };
+  const offset = (page - 1) * pageSize;
+  const orderBy = sort === 'name'
+    ? applyOrder('COALESCE(a.sort_name, LOWER(a.name)) ASC', order)
+    : applyOrder('bookCount DESC, COALESCE(a.sort_name, LOWER(a.name)) ASC', order);
+
+  const total = db.prepare(`
+    SELECT COUNT(DISTINCT a.id) AS count
+    FROM active_books b
+    JOIN book_authors ba ON ba.book_id = b.id
+    JOIN authors a ON a.id = ba.author_id
+    WHERE b.lang = ?
+  `).get(value).count;
+
+  const items = db.prepare(`
+    SELECT a.name AS name,
+           COALESCE(a.display_name, a.name) AS displayName,
+           COUNT(DISTINCT b.id) AS bookCount
+    FROM active_books b
+    JOIN book_authors ba ON ba.book_id = b.id
+    JOIN authors a ON a.id = ba.author_id
+    WHERE b.lang = ?
+    GROUP BY a.id, a.name, a.display_name, a.sort_name
+    ORDER BY ${orderBy}
+    LIMIT ? OFFSET ?
+  `).all(value, pageSize, offset);
+
+  return { total, items };
+}
+
+/**
+ * Series that have at least one book in the given language, paginated.
+ */
+export function listSeriesByLanguage({ lang, page = 1, pageSize = 50, sort = 'name', order = '' }) {
+  const value = String(lang || '').trim();
+  if (!value) return { total: 0, items: [] };
+  const offset = (page - 1) * pageSize;
+  const orderBy = sort === 'name'
+    ? applyOrder('COALESCE(s.sort_name, LOWER(s.name)) ASC', order)
+    : applyOrder('bookCount DESC, COALESCE(s.sort_name, LOWER(s.name)) ASC', order);
+
+  const total = db.prepare(`
+    SELECT COUNT(DISTINCT s.id) AS count
+    FROM active_books b
+    JOIN book_series bs ON bs.book_id = b.id
+    JOIN series_catalog s ON s.id = bs.series_id
+    WHERE b.lang = ?
+  `).get(value).count;
+
+  const items = db.prepare(`
+    SELECT s.name AS name,
+           COALESCE(s.display_name, s.name) AS displayName,
+           COUNT(DISTINCT b.id) AS bookCount
+    FROM active_books b
+    JOIN book_series bs ON bs.book_id = b.id
+    JOIN series_catalog s ON s.id = bs.series_id
+    WHERE b.lang = ?
+    GROUP BY s.id, s.name, s.display_name, s.sort_name
+    ORDER BY ${orderBy}
+    LIMIT ? OFFSET ?
+  `).all(value, pageSize, offset);
+
+  return { total, items };
+}
+
+export function listLanguages({ page = 1, pageSize = 50, query = '', sort = 'name', order = '' }) {
   const offset = (page - 1) * pageSize;
   const normalizedQuery = normalizeText(query).toLowerCase();
   const pattern = normalizedQuery ? `%${normalizedQuery}%` : null;
@@ -3227,8 +3285,8 @@ export function listLanguages({ page = 1, pageSize = 50, query = '', sort = 'cou
     ? `HAVING LOWER(name) LIKE ? OR LOWER(displayName) LIKE ?`
     : '';
   const orderBy = sort === 'name'
-    ? 'displayName ASC'
-    : 'bookCount DESC, displayName ASC';
+    ? applyOrder('displayName ASC', order)
+    : applyOrder('bookCount DESC, displayName ASC', order);
 
   const groupedSql = `
     SELECT CASE WHEN NULLIF(lang, '') IS NULL THEN 'unknown' ELSE lang END AS name,
@@ -3256,8 +3314,8 @@ export function listLanguages({ page = 1, pageSize = 50, query = '', sort = 'cou
 /* ── Pre-cached prepared statements for getBooksByFacet (finite set: 4 facets × 4 sorts) ── */
 const _facetStmtCache = new Map();
 
-function _getFacetStmts(facet, sort) {
-  const key = `${facet}|${sort}`;
+function _getFacetStmts(facet, sort, order = '') {
+  const key = `${facet}|${sort}|${order}`;
   let entry = _facetStmtCache.get(key);
   if (entry) return entry;
 
@@ -3269,10 +3327,10 @@ function _getFacetStmts(facet, sort) {
     languages: `SELECT COUNT(*) AS count FROM active_books b WHERE COALESCE(NULLIF(b.lang, ''), 'unknown') = ?`
   };
   const itemsSql = {
-    authors: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName FROM book_authors ba JOIN authors a ON a.id = ba.author_id JOIN active_books b ON b.id = ba.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE a.name = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b')} LIMIT ? OFFSET ?`,
-    series: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName FROM book_series bs JOIN series_catalog sc ON sc.id = bs.series_id JOIN active_books b ON b.id = bs.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE sc.name = ? ORDER BY ${sort === 'recent' ? 'b.series_index ASC, b.title_sort ASC, b.id DESC' : resolveBookAliasSort(sort, 'b')} LIMIT ? OFFSET ?`,
-    genres: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName FROM book_genres bg JOIN genres_catalog g ON g.id = bg.genre_id JOIN active_books b ON b.id = bg.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE g.name = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b')} LIMIT ? OFFSET ?`,
-    languages: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName FROM active_books b LEFT JOIN sources s ON s.id = b.source_id WHERE COALESCE(NULLIF(b.lang, ''), 'unknown') = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b')} LIMIT ? OFFSET ?`
+    authors: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_authors ba JOIN authors a ON a.id = ba.author_id JOIN active_books b ON b.id = ba.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE a.name = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b', order)} LIMIT ? OFFSET ?`,
+    series: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_series bs JOIN series_catalog sc ON sc.id = bs.series_id JOIN active_books b ON b.id = bs.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE sc.name = ? ORDER BY ${sort === 'recent' ? 'b.series_index ASC, b.title_sort ASC, b.id DESC' : resolveBookAliasSort(sort, 'b', order)} LIMIT ? OFFSET ?`,
+    genres: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_genres bg JOIN genres_catalog g ON g.id = bg.genre_id JOIN active_books b ON b.id = bg.book_id LEFT JOIN sources s ON s.id = b.source_id WHERE g.name = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b', order)} LIMIT ? OFFSET ?`,
+    languages: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM active_books b LEFT JOIN sources s ON s.id = b.source_id WHERE COALESCE(NULLIF(b.lang, ''), 'unknown') = ? ORDER BY ${sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b', order)} LIMIT ? OFFSET ?`
   };
   entry = {
     total: db.prepare(totalSql[facet]),
@@ -3282,16 +3340,16 @@ function _getFacetStmts(facet, sort) {
   return entry;
 }
 
-export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 'recent' }) {
+export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 'title', order = '' }) {
   if (facet === 'series') {
     value = resolveSeriesCatalogName(String(value || ''));
   }
-  const cacheKey = `${facet}|${value}|${sort}|${page}|${pageSize}`;
+  const cacheKey = `${facet}|${value}|${sort}|${order}|${page}|${pageSize}`;
   const cached = readTimedCache(facetBooksCache, cacheKey);
   if (cached) return cached;
   const offset = (page - 1) * pageSize;
 
-  const stmts = _getFacetStmts(facet, sort);
+  const stmts = _getFacetStmts(facet, sort, order);
   if (!stmts.total) return { total: 0, items: [] };
 
   const totalKey = `${facet}|${value}`;
@@ -3302,6 +3360,7 @@ export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 
   }
 
   const items = stmts.items.all(value, pageSize, offset).map(mapBookListRow);
+  attachSeriesListsToBooks(items);
   const result = { total, items };
   writeTimedCache(facetBooksCache, cacheKey, result, FACET_CACHE_TTL_MS, 120);
   return result;
@@ -3310,12 +3369,12 @@ export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 
 /**
  * Параллельные HTTP-запросы к одной странице фасета (двойной клик, префетч) — один тяжёлый запрос к SQLite.
  */
-export async function getBooksByFacetCoalesced({ facet, value, page = 1, pageSize = 24, sort = 'recent' }) {
+export async function getBooksByFacetCoalesced({ facet, value, page = 1, pageSize = 24, sort = 'title', order = '' }) {
   let v = value;
   if (facet === 'series') {
     v = resolveSeriesCatalogName(String(value || ''));
   }
-  const cacheKey = `${facet}|${v}|${sort}|${page}|${pageSize}`;
+  const cacheKey = `${facet}|${v}|${sort}|${order}|${page}|${pageSize}`;
   const cached = readTimedCache(facetBooksCache, cacheKey);
   if (cached) return cached;
   let shared = facetBooksInflight.get(cacheKey);
@@ -3323,7 +3382,7 @@ export async function getBooksByFacetCoalesced({ facet, value, page = 1, pageSiz
     shared = new Promise((resolve, reject) => {
       setImmediate(() => {
         try {
-          resolve(getBooksByFacet({ facet, value: v, page, pageSize, sort }));
+          resolve(getBooksByFacet({ facet, value: v, page, pageSize, sort, order }));
         } catch (err) {
           reject(err);
         } finally {
@@ -3356,32 +3415,33 @@ function mapAuthorPageBookRow(row) {
   return book;
 }
 
-function applyAuthorPageBookSort(books, sort) {
+function applyAuthorPageBookSort(books, sort, order = '') {
   const arr = [...books];
-  if (sort === 'title') {
-    arr.sort((a, b) =>
-      String(a.title).localeCompare(String(b.title), undefined, { sensitivity: 'base', numeric: true })
-    );
+  const desc = order === 'desc';
+  if (sort === 'title' || sort === 'author') {
+    arr.sort((a, b) => {
+      const cmp = String(a.title).localeCompare(String(b.title), undefined, { sensitivity: 'base', numeric: true });
+      return desc ? -cmp : cmp;
+    });
   } else if (sort === 'series') {
     arr.sort((a, b) => {
       const sa = String(a.series || '');
       const sb = String(b.series || '');
-      if (sa !== sb) return sa.localeCompare(sb);
+      if (sa !== sb) {
+        const cmp = sa.localeCompare(sb);
+        return desc ? -cmp : cmp;
+      }
       const na = parseFloat(String(a.seriesNo || '').replace(/[^\d.]/g, '')) || 0;
       const nb = parseFloat(String(b.seriesNo || '').replace(/[^\d.]/g, '')) || 0;
-      return (
-        na - nb || String(a.title).localeCompare(String(b.title), undefined, { numeric: true })
-      );
+      const cmp = na - nb || String(a.title).localeCompare(String(b.title), undefined, { numeric: true });
+      return desc ? -cmp : cmp;
     });
-  } else if (sort === 'author') {
-    arr.sort((a, b) =>
-      String(a.title).localeCompare(String(b.title), undefined, { sensitivity: 'base', numeric: true })
-    );
   } else {
     arr.sort((a, b) => {
       const da = Date.parse(String(a._sortDate || '')) || 0;
       const db = Date.parse(String(b._sortDate || '')) || 0;
-      return db - da || Number(b.id) - Number(a.id);
+      const cmp = db - da || Number(b.id) - Number(a.id);
+      return desc ? -cmp : cmp;
     });
   }
   return arr;
@@ -3423,10 +3483,10 @@ function orderAuthorSeriesGroups(series, sort) {
 }
 
 /** Книги автора: серии (по порядку каталога) и книги вне серий. */
-export function getAuthorBooksGrouped(authorName, sort = 'recent', { page = 1, pageSize = 48 } = {}) {
+export function getAuthorBooksGrouped(authorName, sort = 'title', order = '', { page = 1, pageSize = 48 } = {}) {
   void page;
   void pageSize;
-  const cacheKey = `${authorName}|${sort}`;
+  const cacheKey = `${authorName}|${sort}|${order}`;
   const cached = readTimedCache(authorGroupedCache, cacheKey);
   if (cached) return cached;
   const authorBooksFrom = `
@@ -3453,7 +3513,7 @@ export function getAuthorBooksGrouped(authorName, sort = 'recent', { page = 1, p
 
   const rows = db.prepare(`
     SELECT
-      b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName,
+      b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName,
       s.name AS seriesCatalogName,
       COALESCE(s.display_name, s.name) AS seriesDisplayName,
       b.series_index AS seriesIndex,
@@ -3528,7 +3588,8 @@ export function getAuthorBooksGrouped(authorName, sort = 'recent', { page = 1, p
     displayName,
     bookCount: books.length }));
 
-  const standaloneBooks = applyAuthorPageBookSort(standalone, sort).map(stripAuthorPageBookMeta);
+  attachSeriesListsToBooks(standalone);
+  const standaloneBooks = applyAuthorPageBookSort(standalone, sort, order).map(stripAuthorPageBookMeta);
   const result = { series: seriesSummaries, standaloneBooks, total: totalBooks };
   writeTimedCache(authorGroupedCache, cacheKey, result, AUTHOR_GROUPED_CACHE_TTL_MS, 20);
   return result;
@@ -3537,10 +3598,10 @@ export function getAuthorBooksGrouped(authorName, sort = 'recent', { page = 1, p
 /**
  * То же, что getAuthorBooksGrouped, но параллельные запросы с тем же ключом ждут один расчёт.
  */
-export async function getAuthorBooksGroupedCoalesced(authorName, sort = 'recent', { page = 1, pageSize = 48 } = {}) {
+export async function getAuthorBooksGroupedCoalesced(authorName, sort = 'title', order = '', { page = 1, pageSize = 48 } = {}) {
   void page;
   void pageSize;
-  const cacheKey = `${authorName}|${sort}`;
+  const cacheKey = `${authorName}|${sort}|${order}`;
   const cached = readTimedCache(authorGroupedCache, cacheKey);
   if (cached) return cached;
   let shared = authorGroupedInflight.get(cacheKey);
@@ -3548,7 +3609,7 @@ export async function getAuthorBooksGroupedCoalesced(authorName, sort = 'recent'
     shared = new Promise((resolve, reject) => {
       setImmediate(() => {
         try {
-          resolve(getAuthorBooksGrouped(authorName, sort, { page, pageSize }));
+          resolve(getAuthorBooksGrouped(authorName, sort, order, { page, pageSize }));
         } catch (err) {
           reject(err);
         } finally {
@@ -3779,7 +3840,7 @@ let _stmtLibSections = null;
 export function getLibrarySections() {
   const POOL_SIZE = 200;
   _stmtLibSections ??= db.prepare(`
-    SELECT id, title, authors, genres, series, series_no AS seriesNo, ext, lang, archive_name AS archiveName
+    SELECT id, title, authors, genres, series, series_no AS seriesNo, ext, lang, lib_rate AS libRate, archive_name AS archiveName
     FROM active_books
     ORDER BY COALESCE(NULLIF(date, ''), imported_at) DESC, imported_at DESC, id DESC
     LIMIT ?
@@ -3811,7 +3872,7 @@ let _stmtReadSeriesCount = null;
 let _stmtReadSeriesItems = null;
 let _stmtReadViewCount = null;
 let _stmtReadViewItems = null;
-export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, username = '', type = '' } = {}) {
+export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, username = '', type = '', sort = 'title', order = '' } = {}) {
   const offset = (page - 1) * pageSize;
 
   if (view === 'continue') {
@@ -3828,8 +3889,11 @@ export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, usern
     `);
     const total = _stmtContinueCount.get(normalizedUsername).count;
 
-    _stmtContinueItems ??= db.prepare(`
-      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName,
+    const orderBy = sort === 'rating'
+      ? applyOrder('b.lib_rate DESC, b.title_sort ASC, b.id DESC', order)
+      : applyOrder('rh.last_opened_at DESC, rh.open_count DESC, b.id DESC', order);
+    const items = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName,
              COALESCE(rp.progress, 0) AS readProgress
       FROM (
         SELECT rh.book_id, MAX(rh.last_opened_at) AS last_opened_at, SUM(COALESCE(rh.open_count, 0)) AS open_count
@@ -3839,11 +3903,10 @@ export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, usern
       ) rh
       JOIN active_books b ON b.id = rh.book_id
       LEFT JOIN reading_positions rp ON rp.book_id = b.id AND rp.username = ?
-      ORDER BY rh.last_opened_at DESC, rh.open_count DESC, b.id DESC
+      ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
-    `);
-    const items = _stmtContinueItems.all(normalizedUsername, normalizedUsername, pageSize, offset).map(mapBookListRow);
-
+    `).all(normalizedUsername, normalizedUsername, pageSize, offset).map(mapBookListRow);
+    attachSeriesListsToBooks(items);
     return { total, items };
   }
 
@@ -3889,21 +3952,22 @@ export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, usern
     `);
     const total = _stmtReadViewCount.get(normalizedUsername).count;
 
-    _stmtReadViewItems ??= db.prepare(`
-      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.archive_name AS archiveName
+    const orderBy = sort === 'rating'
+      ? applyOrder('b.lib_rate DESC, b.title_sort ASC, b.id DESC', order)
+      : applyOrder('rb.created_at DESC', order);
+    const items = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName
       FROM read_books rb
       JOIN active_books b ON b.id = rb.book_id
       WHERE rb.username = ?
-      ORDER BY rb.created_at DESC
+      ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
-    `);
-    const items = _stmtReadViewItems.all(normalizedUsername, pageSize, offset).map(mapBookListRow);
-
+    `).all(normalizedUsername, pageSize, offset).map(mapBookListRow);
+    attachSeriesListsToBooks(items);
     return { total, items };
   }
 
-  const sort = 'recent';
-  return searchBooks({ query: '', page, pageSize, field: 'all', sort });
+  return searchBooks({ query: '', page, pageSize, field: 'all', sort, order });
 }
 
 export function opdsQuery(facet, prefix = '', depth = 0, genre = '') {
@@ -3920,30 +3984,36 @@ export function opdsQuery(facet, prefix = '', depth = 0, genre = '') {
   const conf = tableMap[facet];
   if (!conf) return [];
 
-  const effectiveDepth = depth || (prefix.length + 1);
+  const prefixKey = prefix ? createSortKey(prefix) : '';
+  const effectiveDepth = depth || (prefixKey.length + 1);
 
+  const prefixCond = prefixKey ? `AND c.search_name LIKE ? || '%'` : '';
   let sql, params;
   if (genre) {
-    sql = `SELECT LOWER(SUBSTR(c.${conf.nameCol}, 1, ?)) AS prefix_val, COUNT(DISTINCT c.id) AS cnt
+    sql = `SELECT SUBSTR(c.search_name, 1, ?) AS prefix_val, COUNT(DISTINCT c.id) AS cnt
            FROM ${conf.table} c
            JOIN ${conf.join} j ON j.${conf.joinCol} = c.id
            JOIN active_books b ON b.id = j.book_id
            JOIN book_genres bg ON bg.book_id = b.id
            JOIN genres_catalog gc ON gc.id = bg.genre_id AND gc.name IN (${genre.split(',').map(() => '?').join(',')})
-           WHERE LOWER(SUBSTR(c.${conf.nameCol}, 1, ?)) >= ?
+           WHERE 1=1 ${prefixCond}
            GROUP BY prefix_val
            ORDER BY prefix_val`;
     const genreParams = genre.split(',').map(g => g.trim());
-    params = [effectiveDepth, ...genreParams, effectiveDepth, prefix.toLowerCase()];
+    params = prefixKey
+      ? [effectiveDepth, ...genreParams, prefixKey]
+      : [effectiveDepth, ...genreParams];
   } else {
-    sql = `SELECT LOWER(SUBSTR(c.${conf.nameCol}, 1, ?)) AS prefix_val, COUNT(DISTINCT c.id) AS cnt
+    sql = `SELECT SUBSTR(c.search_name, 1, ?) AS prefix_val, COUNT(DISTINCT c.id) AS cnt
            FROM ${conf.table} c
            JOIN ${conf.join} j ON j.${conf.joinCol} = c.id
            JOIN active_books b ON b.id = j.book_id
-           WHERE LOWER(SUBSTR(c.${conf.nameCol}, 1, ?)) >= ?
+           WHERE 1=1 ${prefixCond}
            GROUP BY prefix_val
            ORDER BY prefix_val`;
-    params = [effectiveDepth, effectiveDepth, prefix.toLowerCase()];
+    params = prefixKey
+      ? [effectiveDepth, prefixKey]
+      : [effectiveDepth];
   }
 
   const rows = db.prepare(sql).all(...params);
@@ -3951,37 +4021,72 @@ export function opdsQuery(facet, prefix = '', depth = 0, genre = '') {
   for (const r of rows) totalCount += r.cnt;
 
   if (totalCount <= 50) {
-    return opdsSearchFacet(facet, prefix, genre);
+    return opdsSearchFacet(facet, prefixKey, genre);
   }
 
-  return rows.map(r => ({
+  // Auto-deepen if too few prefixes (like inpx-web recursive depth)
+  if (prefixKey && rows.length < 10 && effectiveDepth < 6) {
+    return opdsQuery(facet, prefix, effectiveDepth + 1, genre);
+  }
+
+  return sortOpdsPrefixRows(rows).map(r => ({
     id: r.prefix_val,
-    title: r.prefix_val.toUpperCase().replace(/ /g, '·') + '~',
+    title: r.prefix_val.toUpperCase().replace(/ /g, '·'),
     prefix: r.prefix_val,
     count: r.cnt,
     isNav: true
   }));
 }
 
-function opdsTitleQuery(prefix = '', depth = 0, genre = '') {
-  const effectiveDepth = depth || (prefix.length + 1);
+function isCyrillicChar(c) {
+  const cp = c.codePointAt(0);
+  return (cp >= 0x0400 && cp <= 0x04FF) || (cp >= 0x0500 && cp <= 0x052F);
+}
 
+function isLatinChar(c) {
+  const cp = c.codePointAt(0);
+  return (cp >= 0x0041 && cp <= 0x005A) || (cp >= 0x0061 && cp <= 0x007A);
+}
+
+function sortOpdsPrefixRows(rows) {
+  return rows.slice().sort((a, b) => {
+    const ca = a.prefix_val.charAt(0);
+    const cb = b.prefix_val.charAt(0);
+    const cyrA = isCyrillicChar(ca);
+    const cyrB = isCyrillicChar(cb);
+    if (cyrA !== cyrB) return cyrA ? -1 : 1;
+    const latA = !cyrA && isLatinChar(ca);
+    const latB = !cyrB && isLatinChar(cb);
+    if (latA !== latB) return latA ? -1 : 1;
+    return a.prefix_val.localeCompare(b.prefix_val, 'ru');
+  });
+}
+
+function opdsTitleQuery(prefix = '', depth = 0, genre = '') {
+  const prefixKey = prefix ? createSortKey(prefix) : '';
+  const effectiveDepth = depth || (prefixKey.length + 1);
+
+  const prefixCond = prefixKey ? `AND b.title_search LIKE ? || '%'` : '';
   let sql, params;
   if (genre) {
-    sql = `SELECT LOWER(SUBSTR(b.title, 1, ?)) AS prefix_val, COUNT(*) AS cnt
+    sql = `SELECT SUBSTR(b.title_search, 1, ?) AS prefix_val, COUNT(*) AS cnt
            FROM active_books b
            JOIN book_genres bg ON bg.book_id = b.id
            JOIN genres_catalog gc ON gc.id = bg.genre_id AND gc.name IN (${genre.split(',').map(() => '?').join(',')})
-           WHERE LOWER(SUBSTR(b.title, 1, ?)) >= ?
+           WHERE 1=1 ${prefixCond}
            GROUP BY prefix_val ORDER BY prefix_val`;
     const genreParams = genre.split(',').map(g => g.trim());
-    params = [effectiveDepth, ...genreParams, effectiveDepth, prefix.toLowerCase()];
+    params = prefixKey
+      ? [effectiveDepth, ...genreParams, prefixKey]
+      : [effectiveDepth, ...genreParams];
   } else {
-    sql = `SELECT LOWER(SUBSTR(b.title, 1, ?)) AS prefix_val, COUNT(*) AS cnt
+    sql = `SELECT SUBSTR(b.title_search, 1, ?) AS prefix_val, COUNT(*) AS cnt
            FROM active_books b
-           WHERE LOWER(SUBSTR(b.title, 1, ?)) >= ?
+           WHERE 1=1 ${prefixCond}
            GROUP BY prefix_val ORDER BY prefix_val`;
-    params = [effectiveDepth, effectiveDepth, prefix.toLowerCase()];
+    params = prefixKey
+      ? [effectiveDepth, prefixKey]
+      : [effectiveDepth];
   }
 
   const rows = db.prepare(sql).all(...params);
@@ -3989,12 +4094,17 @@ function opdsTitleQuery(prefix = '', depth = 0, genre = '') {
   for (const r of rows) totalCount += r.cnt;
 
   if (totalCount <= 50) {
-    return opdsTitleSearch(prefix, genre);
+    return opdsTitleSearch(prefixKey, genre);
   }
 
-  return rows.map(r => ({
+  // Auto-deepen if too few prefixes (like inpx-web recursive depth)
+  if (prefixKey && rows.length < 10 && effectiveDepth < 6) {
+    return opdsTitleQuery(prefix, effectiveDepth + 1, genre);
+  }
+
+  return sortOpdsPrefixRows(rows).map(r => ({
     id: r.prefix_val,
-    title: r.prefix_val.toUpperCase().replace(/ /g, '·') + '~',
+    title: r.prefix_val.toUpperCase().replace(/ /g, '·'),
     prefix: r.prefix_val,
     count: r.cnt,
     isNav: true
@@ -4008,6 +4118,7 @@ function opdsSearchFacet(facet, prefix, genre = '') {
   }[facet];
   if (!conf) return [];
 
+  const prefixKey = prefix ? createSortKey(prefix) : '';
   let sql, params;
   if (genre) {
     sql = `SELECT c.name AS name, COALESCE(c.display_name, c.name) AS displayName,
@@ -4017,17 +4128,17 @@ function opdsSearchFacet(facet, prefix, genre = '') {
            JOIN active_books ab ON ab.id = j.book_id
            JOIN book_genres bg ON bg.book_id = ab.id
            JOIN genres_catalog gc ON gc.id = bg.genre_id AND gc.name IN (${genre.split(',').map(() => '?').join(',')})
-           WHERE LOWER(c.name) >= ? AND LOWER(c.name) < ?
-           GROUP BY c.id ORDER BY c.name LIMIT 200`;
+           WHERE c.search_name >= ? AND c.search_name < ?
+           GROUP BY c.id ORDER BY c.search_name LIMIT 200`;
     const genreParams = genre.split(',').map(g => g.trim());
-    params = [...genreParams, prefix.toLowerCase(), prefix.toLowerCase() + '\uffff'];
+    params = [...genreParams, prefixKey, prefixKey + '\uffff'];
   } else {
     sql = `SELECT c.name AS name, COALESCE(c.display_name, c.name) AS displayName,
              (SELECT COUNT(*) FROM ${conf.join} j JOIN active_books ab ON ab.id = j.book_id WHERE j.${conf.joinCol} = c.id) AS bookCount
            FROM ${conf.table} c
-           WHERE LOWER(c.name) >= ? AND LOWER(c.name) < ?
-           ORDER BY c.name LIMIT 200`;
-    params = [prefix.toLowerCase(), prefix.toLowerCase() + '\uffff'];
+           WHERE c.search_name >= ? AND c.search_name < ?
+           ORDER BY c.search_name LIMIT 200`;
+    params = [prefixKey, prefixKey + '\uffff'];
   }
 
   return db.prepare(sql).all(...params).filter(r => r.bookCount > 0).map(r => ({
@@ -4040,25 +4151,26 @@ function opdsSearchFacet(facet, prefix, genre = '') {
 }
 
 function opdsTitleSearch(prefix, genre = '') {
+  const prefixKey = prefix ? createSortKey(prefix) : '';
   let sql, params;
   if (genre) {
     sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang
            FROM active_books b
            JOIN book_genres bg ON bg.book_id = b.id
            JOIN genres_catalog gc ON gc.id = bg.genre_id AND gc.name IN (${genre.split(',').map(() => '?').join(',')})
-           WHERE LOWER(b.title) >= ? AND LOWER(b.title) < ?
-           ORDER BY b.title LIMIT 200`;
+           WHERE b.title_search >= ? AND b.title_search < ?
+           ORDER BY b.title_search LIMIT 200`;
     const genreParams = genre.split(',').map(g => g.trim());
-    params = [...genreParams, prefix.toLowerCase(), prefix.toLowerCase() + '\uffff'];
+    params = [...genreParams, prefixKey, prefixKey + '\uffff'];
   } else {
     sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang
            FROM active_books b
-           WHERE LOWER(b.title) >= ? AND LOWER(b.title) < ?
-           ORDER BY b.title LIMIT 200`;
-    params = [prefix.toLowerCase(), prefix.toLowerCase() + '\uffff'];
+           WHERE b.title_search >= ? AND b.title_search < ?
+           ORDER BY b.title_search LIMIT 200`;
+    params = [prefixKey, prefixKey + '\uffff'];
   }
 
-  return db.prepare(sql).all(...params).map(r => ({
+  const books = db.prepare(sql).all(...params).map((r) => ({
     id: r.id,
     title: `${r.seriesNo ? `${r.seriesNo}. ` : ''}${r.title || t('opds.noTitle')} (${r.ext || 'fb2'})`,
     authors: r.authors,
@@ -4066,6 +4178,8 @@ function opdsTitleSearch(prefix, genre = '') {
     ext: r.ext,
     isBook: true
   }));
+  attachSeriesListsToBooks(books);
+  return books;
 }
 
 export function opdsSearchAuthors(term, { page = 1, pageSize = 100 } = {}) {
@@ -4074,21 +4188,21 @@ export function opdsSearchAuthors(term, { page = 1, pageSize = 100 } = {}) {
   if (!words.length) return { total: 0, items: [] };
   const offset = (page - 1) * pageSize;
 
-  const whereClauses = words.map(() => `(' ' || a.sort_name || ' ') LIKE ?`);
+  const whereClauses = words.map(() => `(' ' || COALESCE(a.search_name, '') || ' ') LIKE ?`);
   const whereSQL = whereClauses.join(' AND ');
   const whereParams = words.map(w => `% ${w}%`);
 
-  const surnameExpr = `SUBSTR(a.sort_name, 1, INSTR(a.sort_name || ' ', ' ') - 1)`;
+  const surnameExpr = `SUBSTR(a.search_name, 1, INSTR(a.search_name || ' ', ' ') - 1)`;
   const fullKey = words.join(' ');
   const rankCases = [];
   const rankParams = [];
 
-  rankCases.push(`WHEN COALESCE(a.sort_name, '') = ? THEN 0`);
+  rankCases.push(`WHEN COALESCE(a.search_name, '') = ? THEN 0`);
   rankParams.push(fullKey);
 
   if (words.length > 1) {
     const reversedKey = [...words].reverse().join(' ');
-    rankCases.push(`WHEN COALESCE(a.sort_name, '') = ? THEN 0`);
+    rankCases.push(`WHEN COALESCE(a.search_name, '') = ? THEN 0`);
     rankParams.push(reversedKey);
   }
 
@@ -4244,6 +4358,7 @@ let _stmtGetReadHistory = null;
 export function getReadingHistory(username, limit = 20) {
   _stmtGetReadHistory ??= db.prepare(`
     SELECT b.id, b.title, b.authors, b.ext, b.series, b.series_no AS seriesNo,
+           b.lib_rate AS libRate,
            rh.last_opened_at AS lastOpenedAt, rh.open_count AS openCount
     FROM reading_history rh
     JOIN active_books b ON b.id = rh.book_id
@@ -4302,13 +4417,20 @@ export function toggleFavoriteSeries(username, seriesName) {
   return true;
 }
 
-export function getFavoriteAuthors(username, limit = 20, sort = 'date') {
+export function getFavoriteAuthors(username, limit = 20, sort = 'name', order = '') {
   const orderMap = {
     name: `COALESCE(a.display_name, a.name) COLLATE NOCASE ASC`,
     count: 'bookCount DESC',
     date: 'fa.created_at DESC'
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+  let orderBy = orderMap[sort] || orderMap.name;
+  if (order === 'asc' || order === 'desc') {
+    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    if (natural !== order.toUpperCase()) {
+      orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
+        .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
+    }
+  }
   return db.prepare(`
     SELECT a.name, COALESCE(a.display_name, a.name) AS displayName, COUNT(ab.id) AS bookCount
     FROM favorite_authors fa
@@ -4322,13 +4444,20 @@ export function getFavoriteAuthors(username, limit = 20, sort = 'date') {
   `).all(username, limit);
 }
 
-export function getFavoriteSeries(username, limit = 20, sort = 'date') {
+export function getFavoriteSeries(username, limit = 20, sort = 'name', order = '') {
   const orderMap = {
     name: `COALESCE(s.display_name, s.name) COLLATE NOCASE ASC`,
     count: 'bookCount DESC',
     date: 'fs.created_at DESC'
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+  let orderBy = orderMap[sort] || orderMap.name;
+  if (order === 'asc' || order === 'desc') {
+    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    if (natural !== order.toUpperCase()) {
+      orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
+        .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
+    }
+  }
   return db.prepare(`
     SELECT s.name, COALESCE(s.display_name, s.name) AS displayName, COUNT(ab.id) AS bookCount
     FROM favorite_series fs
@@ -4370,16 +4499,17 @@ export function isFavoriteSeries(username, seriesName) {
   return Boolean(_stmtIsFavSeries.get(username, resolved));
 }
 
-export function getBookmarks(username, sort = 'date') {
+export function getBookmarks(username, sort = 'title', order = '') {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
-    date: 'bm.created_at DESC'
+    date: 'bm.created_at DESC',
+    rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+  const orderBy = applyOrder(orderMap[sort] || orderMap.title, order);
   return db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
-           b.ext, b.archive_name AS archiveName
+           b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
     FROM bookmarks bm
     JOIN active_books b ON b.id = bm.book_id
     WHERE bm.username = ?
@@ -4502,16 +4632,17 @@ export function addReadBooksIfMissing(username, bookIds) {
   return { added, already, missing };
 }
 
-export function getReadBooks(username, sort = 'date') {
+export function getReadBooks(username, sort = 'title', order = '') {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
-    date: 'rb.created_at DESC'
+    date: 'rb.created_at DESC',
+    rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+  const orderBy = applyOrder(orderMap[sort] || orderMap.title, order);
   return db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
-           b.ext, b.archive_name AS archiveName
+           b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
     FROM read_books rb
     JOIN active_books b ON b.id = rb.book_id
     WHERE rb.username = ?

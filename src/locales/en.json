@@ -115,6 +115,7 @@
   "book.read": "Read",
   "book.allByAuthor": "All books by author",
   "book.allInSeries": "All books in series",
+  "book.allInSeriesNamed": "All books in series: {name}",
   "book.inFavorite": "In favorites",
   "book.addFavorite": "Add to favorites",
   "book.toShelf": "Add to shelf",

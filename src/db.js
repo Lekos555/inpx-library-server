@@ -5,7 +5,6 @@ import Database from 'better-sqlite3';
 import { config } from './config.js';
 import { appendIndexDiaryLine } from './services/file-log.js';
 import { hashPassword } from './auth.js';
-import { runMigrations } from './services/migrations.js';
 
 function deriveEncKey() {
   return crypto.scryptSync(config.sessionSecret, 'smtp-enc-salt', 32);
@@ -212,6 +211,24 @@ function ensureBooksSchema() {
         title_search IS NULL OR authors_search IS NULL OR series_search IS NULL OR
         genres_search IS NULL OR keywords_search IS NULL OR imported_at IS NULL
     `);
+  }
+
+  // Migrate books_fts to index normalized search columns
+  const ftsCols = db.prepare(`PRAGMA table_info(books_fts)`).all();
+  const ftsNames = new Set(ftsCols.map((c) => c.name));
+  if (ftsNames.has('title') || !ftsNames.has('title_search')) {
+    db.exec(`DROP TABLE IF EXISTS books_fts;`);
+    db.exec(`CREATE VIRTUAL TABLE books_fts USING fts5(
+      id UNINDEXED,
+      title_search,
+      authors_search,
+      genres_search,
+      series_search,
+      keywords_search,
+      content='books',
+      content_rowid='rowid'
+    );`);
+    setMeta('books_fts_dirty', '1');
   }
 }
 
@@ -478,18 +495,14 @@ export function unblockUser(username) {
 /** Триггеры синхронизации fts5 (content='books') с таблицей books. */
 const BOOKS_FTS_TRIGGERS_SQL = `
   CREATE TRIGGER IF NOT EXISTS books_ai AFTER INSERT ON books BEGIN
-    INSERT INTO books_fts(rowid, id, title, authors, genres, series, keywords)
-    VALUES (new.rowid, new.id, new.title, new.authors, new.genres, new.series, new.keywords);
+    INSERT INTO books_fts(rowid) VALUES (new.rowid);
   END;
   CREATE TRIGGER IF NOT EXISTS books_ad AFTER DELETE ON books BEGIN
-    INSERT INTO books_fts(books_fts, rowid, id, title, authors, genres, series, keywords)
-    VALUES('delete', old.rowid, old.id, old.title, old.authors, old.genres, old.series, old.keywords);
+    INSERT INTO books_fts(books_fts, rowid) VALUES('delete', old.rowid);
   END;
   CREATE TRIGGER IF NOT EXISTS books_au AFTER UPDATE ON books BEGIN
-    INSERT INTO books_fts(books_fts, rowid, id, title, authors, genres, series, keywords)
-    VALUES('delete', old.rowid, old.id, old.title, old.authors, old.genres, old.series, old.keywords);
-    INSERT INTO books_fts(rowid, id, title, authors, genres, series, keywords)
-    VALUES (new.rowid, new.id, new.title, new.authors, new.genres, new.series, new.keywords);
+    INSERT INTO books_fts(books_fts, rowid) VALUES('delete', old.rowid);
+    INSERT INTO books_fts(rowid) VALUES (new.rowid);
   END;
 `;
 
@@ -562,6 +575,61 @@ export function endFastSqliteImport() {
   }
 }
 
+let _savedBulkImportIndexes = [];
+
+/** Удалить все пользовательские индексы на таблицах массового импорта.
+ *  Сохраняет CREATE-выражения для ensureBulkImportIndexes().
+ *  Автоматические индексы (sql IS NULL) и внутренние FTS-индексы игнорируются.
+ */
+export function dropBulkImportIndexes() {
+  _savedBulkImportIndexes = db.prepare(`
+    SELECT name, sql FROM sqlite_master
+    WHERE type = 'index'
+      AND tbl_name IN ('books', 'book_authors', 'book_genres', 'book_series', 'authors', 'series_catalog', 'genres_catalog')
+      AND sql IS NOT NULL
+      AND name NOT LIKE 'sqlite_%'
+  `).all();
+  for (const idx of _savedBulkImportIndexes) {
+    db.exec(`DROP INDEX IF EXISTS ${idx.name}`);
+  }
+}
+
+/** Восстановить индексы, удалённые dropBulkImportIndexes(). */
+export function ensureBulkImportIndexes() {
+  for (const idx of _savedBulkImportIndexes) {
+    if (idx.sql) {
+      db.exec(idx.sql);
+    }
+  }
+  _savedBulkImportIndexes = [];
+}
+
+let _savedBooksIndexes = [];
+
+/** Удалить пользовательские индексы только на таблице books.
+ *  Оставляет junction-индексы (book_authors и т.д.) — они нужны для FK CASCADE.
+ */
+export function dropBooksTableIndexes() {
+  _savedBooksIndexes = db.prepare(`
+    SELECT name, sql FROM sqlite_master
+    WHERE type = 'index' AND tbl_name = 'books'
+      AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+  `).all();
+  for (const idx of _savedBooksIndexes) {
+    db.exec(`DROP INDEX IF EXISTS ${idx.name}`);
+  }
+}
+
+/** Восстановить индексы таблицы books, удалённые dropBooksTableIndexes(). */
+export function ensureBooksTableIndexes() {
+  for (const idx of _savedBooksIndexes) {
+    if (idx.sql) {
+      db.exec(idx.sql);
+    }
+  }
+  _savedBooksIndexes = [];
+}
+
 /**
  * Полная пересборка FTS после массового импорта без триггеров.
  * Одна команда VALUES('rebuild') блокирует event loop на минуты при сотнях тысяч книг;
@@ -596,12 +664,11 @@ export async function rebuildBooksFtsFromContent(options = {}) {
     // Адаптивный размер батча: меньше для крупных библиотек, чтобы не блокировать HTTP
     const BATCH = total > 500_000 ? 1000 : 2000;
     const sel = db.prepare(`
-      SELECT rowid, id, title, authors, genres, series, keywords FROM books
+      SELECT rowid FROM books
       WHERE rowid > ? ORDER BY rowid LIMIT ?
     `);
     const ins = db.prepare(`
-      INSERT INTO books_fts(rowid, id, title, authors, genres, series, keywords)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO books_fts(rowid) VALUES (?)
     `);
     let done = resuming ? db.prepare('SELECT COUNT(*) AS c FROM books WHERE rowid <= ?').get(lastRowid)?.c ?? 0 : 0;
     let batchNum = 0;
@@ -612,15 +679,7 @@ export async function rebuildBooksFtsFromContent(options = {}) {
       lastRowid = rows[rows.length - 1].rowid;
       db.transaction(() => {
         for (const r of rows) {
-          ins.run(
-            r.rowid,
-            r.id,
-            r.title ?? '',
-            r.authors ?? '',
-            r.genres ?? '',
-            r.series ?? '',
-            r.keywords ?? ''
-          );
+          ins.run(r.rowid);
         }
         saveProgress.run(FTS_REBUILD_PROGRESS_KEY, String(lastRowid));
       })();
@@ -663,6 +722,52 @@ export function rebuildBooksFtsFromContentSync() {
   db.exec(`INSERT INTO books_fts(books_fts) VALUES('rebuild')`);
 }
 
+function migrateBookSeriesJunction() {
+  const cols = db.prepare(`PRAGMA table_info(book_series)`).all();
+  const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name);
+  if (pkCols.length > 1 || !pkCols.includes('book_id') || pkCols.includes('series_id')) {
+    return;
+  }
+  console.log('[db] Миграция book_series: смена PRIMARY KEY на (book_id, series_id)...');
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec(`
+      CREATE TABLE book_series_new (
+        book_id TEXT NOT NULL,
+        series_id INTEGER NOT NULL,
+        series_no TEXT,
+        PRIMARY KEY (book_id, series_id),
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+        FOREIGN KEY (series_id) REFERENCES series_catalog(id) ON DELETE CASCADE
+      );
+      INSERT OR IGNORE INTO book_series_new SELECT book_id, series_id, series_no FROM book_series;
+      DROP TABLE book_series;
+      ALTER TABLE book_series_new RENAME TO book_series;
+      CREATE INDEX IF NOT EXISTS idx_book_series_series_id ON book_series(series_id);
+      CREATE INDEX IF NOT EXISTS idx_book_series_book_id ON book_series(book_id);
+    `);
+    console.log('[db] Миграция book_series завершена. Для восстановления множественных серий выполните полную переиндексацию.');
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+function ensureBookSeriesNoColumn() {
+  const cols = db.pragma('table_info(book_series)').map((c) => c.name);
+  if (!cols.includes('series_no')) {
+    db.exec('ALTER TABLE book_series ADD COLUMN series_no TEXT');
+    console.log('[db] Добавлена колонка series_no в book_series');
+  }
+}
+
+function ensureLibRateColumn() {
+  const cols = db.pragma('table_info(books)').map((c) => c.name);
+  if (!cols.includes('lib_rate')) {
+    db.exec('ALTER TABLE books ADD COLUMN lib_rate INTEGER');
+    console.log('[db] Добавлена колонка lib_rate в books');
+  }
+}
+
 export function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS books (
@@ -690,17 +795,18 @@ export function initDb() {
       date TEXT,
       lang TEXT,
       keywords TEXT,
+      lib_rate INTEGER,
       imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
       id UNINDEXED,
-      title,
-      authors,
-      genres,
-      series,
-      keywords,
+      title_search,
+      authors_search,
+      genres_search,
+      series_search,
+      keywords_search,
       content='books',
       content_rowid='rowid'
     );
@@ -790,8 +896,10 @@ WHERE rp.progress >= 99
     );
 
     CREATE TABLE IF NOT EXISTS book_series (
-      book_id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL,
       series_id INTEGER NOT NULL,
+      series_no TEXT,
+      PRIMARY KEY (book_id, series_id),
       FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
       FOREIGN KEY (series_id) REFERENCES series_catalog(id) ON DELETE CASCADE
     );
@@ -911,6 +1019,9 @@ WHERE rp.progress >= 99
   ensureCatalogSchema('series_catalog');
   ensureCatalogSchema('genres_catalog');
   ensureFlibustaSidecarSchema();
+  migrateBookSeriesJunction();
+  ensureBookSeriesNoColumn();
+  ensureLibRateColumn();
 
   // Add book_count column to catalog tables (idempotent, must run before index creation).
   for (const tbl of ['authors', 'series_catalog', 'genres_catalog']) {
@@ -1031,9 +1142,6 @@ WHERE rp.progress >= 99
 
   seedDefaultAdmin();
   migrateInpxToSources();
-
-  // Formal versioned migrations (PRAGMA user_version). Idempotent: applies only pending versions.
-  runMigrations(db);
 }
 
 // --- Sources CRUD ---
@@ -1146,8 +1254,6 @@ export async function deleteSourceProgressive(
   if (!Number.isFinite(sid)) {
     throw new Error('Некорректный id источника');
   }
-  const safeChunk = Math.max(100, Math.min(2000, Math.floor(Number(chunkSize) || DELETE_SOURCE_BOOKS_CHUNK)));
-
   // Backup database before destructive deletion
   try {
     await createDatabaseBackup('delete-source');
@@ -1157,56 +1263,33 @@ export async function deleteSourceProgressive(
 
   try {
     beginExclusiveOperation('deleting');
-    // Fast import mode: synchronous=OFF + longer busy_timeout — same as indexing.
-    // Without this, each commit does fsync (synchronous=NORMAL) making deletion
-    // dramatically slower than indexing and blocking the event loop for much longer.
     beginFastSqliteImport();
     onProgress?.({ deleted: 0, total: 0, stage: 'prepare' });
 
     const total = db.prepare('SELECT COUNT(*) AS c FROM books WHERE source_id = ?').get(sid)?.c ?? 0;
 
-    // Cleanup related tables using source_id directly (no need to load all IDs into JS).
+    // Cleanup tables without FK CASCADE before deleting books.
     onProgress?.({ deleted: 0, total, stage: 'cleanup' });
     db.prepare('DELETE FROM flibusta_author_shard WHERE source_id = ?').run(sid);
-    await new Promise(r => setImmediate(r));
     db.prepare('DELETE FROM book_reviews WHERE source_id = ?').run(sid);
-    await new Promise(r => setImmediate(r));
+    db.prepare('DELETE FROM book_details_cache WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(sid);
     db.exec(`DELETE FROM reading_positions WHERE book_id IN (SELECT id FROM books WHERE source_id = ${sid})`);
-    await new Promise(r => setImmediate(r));
     db.exec(`DELETE FROM reader_bookmarks WHERE book_id IN (SELECT id FROM books WHERE source_id = ${sid})`);
     await new Promise(r => setImmediate(r));
 
     let deleted = 0;
 
-    // Targeted FTS deletion: remove FTS entries for each chunk before deleting rows.
-    // This keeps the FTS index consistent without a full rebuild.
-    // FTS triggers are disabled during the loop to avoid double-processing.
+    // Drop books indexes and FTS triggers for fast bulk DELETE.
+    // Keep junction indexes — FK CASCADE needs them.
     dropBooksFtsTriggers();
+    dropBooksTableIndexes();
     try {
-      const selectChunk = db.prepare(`
-        SELECT rowid, id, title, authors, genres, series, keywords
-        FROM books WHERE source_id = ? LIMIT ${safeChunk}
-      `);
-      const ftsDelete = db.prepare(`
-        INSERT INTO books_fts(books_fts, rowid, id, title, authors, genres, series, keywords)
-        VALUES('delete', ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const delByRowids = db.prepare(`
-        DELETE FROM books WHERE rowid IN (
-          SELECT rowid FROM books WHERE source_id = ? LIMIT ${safeChunk}
-        )
-      `);
-
+      const chunk = Math.max(1000, Math.min(5000, Math.floor(Number(chunkSize) || DELETE_SOURCE_BOOKS_CHUNK)));
+      const deleteBooks = db.prepare(`DELETE FROM books WHERE rowid IN (SELECT rowid FROM books WHERE source_id = ? LIMIT ${chunk})`);
       for (;;) {
-        const rows = selectChunk.all(sid);
-        if (!rows.length) break;
-        db.transaction(() => {
-          for (const r of rows) {
-            ftsDelete.run(r.rowid, r.id, r.title ?? '', r.authors ?? '', r.genres ?? '', r.series ?? '', r.keywords ?? '');
-          }
-          delByRowids.run(sid);
-        })();
-        deleted += rows.length;
+        const changes = deleteBooks.run(sid).changes;
+        if (changes === 0) break;
+        deleted += changes;
         onProgress?.({ deleted, total, stage: 'books' });
         await new Promise(r => setImmediate(r));
         if (interChunkDelayMs > 0) {
@@ -1214,7 +1297,15 @@ export async function deleteSourceProgressive(
         }
       }
     } finally {
+      ensureBooksTableIndexes();
       ensureBooksFtsTriggers();
+    }
+
+    // Rebuild FTS once instead of per-row deletes.
+    try {
+      rebuildBooksFtsFromContentSync();
+    } catch (err) {
+      console.warn('[db] FTS rebuild after source delete failed:', err.message);
     }
 
     const sourceDeleted = deleteSourceRow
@@ -1226,8 +1317,6 @@ export async function deleteSourceProgressive(
     await new Promise(r => setImmediate(r));
 
     // Reclaim disk space after mass deletion.
-    // With auto_vacuum=INCREMENTAL, we just need incremental_vacuum to release free pages.
-    // Temporarily disable mmap so the OS can truncate the file on Windows.
     onProgress?.({ deleted, total, stage: 'vacuum' });
     try {
       db.pragma('mmap_size = 0');
@@ -1238,7 +1327,6 @@ export async function deleteSourceProgressive(
       } else {
         console.log('[db] no free pages to reclaim after source delete');
       }
-      // Flush WAL to main db file — try TRUNCATE first, fall back to less aggressive modes
       let checkpointed = false;
       for (const mode of ['TRUNCATE', 'RESTART', 'PASSIVE']) {
         try {
@@ -1257,8 +1345,6 @@ export async function deleteSourceProgressive(
       if (!checkpointed) {
         console.error('[db] WAL checkpoint failed in all modes — WAL file may be large');
       }
-      // Only re-enable mmap if no busy pages remain after checkpoint;
-      // otherwise pending WAL entries could cause corruption with mmap active.
       const lastCkpt = db.pragma('wal_checkpoint(PASSIVE)')[0] || {};
       if (lastCkpt.busy === 0) {
         db.pragma(`mmap_size = ${_mmapSize}`);
@@ -1267,7 +1353,6 @@ export async function deleteSourceProgressive(
       }
     } catch (vacErr) {
       console.warn('[db] incremental_vacuum after source delete failed:', vacErr.message);
-      // Only re-enable mmap if safe (no busy pages)
       try {
         const recoverCkpt = db.pragma('wal_checkpoint(PASSIVE)')[0] || {};
         if (recoverCkpt.busy === 0) {
@@ -1277,8 +1362,6 @@ export async function deleteSourceProgressive(
         }
       } catch {}
     }
-
-    // No full FTS rebuild needed — targeted FTS deletes above kept the index consistent.
 
     onProgress?.({ deleted, total, stage: 'done' });
     return { sourceDeleted, deletedBooks: deleted, totalBooks: total };
@@ -1704,8 +1787,9 @@ export async function rebuildActiveBooksView() {
 export async function refreshCatalogBookCounts() {
   // Use efficient set-based UPDATE ... FROM (single GROUP BY pass per table)
   // instead of correlated subqueries (which are O(catalog_rows × books)).
+  db.exec('UPDATE authors SET book_count = 0;');
+  await new Promise(r => setImmediate(r));
   db.exec(`
-    UPDATE authors SET book_count = 0;
     UPDATE authors SET book_count = t.cnt
     FROM (
       SELECT ba.author_id AS id, COUNT(*) AS cnt
@@ -1717,8 +1801,9 @@ export async function refreshCatalogBookCounts() {
   `);
   await new Promise(r => setImmediate(r));
 
+  db.exec('UPDATE series_catalog SET book_count = 0;');
+  await new Promise(r => setImmediate(r));
   db.exec(`
-    UPDATE series_catalog SET book_count = 0;
     UPDATE series_catalog SET book_count = t.cnt
     FROM (
       SELECT bs.series_id AS id, COUNT(*) AS cnt
@@ -1730,8 +1815,9 @@ export async function refreshCatalogBookCounts() {
   `);
   await new Promise(r => setImmediate(r));
 
+  db.exec('UPDATE genres_catalog SET book_count = 0;');
+  await new Promise(r => setImmediate(r));
   db.exec(`
-    UPDATE genres_catalog SET book_count = 0;
     UPDATE genres_catalog SET book_count = t.cnt
     FROM (
       SELECT bg.genre_id AS id, COUNT(*) AS cnt
@@ -1741,6 +1827,7 @@ export async function refreshCatalogBookCounts() {
     ) t
     WHERE genres_catalog.id = t.id;
   `);
+  await new Promise(r => setImmediate(r));
 }
 
 export function getSmtpSettings() {
@@ -1863,16 +1950,24 @@ export function setEreaderEmail(username, email) {
   _stmtSetEreaderEmail.run(String(email || '').trim(), username);
 }
 
-export function getReadBooks(username, sort = 'date') {
-  const orderMap = Object.freeze({
+export function getReadBooks(username, sort = 'title', order = '') {
+  const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
-    date: 'rb.created_at DESC'
-  });
-  const orderBy = Object.prototype.hasOwnProperty.call(orderMap, sort) ? orderMap[sort] : orderMap.date;
+    date: 'rb.created_at DESC',
+    rating: 'b.lib_rate DESC, b.title_sort ASC'
+  };
+  let orderBy = orderMap[sort] || orderMap.title;
+  if (order === 'asc' || order === 'desc') {
+    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    if (natural !== order.toUpperCase()) {
+      orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
+        .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
+    }
+  }
   return db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
-           b.ext, b.archive_name AS archiveName
+           b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
     FROM read_books rb
     JOIN active_books b ON b.id = rb.book_id
     WHERE rb.username = ?

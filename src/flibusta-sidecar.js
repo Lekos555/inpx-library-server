@@ -128,8 +128,88 @@ function isPathInsideRoot(root, absPath) {
 }
 
 /**
+ * Кэш {basename(нижнего регистра без расширения) → absPath} для рекурсивного фолбэка
+ * resolveLibraryArchiveFile, когда INPX содержит только basename архива, а реальный
+ * файл лежит в подпапке (например `D:\Lib\lib.rus.ec\fb2-….zip` при INPX в `D:\Lib\`).
+ */
+const archiveBasenameIndexCache = new Map();
+const ARCHIVE_BASENAME_INDEX_TTL_MS = 5 * 60_000;
+const ARCHIVE_BASENAME_INDEX_MAX_DEPTH = 6;
+const ARCHIVE_BASENAME_INDEX_MAX_FILES = 200_000;
+/** Подкаталоги, заведомо не содержащие книжных архивов (Flibusta-sidecar и системные). */
+const ARCHIVE_BASENAME_INDEX_SKIP_DIRS = new Set([
+  'covers', 'images', 'etc', '.unwanted',
+  'node_modules', '.git', 'data', 'runtime', 'tmp', 'cover-thumb-cache'
+]);
+
+function buildArchiveBasenameIndex(root) {
+  const index = new Map();
+  const stack = [{ dir: root, depth: 0 }];
+  let scanned = 0;
+  while (stack.length) {
+    const { dir, depth } = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (scanned >= ARCHIVE_BASENAME_INDEX_MAX_FILES) return index;
+      const name = entry.name;
+      if (entry.isDirectory()) {
+        if (depth >= ARCHIVE_BASENAME_INDEX_MAX_DEPTH) continue;
+        if (name.startsWith('.')) continue;
+        if (ARCHIVE_BASENAME_INDEX_SKIP_DIRS.has(name.toLowerCase())) continue;
+        stack.push({ dir: path.join(dir, name), depth: depth + 1 });
+      } else if (entry.isFile()) {
+        scanned++;
+        if (!/\.(zip|7z)$/i.test(name)) continue;
+        const key = name.toLowerCase();
+        if (!index.has(key)) {
+          index.set(key, path.join(dir, name));
+        }
+      }
+    }
+  }
+  return index;
+}
+
+function getArchiveBasenameIndex(root) {
+  const key = root.toLowerCase();
+  const now = Date.now();
+  const cached = archiveBasenameIndexCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.index;
+  let index;
+  try {
+    index = buildArchiveBasenameIndex(root);
+  } catch {
+    index = new Map();
+  }
+  archiveBasenameIndexCache.set(key, { index, expiresAt: now + ARCHIVE_BASENAME_INDEX_TTL_MS });
+  if (archiveBasenameIndexCache.size > 32) {
+    const oldest = archiveBasenameIndexCache.keys().next().value;
+    if (oldest !== undefined && oldest !== key) archiveBasenameIndexCache.delete(oldest);
+  }
+  return index;
+}
+
+/** Сбрасывается при reindex источника (см. resetInpxPreparedStatements / переиндексация). */
+export function invalidateArchiveBasenameIndex(libraryRoot) {
+  if (!libraryRoot) {
+    archiveBasenameIndexCache.clear();
+    return;
+  }
+  const key = path.resolve(String(libraryRoot)).toLowerCase();
+  archiveBasenameIndexCache.delete(key);
+}
+
+/**
  * INPX нередко содержит путь вида `f/архив.7z`, а на зеркале fb2.flibusta файл лежит в корне как `f.fb2-….7z` / `fb2-….7z`.
  * Без подстановки реального пути covers/images ищутся рядом с несуществующим каталогом `…/f/`.
+ *
+ * Дополнительно: если ни один прямой вариант не сработал, делаем рекурсивный поиск по basename
+ * (архивы могут лежать в подпапке, например `lib.rus.ec/` рядом с .inpx).
  */
 export function resolveLibraryArchiveFile(libraryRoot, archiveName) {
   const root = path.resolve(String(libraryRoot || '').trim());
@@ -158,6 +238,19 @@ export function resolveLibraryArchiveFile(libraryRoot, archiveName) {
       if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return abs;
     } catch {
       /* ignore */
+    }
+  }
+  // Фолбэк: рекурсивный поиск по basename — раскладка вида
+  // `<root>/<inpx>` + `<root>/<subdir>/<archive>.zip`.
+  if (base && !base.includes('..')) {
+    const index = getArchiveBasenameIndex(root);
+    const hit = index.get(base.toLowerCase());
+    if (hit && isPathInsideRoot(root, hit)) {
+      try {
+        if (fs.existsSync(hit) && fs.statSync(hit).isFile()) return hit;
+      } catch {
+        /* ignore */
+      }
     }
   }
   return null;

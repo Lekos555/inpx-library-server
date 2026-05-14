@@ -309,76 +309,52 @@ async function loadBookPageReview() {
   }
 }
 
-function attachRatingWidgets() {
-  document.querySelectorAll('[data-rating-widget]').forEach(widget => {
-    const readonly = widget.hasAttribute('data-readonly');
-    const bookId = widget.dataset.bookId;
-    const stars = widget.querySelectorAll('.star-btn');
-    const infoEl = widget.querySelector('.rating-info');
-    let currentRating = parseInt(widget.dataset.userRating, 10) || 0;
-
-    if (readonly) return;
-
-    // Hover preview
-    stars.forEach(btn => {
-      btn.addEventListener('mouseenter', () => {
-        const val = parseInt(btn.dataset.star, 10);
-        stars.forEach(s => s.classList.toggle('is-hovered', parseInt(s.dataset.star, 10) <= val));
-      });
-      btn.addEventListener('mouseleave', () => {
-        stars.forEach(s => s.classList.remove('is-hovered'));
-      });
-    });
-
-    // Click to rate
-    stars.forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const val = parseInt(btn.dataset.star, 10);
-        const isRemove = val === currentRating;
-        try {
-          const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-          const headers = { 'Content-Type': 'application/json' };
-          if (csrfMeta) headers['x-csrf-token'] = csrfMeta.content;
-          let res;
-          if (isRemove) {
-            res = await fetch(`/api/books/${encodeURIComponent(bookId)}/rating`, { method: 'DELETE', credentials: 'same-origin', headers });
-          } else {
-            res = await fetch(`/api/books/${encodeURIComponent(bookId)}/rating`, { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify({ rating: val }) });
-          }
-          if (!res.ok) return;
-          const data = await res.json();
-          currentRating = data.userRating || 0;
-          widget.dataset.userRating = String(currentRating);
-          stars.forEach(s => s.classList.toggle('is-active', parseInt(s.dataset.star, 10) <= currentRating));
-          if (data.count) {
-            infoEl.innerHTML = `<span class="rating-avg">${data.average}</span> <span class="rating-count">(${data.count})</span>`;
-          } else {
-            infoEl.innerHTML = `<span class="rating-empty">${uiT('book.rating.noRatings')}</span>`;
-          }
-        } catch (e) { console.error('Rating error', e); }
-      });
-    });
-  });
+function setCoverFallbackState(rootNode, showFallback) {
+  const root = rootNode instanceof Element ? rootNode : null;
+  if (!root) return;
+  const cover = root.matches('.cover') ? root : root.querySelector('.cover');
+  if (!cover) return;
+  const fallback = cover.querySelector('.cover-fallback');
+  if (showFallback) {
+    cover.classList.add('cover-fallback-active');
+    if (fallback) {
+      fallback.hidden = false;
+      fallback.setAttribute('aria-hidden', 'false');
+    }
+  } else {
+    cover.classList.remove('cover-fallback-active');
+    if (fallback) {
+      fallback.hidden = true;
+      fallback.setAttribute('aria-hidden', 'true');
+    }
+  }
 }
 
-/**
- * Two-state cover model:
- *   1. Текстовый fallback всегда отрендерен (z-index:1, виден сразу).
- *   2. .cover-image имеет opacity:0 по умолчанию; на успешный load добавляем
- *      класс .is-loaded → она появляется поверх fallback с короткой fade-in.
- *   На error / 404 ничего не делаем — fallback просто остаётся видимым.
- */
+/** Декоративная обложка в разметке; при error /cover-thumb (404 без обложки) и при coverAvailable=false не подменяем заглушкой с API. */
 function attachCoverErrorFallback(scope = document) {
   const root = scope && scope.querySelectorAll ? scope : document;
   const imgs = root.querySelectorAll('.cover .cover-image');
   for (const img of imgs) {
     if (img.dataset.coverErrBound === '1') continue;
     img.dataset.coverErrBound = '1';
-    const markLoaded = () => img.classList.add('is-loaded');
-    img.addEventListener('load', markLoaded, { once: true });
-    // на error — оставить класс is-loaded НЕ добавленным; fallback продолжит показываться
-    if (img.complete && img.naturalWidth > 0) {
-      markLoaded();
+    const host = img.closest('.card, .book-detail-main, .cover');
+    const showFallbackSoonTimer = window.setTimeout(() => {
+      setCoverFallbackState(host, true);
+    }, 2000);
+    const clearSlowTimer = () => window.clearTimeout(showFallbackSoonTimer);
+    img.addEventListener('load', () => {
+      clearSlowTimer();
+      img.classList.add('is-loaded');
+      setCoverFallbackState(host, false);
+    }, { once: true });
+    img.addEventListener('error', () => {
+      clearSlowTimer();
+      setCoverFallbackState(host, true);
+    }, { once: true });
+    if (img.complete) {
+      clearSlowTimer();
+      if (img.naturalWidth > 0) img.classList.add('is-loaded');
+      setCoverFallbackState(host, !(img.naturalWidth > 0));
     }
   }
 }
@@ -398,17 +374,14 @@ function applyCardDetailsForId(id, details) {
   for (const card of cards) {
     card.dataset.coverAvailable = details.coverAvailable ? 'true' : 'false';
     const img = card.querySelector('.cover .cover-image');
-    if (!img) continue;
-    if (details.coverAvailable) {
+    if (details.coverAvailable && img) {
       const targetSrc = String(img.dataset.coverSrc || '').trim();
       if (targetSrc && img.getAttribute('src') !== targetSrc) {
         img.setAttribute('src', targetSrc);
       }
-    } else {
-      // Нет настоящей обложки — убираем img совсем, чтобы не было запроса.
-      // Fallback и так виден (z-index:1).
-      img.remove();
     }
+    const hasRenderedImage = Boolean(img && img.complete && img.naturalWidth > 0);
+    setCoverFallbackState(card, !details.coverAvailable && !hasRenderedImage);
   }
 }
 
@@ -2418,8 +2391,14 @@ function renderCardHtml(book, { batchSelect = false } = {}) {
   const id = escapeHtml(book.id);
   const title = escapeHtml(book.title || '');
   const authors = escapeHtml(book.authors || '');
-  const series = book.series ? escapeHtml(book.series) : '';
-  const seriesNo = book.seriesNo ? escapeHtml(String(book.seriesNo)) : '';
+  const seriesList = book.seriesList || [];
+  const seriesHtml = seriesList.length
+    ? seriesList.map((s) => {
+        const dn = escapeHtml(s.displayName || s.name);
+        const no = s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : '';
+        return `<a href="/facet/series/${encodeURIComponent(s.name)}">${dn}${no}</a>`;
+      }).join(', ')
+    : '';
   const authorKey = book.authorsList?.[0] || book.authors?.split(',')[0]?.trim() || '';
   const sourceFormat = String(book.ext || 'fb2').toLowerCase();
   const formats =
@@ -2438,21 +2417,23 @@ function renderCardHtml(book, { batchSelect = false } = {}) {
   const batchCb = batchSelect
     ? `<label class="batch-select-hit" title="${escapeHtml(uiT('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" id="batch-select-${safeDomIdPart(book.id)}" name="batch-select-${safeDomIdPart(book.id)}" data-batch-book-id="${id}" aria-label="${escapeHtml(uiT('batch.selectAria'))}"></label>`
     : '';
+  const coverRating = `<span class="cover-rating">${[1,2,3,4,5].map((i) => `<span class="cover-star${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}</span>`;
   return `<article class="card" data-book-id="${id}">
     ${batchCb}
     <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-      <span class="cover-fallback">
+      <img class="cover-image is-loaded" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${title}">
+      <span class="cover-fallback" hidden>
         <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
         <span class="cover-fallback-overlay"></span>
         <span class="cover-fallback-copy"><span class="cover-fallback-title">${title}</span><span class="cover-fallback-author">${authors || escapeHtml(uiT('book.authorUnknown'))}</span></span>
       </span>
-      <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${title}">
       ${getReadBookIdSet().has(book.id) ? `<span class="read-badge">${READ_BADGE_SVG}</span>` : ''}
+      ${coverRating}
     </a>
     <div class="meta">
       <h3><a href="/book/${encodeURIComponent(book.id)}">${title}</a></h3>
       <div class="author">${authorKey ? `<a href="/facet/authors/${encodeURIComponent(authorKey)}">${authors}</a>` : escapeHtml(uiT('book.authorUnknown'))}</div>
-      ${series ? `<div class="card-series"><a href="/facet/series/${encodeURIComponent(book.series)}">${series}${seriesNo ? ` #${seriesNo}` : ''}</a></div>` : ''}
+      ${seriesHtml ? `<div class="card-series">${seriesHtml}</div>` : ''}
       ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
       ${downloadMenu ? `<div class="card-actions">${downloadMenu}</div>` : ''}
     </div>
@@ -4429,7 +4410,6 @@ attachThemeToggle();
 attachDownloadMenus();
 attachCoverErrorFallback(document);
 loadBookPageReview();
-attachRatingWidgets();
 attachBookmarkActions();
 attachReadBookActions();
 attachCoverLongPress();
@@ -4707,7 +4687,4 @@ function attachDirtyFormTracking() {
   }
 })();
 
-// PWA: register Service Worker
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
-}
+// PWA: Service Worker registered by pageShell with versioned URL

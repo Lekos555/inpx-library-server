@@ -5,6 +5,7 @@ import { db } from './db.js';
 import { statSyncCached } from './utils/fs-probe.js';
 import { getLibraryRoot, getSourceRoot, effectiveSourceFlibustaForBook } from './inpx.js';
 import { readArchiveEntryBuffer } from './archives.js';
+import { detectImageMimeFromBuffer } from './services/cover.js';
 import {
   readFlibustaAnnotationHtml,
   readFlibustaCover,
@@ -77,25 +78,65 @@ function extractCover(xml) {
     return null;
   }
 
-  const binaryPattern = new RegExp(
-    `<binary\\b(?=[^>]*\\bid\\s*=\\s*(["'])${escapeRegExp(rawCoverId)}\\1)(?=[^>]*\\bcontent-type\\s*=\\s*(["'])([^"']+)\\2)[^>]*>([\\s\\S]*?)<\\/binary>`,
+  const binaryTagMatch = xml.match(new RegExp(
+    `<binary\\b[^>]*\\bid\\s*=\\s*(["'])${escapeRegExp(rawCoverId)}\\1[^>]*>`,
     'i'
-  );
-  const binaryMatch = xml.match(binaryPattern);
-  if (!binaryMatch) {
+  ));
+  if (!binaryTagMatch) {
+    return null;
+  }
+
+  const contentTypeMatch = binaryTagMatch[0].match(/content-type\s*=\s*(['"])([^'"]+)\1/i);
+  const contentType = contentTypeMatch ? contentTypeMatch[2] : 'image/jpeg';
+
+  const binaryContentMatch = xml.match(new RegExp(
+    `<binary\\b[^>]*\\bid\\s*=\\s*(["'])${escapeRegExp(rawCoverId)}\\1[^>]*>([\\s\\S]*?)<\\/binary>`,
+    'i'
+  ));
+  if (!binaryContentMatch) {
     return null;
   }
 
   try {
-    const data = Buffer.from(binaryMatch[4].replace(/\s+/g, ''), 'base64');
+    const data = Buffer.from(binaryContentMatch[2].replace(/\s+/g, ''), 'base64');
     if (!data.length) return null;
-    return {
-      contentType: binaryMatch[3],
-      data
-    };
+    return { contentType, data };
   } catch {
     return null;
   }
+}
+
+/** Fallback-обложка из файла рядом с книгой (для книг без archiveName). */
+function findNearFileCover(book) {
+  if (book.archiveName) return null;
+  try {
+    const sourceRoot = getSourceRoot(book.sourceId);
+    const bookPath = path.resolve(sourceRoot, `${book.fileName}.${book.ext}`);
+    const dir = path.dirname(bookPath);
+    const base = path.basename(bookPath, `.${book.ext}`);
+    const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'];
+    const candidates = [
+      ...exts.map((e) => path.join(dir, base + e)),
+      ...exts.flatMap((e) => [
+        path.join(dir, 'cover' + e),
+        path.join(dir, 'folder' + e)
+      ])
+    ];
+    for (const p of candidates) {
+      try {
+        const st = fs.statSync(p);
+        if (!st.isFile() || st.size === 0 || st.size > 10 * 1024 * 1024) continue;
+        const data = fs.readFileSync(p);
+        const mime = detectImageMimeFromBuffer(data);
+        if (mime) return { contentType: mime, data };
+      } catch {
+        /* ignore missing files */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 /**
@@ -221,7 +262,8 @@ async function extractBookDetails(book) {
   const xml = await readBookXml(book);
   const annotationMatch = xml.match(/<annotation[^>]*>([\s\S]*?)<\/annotation>/i);
   const titleMatch = xml.match(/<book-title[^>]*>([\s\S]*?)<\/book-title>/i);
-  const cover = extractCover(xml);
+  let cover = extractCover(xml);
+  if (!cover) cover = findNearFileCover(book);
 
   let title = titleMatch ? decodeXml(titleMatch[1]) : book.title;
   if (title.includes('\uFFFD')) title = book.title;
@@ -341,6 +383,10 @@ function bookHasFlibustaSidecar(book) {
 export async function getOrExtractBookDetails(book, { skipCoverAugment = false } = {}) {
   const cached = getCachedBookDetails(book.id);
   if (cached) {
+    if (!cached.cover && !book.archiveName) {
+      const nearCover = findNearFileCover(book);
+      if (nearCover) return { ...cached, cover: nearCover };
+    }
     if (!skipCoverAugment && shouldTryFlibustaCoverPaths(book)) {
       return augmentFlibustaCoverIfMissing(cached, book);
     }
@@ -348,9 +394,11 @@ export async function getOrExtractBookDetails(book, { skipCoverAugment = false }
   }
 
   let details;
+  let extractFailed = false;
   try {
     details = await extractBookDetails(book);
   } catch {
+    extractFailed = true;
     details = { title: book.title || '', annotation: '', cover: null };
   }
   if (details.cover && !details.cover.data?.length) details.cover = null;
@@ -372,7 +420,18 @@ export async function getOrExtractBookDetails(book, { skipCoverAugment = false }
     }
   }
 
+  if (!details.cover && !book.archiveName) {
+    const nearCover = findNearFileCover(book);
+    if (nearCover) details.cover = nearCover;
+  }
+
   if (!details.annotationIsHtml) details.annotationIsHtml = false;
+  // При транзиентной ошибке чтения файла/архива не сохраняем «отравленную» запись
+  // с cover=null — иначе последующие запросы вернут кэшированный null и никогда
+  // не попробуют перечитать файл. Пусть запрос будет повторён в следующий раз.
+  if (extractFailed && !details.cover && !details.annotation) {
+    return details;
+  }
   try {
     const persist = bookHasFlibustaSidecar(book)
       ? { ...details, cover: null }

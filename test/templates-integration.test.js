@@ -25,7 +25,7 @@ test('templates.js barrel exports all expected symbols', async () => {
     'renderAdminEvents', 'renderAdminContent', 'renderAdminDuplicates',
     'renderAdminSources', 'renderAdminSmtp',
     // opds
-    'renderOpdsRoot', 'renderOpdsOpenSearch', 'renderOpdsSearchHelp',
+    'renderOpdsRoot', 'renderOpdsOpenSearch',
     'renderOpdsSectionFeed', 'renderOpdsBooksFeed', 'renderOpdsBookDetail'
   ];
   for (const name of expected) {

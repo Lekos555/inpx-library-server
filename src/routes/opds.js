@@ -4,7 +4,7 @@
 import iconv from 'iconv-lite';
 import { t, tp, countLabel } from '../i18n.js';
 import { requireOpdsAuth } from '../middleware/auth.js';
-import { formatGenreLabel } from '../genre-map.js';
+import { formatGenreLabel, getGenreGroups } from '../genre-map.js';
 import { safePage } from '../utils/safe-int.js';
 import { getOrExtractBookDetails } from '../fb2.js';
 import {
@@ -19,33 +19,16 @@ import {
 import {
   renderOpdsRoot,
   renderOpdsOpenSearch,
-  renderOpdsSearchHelp,
   renderOpdsSectionFeed,
   renderOpdsBooksFeed,
   renderOpdsBookDetail,
 } from '../templates.js';
-
-const OPDS_BOOK_PAGE_SIZE = 50;
 
 function formatAuthorForOpds(author) {
   if (!author) return '';
   const parts = author.split(',');
   return parts.slice(0, 3).join(', ') + (parts.length > 3 ? t('opds.authorEtAl') : '');
 }
-
-/**
- * Paginate a flat book array for OPDS feeds.
- * Returns { pageItems, nextHref } where nextHref is '' when there are no more pages.
- */
-function paginateOpdsBooks(allItems, page, selfPathBase) {
-  const offset = page * OPDS_BOOK_PAGE_SIZE;
-  const pageItems = allItems.slice(offset, offset + OPDS_BOOK_PAGE_SIZE);
-  const hasMore = offset + OPDS_BOOK_PAGE_SIZE < allItems.length;
-  const sep = selfPathBase.includes('?') ? '&' : '?';
-  const nextHref = hasMore ? `${selfPathBase}${sep}page=${page + 1}` : '';
-  return { pageItems, nextHref };
-}
-
 
 /**
  * @param {import('express').Application} app
@@ -69,11 +52,6 @@ export function registerOpdsRoutes(app, deps) {
     res.send(renderOpdsOpenSearch(baseUrl(req)));
   });
 
-  app.get('/opds/search-help', requireOpdsAuth, (req, res) => {
-    res.type('application/atom+xml; charset=utf-8');
-    res.send(renderOpdsSearchHelp(baseUrl(req)));
-  });
-
   app.get('/opds/search', requireOpdsAuth, (req, res) => {
     let term = String(req.query.term || req.query.query || req.query.q || req.query.searchTerm || '').trim();
     const type = String(req.query.type || '').trim();
@@ -87,8 +65,7 @@ export function registerOpdsRoutes(app, deps) {
         { id: 'search_author', title: t('opds.searchAuthorsTitle'), href: `/opds/search?type=author&term=${encodeURIComponent(term)}`, content: t('opds.searchAuthorsDesc') },
         { id: 'search_series', title: t('opds.searchSeriesTitle'), href: `/opds/search?type=series&term=${encodeURIComponent(term)}`, content: t('opds.searchSeriesDesc') },
         { id: 'search_title', title: t('opds.searchBooksTitle'), href: `/opds/search?type=title&term=${encodeURIComponent(term)}`, content: t('opds.searchBooksDesc') },
-        { id: 'search_genre', title: t('opds.searchInGenreTitle'), href: `/opds/genre?from=search&term=${encodeURIComponent(term)}`, content: t('opds.searchInGenreDesc') },
-        { id: 'search_help', title: t('opds.nav.searchHelp'), href: '/opds/search-help', acquisition: true, content: t('opds.searchSyntaxDesc') }
+        { id: 'search_genre', title: t('opds.searchInGenreTitle'), href: `/opds/genre?from=search&term=${encodeURIComponent(term)}`, content: t('opds.searchInGenreDesc') }
       ];
       res.type('application/atom+xml; charset=utf-8');
       return res.send(renderOpdsSectionFeed(base, { id: 'search', title: t('opds.nav.search'), selfPath: req.originalUrl, entries }));
@@ -167,58 +144,46 @@ export function registerOpdsRoutes(app, deps) {
     const base = baseUrl(req);
 
     if (seriesQ) {
-      // When the user drilled in via an author entry (author=...&series=...),
-      // match books on the same raw `b.series` text we used to group on, scoped to that author.
-      // This avoids "каталог пуст" caused by mismatches between books.series and series_catalog.name
-      // (whitespace, ё/е, casing, multiple ambiguous matches).
       const authorName = author.startsWith('=') ? author.slice(1) : '';
-      const books = authorName
+      const items = authorName
         ? getAuthorSeriesBooksOpds(authorName, seriesQ, genre)
         : getSeriesBooksOpds(seriesQ);
-      const pg = safePage(req.query.page) - 1;  // safePage is 1-based, we need 0-based
-      const basePath = req.originalUrl.replace(/[&?]page=\d+/g, '');
-      const { pageItems, nextHref } = paginateOpdsBooks(books, Math.max(0, pg), basePath);
       res.type('application/atom+xml; charset=utf-8');
-      return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesQ, selfPath: req.originalUrl, items: pageItems, nextHref }));
+      return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesQ, selfPath: req.originalUrl, items }));
     }
 
     if (author.startsWith('=')) {
       const authorName = author.slice(1);
-      const books = getAuthorBooksOpds(authorName, genre);
-
+      const allBooks = getAuthorBooksOpds(authorName, genre);
+      // Group by series like inpx-web: series entries first, then standalone books
       const seriesMap = new Map();
-      const entries = [];
-      for (const book of books) {
+      const standalone = [];
+      for (const book of allBooks) {
         if (book.series) {
           if (!seriesMap.has(book.series)) {
-            seriesMap.set(book.series, 0);
+            seriesMap.set(book.series, { book, count: 0 });
           }
-          seriesMap.set(book.series, seriesMap.get(book.series) + 1);
+          seriesMap.get(book.series).count++;
         } else {
-          entries.push({
-            id: book.id,
-            title: `${book.title || t('opds.noTitle')} (${book.ext || 'fb2'})`,
-            href: `/opds/book?uid=${encodeURIComponent(book.id)}`,
-            content: formatAuthorForOpds(book.authors),
-            acquisition: true
-          });
+          standalone.push(book);
         }
       }
-
-      const seriesEntries = [];
-      for (const [name, count] of seriesMap) {
-        seriesEntries.push({
+      const navEntries = [...seriesMap.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, { count }]) => ({
           id: `series:${name}`,
           title: tp('book.seriesPrefix', { name }),
           href: `/opds/author?author=${encodeURIComponent(author)}&series=${encodeURIComponent(name)}&genre=${encodeURIComponent(genre)}`,
-          content: countLabel('book', count)
-        });
-      }
-      seriesEntries.sort((a, b) => a.title.localeCompare(b.title));
-      const allEntries = [...seriesEntries, ...entries];
-
+          content: countLabel('book', count),
+        }));
       res.type('application/atom+xml; charset=utf-8');
-      return res.send(renderOpdsSectionFeed(base, { id: 'search', title: authorName, selfPath: req.originalUrl, entries: allEntries }));
+      return res.send(renderOpdsBooksFeed(base, {
+        id: 'search',
+        title: authorName,
+        selfPath: req.originalUrl,
+        navEntries,
+        items: standalone,
+      }));
     }
 
     const entries = [];
@@ -246,12 +211,9 @@ export function registerOpdsRoutes(app, deps) {
 
     if (series.startsWith('=')) {
       const seriesName = series.slice(1);
-      const books = getSeriesBooksOpds(seriesName);
-      const pg = safePage(req.query.page) - 1;
-      const basePath = req.originalUrl.replace(/[&?]page=\d+/g, '');
-      const { pageItems, nextHref } = paginateOpdsBooks(books, Math.max(0, pg), basePath);
+      const items = getSeriesBooksOpds(seriesName);
       res.type('application/atom+xml; charset=utf-8');
-      return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesName || t('facet.facetSeries'), selfPath: req.originalUrl, items: pageItems, nextHref }));
+      return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesName || t('facet.facetSeries'), selfPath: req.originalUrl, items }));
     }
 
     const entries = [];
@@ -296,7 +258,7 @@ export function registerOpdsRoutes(app, deps) {
   });
 
   app.get('/opds/genre', requireOpdsAuth, (req, res) => {
-    const from = String(req.query.from || 'search');
+    const from = String(req.query.from || 'author');
     const term = String(req.query.term || '');
     const section = String(req.query.section || '');
     const base = baseUrl(req);
@@ -307,37 +269,46 @@ export function registerOpdsRoutes(app, deps) {
     }
 
     const entries = [];
-    const allGenres = listGenres({ page: 1, pageSize: 500, query: '', sort: 'name' }).items;
+    const allGenres = listGenres({ page: 1, pageSize: 9999, query: '', sort: 'name' }).items;
+    const genreBookCount = new Map(allGenres.map(g => [g.name, g.bookCount]));
+    const groups = getGenreGroups();
 
     if (section) {
-      const sectionGenres = allGenres.filter(g => {
-        const label = formatGenreLabel(g.name);
-        return label !== g.name;
-      });
-      const matchingGenres = allGenres.filter(g => {
-        return formatGenreLabel(g.name).toLowerCase().includes(section.toLowerCase()) || g.name.startsWith(section);
-      });
-      const genresToShow = matchingGenres.length ? matchingGenres : sectionGenres;
-      for (const g of genresToShow) {
+      const codes = groups[section] || [];
+      if (codes.length) {
+        const allCodes = codes.join(',');
         entries.push({
-          id: g.name,
-          title: formatGenreLabel(g.name),
+          id: 'whole_section',
+          title: '[Весь раздел]',
           href: from === 'search'
-            ? `/opds/search?type=title&term=${encodeURIComponent(term)}&genre=${encodeURIComponent(g.name)}`
-            : `/opds/${encodeURIComponent(from)}?genre=${encodeURIComponent(g.name)}`,
-          content: countLabel('book', g.bookCount)
+            ? `/opds/search?type=title&term=${encodeURIComponent(term)}&genre=${encodeURIComponent(allCodes)}`
+            : `/opds/${encodeURIComponent(from)}?genre=${encodeURIComponent(allCodes)}`,
         });
       }
+      for (const code of codes.slice().sort((a, b) => formatGenreLabel(a).localeCompare(formatGenreLabel(b), 'ru'))) {
+        const count = genreBookCount.get(code) || 0;
+        if (count > 0) {
+          entries.push({
+            id: code,
+            title: formatGenreLabel(code),
+            href: from === 'search'
+              ? `/opds/search?type=title&term=${encodeURIComponent(term)}&genre=${encodeURIComponent(code)}`
+              : `/opds/${encodeURIComponent(from)}?genre=${encodeURIComponent(code)}`,
+            content: countLabel('book', count)
+          });
+        }
+      }
     } else {
-      for (const g of allGenres) {
-        entries.push({
-          id: g.name,
-          title: formatGenreLabel(g.name),
-          href: from === 'search'
-            ? `/opds/search?type=title&term=${encodeURIComponent(term)}&genre=${encodeURIComponent(g.name)}`
-            : `/opds/${encodeURIComponent(from)}?genre=${encodeURIComponent(g.name)}`,
-          content: countLabel('book', g.bookCount)
-        });
+      for (const [groupName, codes] of Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0], 'ru'))) {
+        const total = codes.reduce((sum, code) => sum + (genreBookCount.get(code) || 0), 0);
+        if (total > 0) {
+          entries.push({
+            id: groupName,
+            title: groupName,
+            href: `/opds/genre?section=${encodeURIComponent(groupName)}&from=${encodeURIComponent(from)}${searchQuery}`,
+            content: countLabel('book', total)
+          });
+        }
       }
     }
 

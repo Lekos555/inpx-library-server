@@ -7,7 +7,7 @@ import {
   getReaderBookmarks, addReaderBookmark, deleteReaderBookmark,
   upsertReadingHistoryEntry, deleteReadingHistoryEntry
 } from '../db.js';
-import { invalidateHomeUserSnapshot } from '../services/cache.js';
+import { invalidateHomeUserSnapshot, clearPageDataCache } from '../services/cache.js';
 import { isBookRead, getBookById, addReadBooksIfMissing } from '../inpx.js';
 
 /**
@@ -106,6 +106,7 @@ export function registerReaderRoutes(app) {
   app.delete('/api/reading-history/:bookId', requireApiAuth, asyncHandler(async (req, res) => {
     deleteReadingHistoryEntry(req.user.username, String(req.params.bookId));
     invalidateHomeUserSnapshot(req.user.username);
+    clearPageDataCache();
     res.json({ ok: true });
   }));
 }

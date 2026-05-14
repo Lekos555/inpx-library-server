@@ -24,7 +24,7 @@ import {
   addSource, updateSource, deleteSourceProgressive, forceDetachSourceRowUnsafe,
   getSmtpSettings, setSmtpSettings, hasAdminUser, listUsers, countAdminUsers,
   getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser,
-  db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView,
+  db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView, refreshCatalogBookCounts,
   getSuppressedBooks, unsuppressBook, unsuppressAll
 } from '../db.js';
 import {
@@ -582,12 +582,15 @@ export function registerAdminRoutes(app, deps) {
     }
   });
 
-  app.post('/admin/sources/:id/update', requireAdminWeb, (req, res) => {
+  app.post('/admin/sources/:id/update', requireAdminWeb, async (req, res) => {
     try {
       const id = Number(req.params.id);
       const name = req.body.name !== undefined ? String(req.body.name).trim() : undefined;
       const enabled = req.body.enabled !== undefined ? req.body.enabled === '1' : undefined;
       updateSource(id, { name, enabled });
+      if (enabled !== undefined) {
+        await refreshCatalogBookCounts();
+      }
       clearArchiveReadCaches();
       clearPageDataCache();
       markLibraryDedupProjectionStale();

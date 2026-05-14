@@ -24,7 +24,6 @@ import { registerLibraryRoutes, detailsCache, getDetailsFull, bookFlibustaSideca
 // --- Extracted modules ---
 import { securityHeaders } from './middleware/security-headers.js';
 import { browseLimiter } from './middleware/rate-limiter-browse.js';
-import { requestId } from './middleware/request-id.js';
 import {
   attachSessionUser, csrfGuard,
   requireAdminWeb
@@ -514,7 +513,6 @@ app.use('/opds', (req, res, next) => {
   next();
 });
 
-app.use(requestId);
 app.use(browseLimiter);
 
 // Публичные диагностические маршруты — до express.static, чтобы не пересекаться с файлами из public/.
@@ -524,7 +522,12 @@ registerBrowseApiRoutes(app);
 app.use(express.static(config.publicDir, {
   maxAge: '365d',
   immutable: true,
-  etag: false
+  etag: false,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('sw.js')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
+  }
 }));
 
 registerAuthRoutes(app, { getCachedStats });
@@ -906,7 +909,6 @@ app.use((err, req, res, next) => {
 
 async function bootstrap() {
   initDb();
-  await rebuildActiveBooksView(); // Пересоздаём VIEW с учётом исключённых языков
   // Run DB optimize manually/offline; in-process optimize can block HTTP loop on large datasets.
   setSiteName(getSetting('site_name'));
   setAllowAnonymousDownload(getSetting('allow_anonymous_download') === '1');
@@ -917,26 +919,6 @@ async function bootstrap() {
     logSystemEvent('info', 'server', 'server started', { port: config.port, libraryRoot: getLibraryRoot() });
   });
   app.set('httpServer', httpServer);
-
-  // --- Graceful shutdown ---
-  const GRACEFUL_SHUTDOWN_MS = Number(process.env.GRACEFUL_SHUTDOWN_MS) || 30_000;
-  function shutdown(signal) {
-    console.log(`[shutdown] ${signal} received, closing server gracefully...`);
-    logSystemEvent('info', 'server', `${signal} received, initiating graceful shutdown`);
-    httpServer.close(() => {
-      console.log('[shutdown] HTTP server closed');
-      try { db.close(); } catch { /* ignore */ }
-      logSystemEvent('info', 'server', 'graceful shutdown complete');
-      process.exit(0);
-    });
-    setTimeout(() => {
-      console.error('[shutdown] Forced exit after timeout');
-      logSystemEvent('error', 'server', 'forced shutdown after timeout');
-      process.exit(1);
-    }, GRACEFUL_SHUTDOWN_MS);
-  }
-  process.once('SIGTERM', () => shutdown('SIGTERM'));
-  process.once('SIGINT', () => shutdown('SIGINT'));
 
   // --- Таймауты для защиты от утечки соединений при нагрузке ---
   const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS) || 30_000;
@@ -959,6 +941,14 @@ async function bootstrap() {
   app.use('/download', extendedTimeout(300_000));
   app.use('/api/batch', extendedTimeout(300_000));
   app.use('/opds', extendedTimeout(120_000));  // 2 min for OPDS
+
+  setTimeout(async () => {
+    try {
+      await rebuildActiveBooksView();
+    } catch (err) {
+      console.error('[startup] rebuildActiveBooksView failed:', err.message);
+    }
+  }, 50);
 
   setTimeout(async () => {
     if (getMeta('books_fts_dirty') === '1') {

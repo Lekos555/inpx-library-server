@@ -128,6 +128,7 @@
   "book.read": "Читать",
   "book.allByAuthor": "Все книги автора",
   "book.allInSeries": "Все книги серии",
+  "book.allInSeriesNamed": "Все книги серии «{name}»",
   "book.inFavorite": "В избранном",
   "book.addFavorite": "В избранное",
   "book.toShelf": "На полку",

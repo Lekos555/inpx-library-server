@@ -41,10 +41,6 @@ const OPDS_MIME_FOR_SOURCE = {
 };
 
 function renderOpdsBookEntries(baseUrl, items, { includeContent = false } = {}) {
-  // Atom RFC 4287 §4.1.2: every <entry> MUST contain exactly one <updated>.
-  // Atom RFC 4287 §4.2.6: <id> MUST be an IRI (a bare numeric ID is NOT valid).
-  // Strict OPDS clients (FBReader, Kindle) silently drop entries that violate either rule
-  // — that's the real cause of "каталог пуст" when drilling into series. AlReader is lenient.
   const now = new Date().toISOString().substring(0, 19) + 'Z';
   return items.map((book) => {
     const title = `${book.seriesNo ? `${escapeHtml(String(book.seriesNo))}. ` : ''}${escapeHtml(book.title || t('opds.noTitle'))} (${escapeHtml(book.ext || 'fb2')})`;
@@ -53,20 +49,48 @@ function renderOpdsBookEntries(baseUrl, items, { includeContent = false } = {}) 
     const sourceMime = OPDS_MIME_FOR_SOURCE[extLower] || 'application/octet-stream';
     const dl = `/download/${encodeURIComponent(book.id)}?opds=1`;
     const cover = `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`;
-    // XML 1.0 §2.4: '&' in attribute values MUST be escaped as &amp;.
-    // Strict OPDS clients (FBReader, Kindle) abort parsing on the bare '&' in the EPUB
-    // conversion link href ("?opds=1&format=epub2") and show "каталог пуст".
-    // AlReader is lenient and accepts the malformed XML.
-    const links = [
-      `<link href="${escapeHtml(dl)}" rel="http://opds-spec.org/acquisition" type="${sourceMime}" title="${escapeHtml(FORMAT_LABELS[extLower] || extLower.toUpperCase())}"/>`
-    ];
+
+    // Download links — like inpx-web: source format + zip, and conversion to epub for fb2
+    const links = [];
     if (extLower === 'fb2') {
+      links.push(`<link href="${escapeHtml(dl)}" rel="http://opds-spec.org/acquisition" type="application/fb2+zip" title="FB2+ZIP"/>`);
       links.push(`<link href="${escapeHtml(`${dl}&format=epub2`)}" rel="http://opds-spec.org/acquisition" type="application/epub+zip" title="EPUB"/>`);
+    } else if (extLower === 'epub') {
+      links.push(`<link href="${escapeHtml(dl)}" rel="http://opds-spec.org/acquisition" type="application/epub+zip" title="EPUB"/>`);
+    } else if (extLower === 'mobi') {
+      links.push(`<link href="${escapeHtml(dl)}" rel="http://opds-spec.org/acquisition" type="application/x-mobipocket-ebook" title="MOBI"/>`);
+    } else {
+      links.push(`<link href="${escapeHtml(dl)}" rel="http://opds-spec.org/acquisition" type="${sourceMime}" title="${escapeHtml(FORMAT_LABELS[extLower] || extLower.toUpperCase())}"/>`);
     }
     if (book.id) {
       links.push(`<link href="${escapeHtml(cover)}" rel="http://opds-spec.org/image" type="image/jpeg"/>`);
       links.push(`<link href="${escapeHtml(cover)}" rel="http://opds-spec.org/image/thumbnail" type="image/jpeg"/>`);
     }
+
+    // Series info for summary
+    const seriesStr = book.seriesList?.length
+      ? book.seriesList.map((s) => [s.displayName || s.name, s.seriesNo].filter(Boolean).join(' #')).join('; ')
+      : book.series
+        ? [book.series, book.seriesNo].filter(Boolean).join(' #')
+        : '';
+    const summaryParts = [book.authors || t('book.authorUnknown')];
+    if (seriesStr) summaryParts.push(seriesStr);
+    const summaryText = summaryParts.join(' \u2014 ');
+
+    // Annotation: prefer HTML if it looks like it contains tags (like inpx-web)
+    let contentXml;
+    if (book.annotation) {
+      const ann = String(book.annotation);
+      const hasHtml = /<[a-z][\s\S]*?>/i.test(ann);
+      if (hasHtml) {
+        contentXml = `<content type="text/html">${escapeHtml(ann)}</content>`;
+      } else {
+        contentXml = `<content type="text">${escapeHtml(ann.slice(0, 500))}${seriesStr ? ` \u2014 ${escapeHtml(seriesStr)}` : ''}</content>`;
+      }
+    } else {
+      contentXml = `<content type="text">${escapeHtml(summaryText)}</content>`;
+    }
+
     return `
     <entry>
       <title>${title}</title>
@@ -74,9 +98,10 @@ function renderOpdsBookEntries(baseUrl, items, { includeContent = false } = {}) 
       <updated>${now}</updated>
       ${authors.length ? authors.map((author) => `<author><name>${escapeHtml(author)}</name></author>`).join('') : `<author><name>${escapeHtml(t('book.authorUnknown'))}</name></author>`}
       <dc:language>${escapeHtml(book.lang || 'ru')}</dc:language>
+      <dc:format>${escapeHtml(extLower)}</dc:format>
       ${String(book.genres || '').split(':').map((genre) => genre.trim()).filter(Boolean).map((genre) => `<category term="${escapeHtml(genre)}" label="${escapeHtml(formatGenreLabel(genre))}"/>`).join('')}
-      ${book.annotation ? `<content type="text">${escapeHtml(String(book.annotation).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500))}</content>` : `<content type="text">${escapeHtml(book.authors || t('book.authorUnknown'))}${includeContent && book.series ? ` — ${escapeHtml(book.series)}` : ''}</content>`}
-      <summary type="text">${escapeHtml(book.authors || t('book.authorUnknown'))}${includeContent && book.series ? ` — ${escapeHtml(book.series)}` : ''}</summary>
+      ${contentXml}
+      <summary type="text">${escapeHtml(summaryText)}</summary>
       ${links.join('')}
     </entry>`;
   }).join('');
@@ -91,9 +116,7 @@ export function renderOpdsRoot(baseUrl) {
       { id: 'author', title: t('opds.nav.authors'), href: '/opds/author' },
       { id: 'series', title: t('opds.nav.series'), href: '/opds/series' },
       { id: 'title', title: t('opds.nav.books'), href: '/opds/title' },
-      { id: 'genre', title: t('opds.nav.genres'), href: '/opds/genre' },
-      { id: 'search', title: t('opds.nav.search'), href: '/opds/search' },
-      { id: 'search_help', title: t('opds.nav.searchHelp'), href: '/opds/search-help', acquisition: true }
+      { id: 'genre', title: t('opds.nav.genres'), href: '/opds/genre' }
     ]
   });
 }
@@ -109,40 +132,33 @@ export function renderOpdsOpenSearch(baseUrl) {
 </OpenSearchDescription>`;
 }
 
-export function renderOpdsSearchHelp(baseUrl) {
-  const now = new Date().toISOString().substring(0, 19) + 'Z';
-  return `<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog">
-  <updated>${now}</updated>
-  <id>search-help</id>
-  <title>${escapeHtml(t('opds.searchHelpTitle'))}</title>
-  ${renderOpdsBaseLinks(baseUrl, '/opds/search-help', { acquisition: true })}
-  <entry>
-    <updated>${now}</updated>
-    <id>help</id>
-    <title>${escapeHtml(t('opds.searchHelpTitle'))}</title>
-    <content type="text">${escapeHtml(t('opds.searchHelpContent'))}</content>
-    <link href="/book/fake-link" rel="http://opds-spec.org/acquisition" type="application/fb2+zip"/>
-  </entry>
-</feed>`;
-}
-
 export function renderOpdsSectionFeed(baseUrl, { id, title, selfPath, entries }) {
   return renderOpdsNavigation(baseUrl, { id, title, selfPath, entries });
 }
 
-export function renderOpdsBooksFeed(baseUrl, { id, title, selfPath, items, nextHref = '' }) {
+function renderOpdsNavEntry(now, entry) {
+  return `  <entry>
+    <updated>${now}</updated>
+    <id>${escapeHtml(String(entry.id))}</id>
+    <title>${escapeHtml(entry.title)}</title>
+    <link href="${escapeHtml(entry.href)}" rel="${entry.rel || 'subsection'}" type="application/atom+xml;profile=opds-catalog;kind=navigation"/>${entry.content ? `
+    <content type="${entry.contentType || 'text'}">${escapeHtml(entry.content)}</content>` : ''}
+  </entry>`;
+}
+
+export function renderOpdsBooksFeed(baseUrl, { id, title, selfPath, items, nextHref = '', navEntries = [] }) {
   const now = new Date().toISOString().substring(0, 19) + 'Z';
   const nextLink = nextHref
     ? `\n  <link href="${escapeHtml(nextHref)}" rel="next" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>`
     : '';
+  const navXml = navEntries.length ? navEntries.map((e) => renderOpdsNavEntry(now, e)).join('\n') + '\n' : '';
   return `<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog">
   <updated>${now}</updated>
   <id>${escapeHtml(String(id))}</id>
   <title>${escapeHtml(title)}</title>
   ${renderOpdsBaseLinks(baseUrl, selfPath, { acquisition: true })}${nextLink}
-  ${renderOpdsBookEntries(baseUrl, items)}
+${navXml}  ${renderOpdsBookEntries(baseUrl, items)}
 </feed>`;
 }
 

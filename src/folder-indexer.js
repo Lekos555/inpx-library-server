@@ -17,6 +17,8 @@ import {
   rebuildBooksFtsFromContent,
   beginFastSqliteImport,
   endFastSqliteImport,
+  dropBulkImportIndexes,
+  ensureBulkImportIndexes,
   beginExclusiveOperation,
   endExclusiveOperation,
   getSourceById,
@@ -49,7 +51,7 @@ export async function warmupBookDetailsCache(sourceId, { limit = 200 } = {}) {
   try {
     const books = db.prepare(`
       SELECT id, title, file_name AS fileName, archive_name AS archiveName,
-             lang, source_id AS sourceId
+             ext, lang, lib_id AS libId, source_id AS sourceId
       FROM books
       WHERE source_id = ? AND deleted = 0
         AND id NOT IN (SELECT book_id FROM book_details_cache)
@@ -696,6 +698,7 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
   }
   if (!incremental) {
     dropBooksFtsTriggers();
+    dropBulkImportIndexes();
     db.transaction(() => {
       db.prepare('DELETE FROM book_details_cache WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(source.id);
       db.prepare('DELETE FROM book_authors WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(source.id);
@@ -758,7 +761,7 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
   const seriesIdCache = new Map();
   const genreIdCache = new Map();
   const linkAuthor = db.prepare('INSERT OR IGNORE INTO book_authors(book_id, author_id) VALUES(?, ?)');
-  const linkSeries = db.prepare('INSERT OR REPLACE INTO book_series(book_id, series_id) VALUES(?, ?)');
+  const linkSeries = db.prepare('INSERT OR IGNORE INTO book_series(book_id, series_id, series_no) VALUES(?, ?, ?)');
   const linkGenre = db.prepare('INSERT OR IGNORE INTO book_genres(book_id, genre_id) VALUES(?, ?)');
   const unlinkAuthors = db.prepare('DELETE FROM book_authors WHERE book_id = ?');
   const unlinkSeries = db.prepare('DELETE FROM book_series WHERE book_id = ?');
@@ -769,12 +772,12 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
       id, title, authors, genres, series, series_no, title_sort, author_sort,
       series_sort, series_index, title_search, authors_search, series_search,
       genres_search, keywords_search, file_name, archive_name, size, lib_id, deleted,
-      ext, date, lang, keywords, source_id
+      ext, date, lang, keywords, lib_rate, source_id
     ) VALUES (
       @id, @title, @authors, @genres, @series, @seriesNo, @titleSort, @authorSort,
       @seriesSort, @seriesIndex, @titleSearch, @authorsSearch, @seriesSearch,
       @genresSearch, @keywordsSearch, @fileName, @archiveName, @size, @libId, @deleted,
-      @ext, @date, @lang, @keywords, @sourceId
+      @ext, @date, @lang, @keywords, @libRate, @sourceId
     )
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title, authors = excluded.authors, genres = excluded.genres,
@@ -787,6 +790,7 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
       file_name = excluded.file_name, archive_name = excluded.archive_name,
       size = excluded.size, ext = excluded.ext, date = excluded.date,
       lang = excluded.lang, keywords = excluded.keywords,
+      lib_rate = excluded.lib_rate,
       source_id = excluded.source_id, imported_at = CURRENT_TIMESTAMP
   `);
 
@@ -871,7 +875,8 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
         ext: file.ext,
         date: normalizeText(meta.date) || '',
         lang: normalizeText(meta.lang) || '',
-        keywords: normalizeText(meta.keywords) || ''
+        keywords: normalizeText(meta.keywords) || '',
+        libRate: 0
       };
       return { rawRow };
     });
@@ -884,13 +889,15 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
 
     const txStartedAt = Date.now();
     const tx = db.transaction((rows) => {
+      const batchSeenIds = new Set();
       for (const rawRow of rows) {
         const row = enrichBookRow(rawRow);
         if (!row || suppressedIds.has(row.id)) continue;
         row.sourceId = source.id;
         insertBook.run(row);
 
-        if (incremental) {
+        if (incremental && !batchSeenIds.has(row.id)) {
+          batchSeenIds.add(row.id);
           unlinkAuthors.run(row.id);
           unlinkSeries.run(row.id);
           unlinkGenres.run(row.id);
@@ -903,7 +910,7 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
 
         if (row.series) {
           const seriesId = resolveSeriesId(row.series);
-          if (seriesId) linkSeries.run(row.id, seriesId);
+          if (seriesId) linkSeries.run(row.id, seriesId, row.seriesNo || '');
         }
 
         for (const genreName of splitFacetValues(row.genres)) {
@@ -1053,6 +1060,7 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
       setMeta(BOOKS_FTS_DIRTY_META_KEY, '1');
     }
     // Always pair with the unconditional beginFastSqliteImport() above.
+    ensureBulkImportIndexes();
     endFastSqliteImport();
     endExclusiveOperation('indexing');
   }

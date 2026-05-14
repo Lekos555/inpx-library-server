@@ -3,14 +3,16 @@
  */
 // IMPORTANT: Bump this version when deploying new assets to invalidate browser caches
 const CACHE_VERSION = 3;
-const CACHE_NAME = `inpx-v1-eaaeebd6`;
+const CACHE_NAME = `inpx-v1-7b83e7f8`;
 
 const COVER_CACHE_NAME = 'inpx-covers-v1';
 const MAX_COVER_CACHE_ENTRIES = 500;
 
 const STATIC_ASSETS = [
   '/styles.css',
+  '/styles.min.css',
   '/app.js',
+  '/app.min.js',
   '/reader.css',
   '/reader.js',
   '/logo.png',
@@ -54,20 +56,27 @@ self.addEventListener('fetch', (event) => {
   // Skip cross-origin requests (e.g. Google Fonts)
   if (url.origin !== self.location.origin) return;
 
-  // Static assets: cache-first (ignoreSearch matches regardless of ?v= query param)
+  // Static assets: для версионированных URL (?v=) — network-first (новые версии сразу),
+  // для не-версионированных — stale-while-revalidate (отдаём кэш, в фоне обновляем).
   if (STATIC_ASSETS.some((a) => url.pathname === a)) {
     event.respondWith(
-      caches.match(event.request, { ignoreSearch: true }).then((cached) => cached || fetch(event.request).then((resp) => {
-        if (resp.ok) {
-          const clone = resp.clone();
-          // Normalize: store without query string so ignoreSearch always matches
-          const normalizedUrl = new URL(event.request.url);
-          normalizedUrl.search = '';
-          const normalizedReq = new Request(normalizedUrl.href);
-          caches.open(CACHE_NAME).then((c) => c.put(normalizedReq, clone));
+      caches.match(event.request, { ignoreSearch: true }).then((cached) => {
+        const network = fetch(event.request).then((resp) => {
+          if (resp.ok) {
+            const clone = resp.clone();
+            const normalizedUrl = new URL(event.request.url);
+            normalizedUrl.search = '';
+            const normalizedReq = new Request(normalizedUrl.href);
+            caches.open(CACHE_NAME).then((c) => c.put(normalizedReq, clone));
+          }
+          return resp;
+        }).catch(() => cached);
+        // Версионированный ассет — сеть в приоритете, чтобы новые ?v= подхватывались сразу
+        if (url.searchParams.has('v')) {
+          return network;
         }
-        return resp;
-      }))
+        return cached || network;
+      })
     );
     return;
   }

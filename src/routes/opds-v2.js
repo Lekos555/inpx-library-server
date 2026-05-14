@@ -2,9 +2,9 @@
  * OPDS 2.0 (JSON) routes — parallel to OPDS 1.2 XML at /opds/.
  * All endpoints under /opds/v2/.
  */
-import { t, countLabel } from '../i18n.js';
+import { t, tp, countLabel } from '../i18n.js';
 import { requireOpdsAuth } from '../middleware/auth.js';
-import { formatGenreLabel } from '../genre-map.js';
+import { formatGenreLabel, getGenreGroups } from '../genre-map.js';
 import { safePage } from '../utils/safe-int.js';
 import { getOrExtractBookDetails } from '../fb2.js';
 import {
@@ -55,25 +55,46 @@ export function registerOpdsV2Routes(app, deps) {
 
     if (series && prefix.startsWith('=')) {
       const authorName = prefix.slice(1);
-      const books = getAuthorSeriesBooksOpds(authorName, series, genre);
+      const items = getAuthorSeriesBooksOpds(authorName, series, genre);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: series,
         selfPath: req.originalUrl,
-        items: books,
-        total: books.length
+        items,
+        total: items.length,
       }));
     }
 
     if (prefix.startsWith('=')) {
       const authorName = prefix.slice(1);
-      const books = getAuthorBooksOpds(authorName, genre);
+      const allBooks = getAuthorBooksOpds(authorName, genre);
+      // Group by series like inpx-web
+      const seriesMap = new Map();
+      const standalone = [];
+      for (const book of allBooks) {
+        if (book.series) {
+          if (!seriesMap.has(book.series)) {
+            seriesMap.set(book.series, 0);
+          }
+          seriesMap.set(book.series, seriesMap.get(book.series) + 1);
+        } else {
+          standalone.push(book);
+        }
+      }
+      const navEntries = [...seriesMap.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, count]) => ({
+          title: tp('book.seriesPrefix', { name }),
+          href: `/opds/v2/authors?prefix=${encodeURIComponent(prefix)}&series=${encodeURIComponent(name)}&genre=${encodeURIComponent(genre)}`,
+          count,
+        }));
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: authorName,
         selfPath: req.originalUrl,
-        items: books,
-        total: books.length
+        items: standalone,
+        total: standalone.length,
+        navEntries
       }));
     }
 
@@ -97,13 +118,13 @@ export function registerOpdsV2Routes(app, deps) {
 
     if (prefix.startsWith('=')) {
       const seriesName = prefix.slice(1);
-      const books = getSeriesBooksOpds(seriesName);
+      const items = getSeriesBooksOpds(seriesName);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: seriesName || t('facet.facetSeries'),
         selfPath: req.originalUrl,
-        items: books,
-        total: books.length
+        items,
+        total: items.length,
       }));
     }
 
@@ -130,7 +151,7 @@ export function registerOpdsV2Routes(app, deps) {
     // Check if any are book entries (not nav)
     const hasBooks = items.some(i => i.isBook);
     if (hasBooks) {
-      const books = items.filter(i => i.isBook).map(i => ({ id: i.bookId, title: i.title, authors: i.authors, ext: i.ext || 'fb2', lang: i.lang || '', genres: i.genres || '', series: i.series || '', seriesNo: i.seriesNo || '' }));
+      const books = items.filter(i => i.isBook).map(i => ({ id: i.bookId, title: i.title, authors: i.authors, ext: i.ext || 'fb2', lang: i.lang || '', genres: i.genres || '', series: i.series || '', seriesNo: i.seriesNo || '', seriesList: i.seriesList || [] }));
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, { title: t('opds.nav.books'), selfPath: req.originalUrl, items: books }));
     }
@@ -145,16 +166,46 @@ export function registerOpdsV2Routes(app, deps) {
     res.send(renderOpds2NavigationFeed(base, { title: t('opds.nav.books'), selfPath: req.originalUrl, entries }));
   });
 
-  // Genres
+  // Genres — hierarchical: sections → sub-genres (like inpx-web)
   app.get('/opds/v2/genres', requireOpdsAuth, (req, res) => {
     const base = baseUrl(req);
-    const allGenres = listGenres({ page: 1, pageSize: 500, query: '', sort: 'name' }).items;
+    const section = String(req.query.section || '');
+    const from = String(req.query.from || 'authors');
+    const groups = getGenreGroups();
+    const allGenres = listGenres({ page: 1, pageSize: 9999, query: '', sort: 'name' }).items;
+    const genreBookCount = new Map(allGenres.map(g => [g.name, g.bookCount]));
 
-    const entries = allGenres.map(g => ({
-      href: `/opds/v2/search?query=&genre=${encodeURIComponent(g.name)}`,
-      title: formatGenreLabel(g.name),
-      count: g.bookCount
-    }));
+    const entries = [];
+    if (section) {
+      const codes = groups[section] || [];
+      if (codes.length) {
+        entries.push({
+          href: `/opds/v2/${encodeURIComponent(from)}?genre=${encodeURIComponent(codes.join(','))}`,
+          title: '[Весь раздел]',
+        });
+      }
+      for (const code of codes) {
+        const count = genreBookCount.get(code) || 0;
+        if (count > 0) {
+          entries.push({
+            href: `/opds/v2/${encodeURIComponent(from)}?genre=${encodeURIComponent(code)}`,
+            title: formatGenreLabel(code),
+            count,
+          });
+        }
+      }
+    } else {
+      for (const [groupName, codes] of Object.entries(groups)) {
+        const total = codes.reduce((sum, code) => sum + (genreBookCount.get(code) || 0), 0);
+        if (total > 0) {
+          entries.push({
+            href: `/opds/v2/genres?section=${encodeURIComponent(groupName)}&from=${encodeURIComponent(from)}`,
+            title: groupName,
+            count: total,
+          });
+        }
+      }
+    }
 
     res.type(OPDS_JSON);
     res.send(renderOpds2NavigationFeed(base, { title: t('opds.nav.genres'), selfPath: req.originalUrl, entries }));

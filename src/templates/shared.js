@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, parseGenreCodes } from '../genre-map.js';
 import { getAvailableDownloadFormats, FORMAT_LABELS } from '../conversion.js';
@@ -24,8 +25,6 @@ import {
 export { t, tp, getLocale, plural, countLabel, formatLocaleInt, formatLocaleDateShort, formatLocaleDateTimeShort, formatLocaleDateLong, serializeClientI18n };
 export { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, parseGenreCodes };
 export { getAvailableDownloadFormats, FORMAT_LABELS };
-
-export const STATIC_ASSET_VERSION = String(Date.now());
 
 const APP_MIN_PATH = path.join(config.publicDir, 'app.min.js');
 const CSS_MIN_PATH = path.join(config.publicDir, 'styles.min.css');
@@ -71,7 +70,43 @@ if (_isProdEnv && _hasMinifiedFiles && !_minifiedFresh) {
 const APP_ASSET_FILE = USE_MINIFIED_ASSETS ? 'app.min.js' : 'app.js';
 const CSS_ASSET_FILE = USE_MINIFIED_ASSETS ? 'styles.min.css' : 'styles.css';
 
+function computeStaticAssetVersion() {
+  const files = USE_MINIFIED_ASSETS
+    ? [APP_MIN_PATH, CSS_MIN_PATH]
+    : [APP_SRC_PATH, CSS_SRC_PATH];
+  const hash = crypto.createHash('md5');
+  for (const p of files) {
+    try {
+      hash.update(fs.readFileSync(p));
+    } catch { /* ignore missing files */ }
+  }
+  return hash.digest('hex').slice(0, 8);
+}
+
+export const STATIC_ASSET_VERSION = computeStaticAssetVersion();
+
 export const READ_CHECK_SVG = '<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>';
+
+export function renderCover(book, { readBookIds = null } = {}) {
+  const readBadge = readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : '';
+  const coverRating = book.libRate
+    ? `<span class="cover-rating">${[1,2,3,4,5].map((i) => `<span class="cover-star${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}</span>`
+    : '';
+  return `
+    <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
+      <span class="cover-fallback">
+        <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
+        <span class="cover-fallback-overlay"></span>
+        <span class="cover-fallback-copy">
+          <span class="cover-fallback-title">${escapeHtml(book.title)}</span>
+          <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
+        </span>
+      </span>
+      <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${escapeHtml(book.title)}">
+      ${readBadge}
+      ${coverRating}
+    </a>`;
+}
 
 export function browseEntityPluralType(path) {
   if (path === '/authors') return 'author';
@@ -291,17 +326,27 @@ export function renderBreadcrumbs(items = []) {
     </div>`;
 }
 
-export function renderSortControl({ action, sort, options, query = '', field = '', genre = '', extraHidden = {} }) {
+const SORT_NATURAL_DIR = {
+  recent: 'DESC', title: 'ASC', author: 'ASC', series: 'ASC',
+  rating: 'DESC', date: 'DESC', count: 'DESC', name: 'ASC'
+};
+
+export function renderSortControl({ action, sort, order = '', options, query = '', field = '', genre = '', extraHidden = {} }) {
   const extraFields = Object.entries(extraHidden).map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`).join('');
+  const natural = SORT_NATURAL_DIR[sort] || 'ASC';
+  const effective = order === 'asc' ? 'ASC' : order === 'desc' ? 'DESC' : natural;
+  const nextOrder = effective === 'ASC' ? 'desc' : 'asc';
+  const icon = effective === 'ASC' ? '▲' : '▼';
   return `
-    <form class="search-form" action="${action}" method="get" style="max-width:280px;">
+    <form class="search-form" action="${action}" method="get" style="max-width:340px;display:flex;gap:6px;align-items:center;">
       ${query ? `<input type="hidden" name="q" value="${escapeHtml(query)}">` : ''}
       ${field ? `<input type="hidden" name="field" value="${escapeHtml(field)}">` : ''}
       ${genre ? `<input type="hidden" name="genre" value="${escapeHtml(genre)}">` : ''}
       ${extraFields}
-      <select name="sort" onchange="this.form.submit()">
+      <select name="sort" onchange="this.form.submit()" style="flex:1;">
         ${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === sort ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('')}
       </select>
+      <button type="submit" name="order" value="${nextOrder}" class="button" style="padding:4px 10px;font-size:14px;line-height:1;" title="${escapeHtml(order === nextOrder ? '' : nextOrder === 'asc' ? 'По возрастанию' : 'По убыванию')}">${icon}</button>
     </form>`;
 }
 
@@ -543,34 +588,22 @@ export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetail
     effectiveBatch
       ? `<label class="batch-select-hit" title="${escapeHtml(t('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" ${batchSelectInputAttrs(book.id)} data-batch-book-id="${escapeHtml(book.id)}" aria-label="${escapeHtml(t('batch.selectAria'))}"></label>`
       : '';
-  const readBadge = (book) => readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : '';
   return `
     <div class="grid">
       ${uniqueItems.map((book) => {
         const isRead = readBookIds && readBookIds.has(book.id);
-        const cacheKey = _cardCacheKey(book, `${flags}${isRead ? '1' : '0'}`);
+        const cacheKey = _cardCacheKey(book, `${flags}${isRead ? '1' : '0'}${book.libRate || 0}`);
         const cached = getCachedCardHtml(cacheKey);
         if (cached) return cached;
         const cardDl = effectiveBatch || hideDownloads ? '' : renderDownloadMenu(book, { compact: true, user });
         const html = `
         <article class="card" data-book-id="${escapeHtml(book.id)}">
           ${batchCb(book)}
-          <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-            <span class="cover-fallback">
-              <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
-              <span class="cover-fallback-overlay"></span>
-              <span class="cover-fallback-copy">
-                <span class="cover-fallback-title">${escapeHtml(book.title)}</span>
-                <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
-              </span>
-            </span>
-            <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${escapeHtml(book.title)}">
-            ${readBadge(book)}
-          </a>
+          ${renderCover(book, { readBookIds })}
           <div class="meta">
             <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
             <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-            ${book.series ? `<div class="card-series"><a href="/facet/series/${encodeURIComponent(book.series)}">${escapeHtml(book.series)}${book.seriesNo ? ` #${escapeHtml(book.seriesNo)}` : ''}</a></div>` : ''}
+            ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
             ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
             ${cardDl ? `<div class="card-actions">${cardDl}</div>` : ''}
           </div>
@@ -587,28 +620,16 @@ export function renderFavoriteBookGrid(items = [], { batchSelect = false, user =
     batchSelect
       ? `<label class="batch-select-hit" title="${escapeHtml(t('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" ${batchSelectInputAttrs(book.id)} data-batch-book-id="${escapeHtml(book.id)}" aria-label="${escapeHtml(t('batch.selectAria'))}"></label>`
       : '';
-  const readBadge = (book) => readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : '';
   return `
     <div class="grid">
       ${uniqueItems.map((book) => `
         <article class="card" data-book-id="${escapeHtml(book.id)}">
           ${batchCb(book)}
-          <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-            <span class="cover-fallback">
-              <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
-              <span class="cover-fallback-overlay"></span>
-              <span class="cover-fallback-copy">
-                <span class="cover-fallback-title">${escapeHtml(book.title)}</span>
-                <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
-              </span>
-            </span>
-            <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${escapeHtml(book.title)}">
-            ${readBadge(book)}
-          </a>
+          ${renderCover(book, { readBookIds })}
           <div class="meta">
             <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
             <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-            ${book.series ? `<div class="card-series"><a href="/facet/series/${encodeURIComponent(book.series)}">${escapeHtml(book.series)}${book.seriesNo ? ` #${escapeHtml(book.seriesNo)}` : ''}</a></div>` : ''}
+            ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
             <div class="card-actions card-actions-favorites">
               ${batchSelect ? '' : renderDownloadMenu(book, { compact: true, user })}
               <button class="button card-remove-favorite-action" type="button" data-bookmark-button="${escapeHtml(book.id)}">${escapeHtml(t('book.remove'))}</button>
@@ -949,6 +970,11 @@ export function pageShell({ title, content, user, query = '', field = 'all', sta
   </div>
   <button class="scroll-to-top" type="button" data-scroll-top aria-label="${escapeHtml(t('scrollTop'))}">↑</button>
   <script src="/${APP_ASSET_FILE}?v=${STATIC_ASSET_VERSION}" defer></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
 </body>
 </html>`;
 }

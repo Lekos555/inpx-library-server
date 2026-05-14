@@ -1,3 +1,10 @@
+# --- Build stage: полная Node image со всеми инструментами для сборки нативных модулей ---
+FROM node:20-bookworm AS builder
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev
+
+# --- Runtime stage: только slim-образ, без build-tools ---
 FROM node:20-bookworm-slim
 
 ARG FB2CNG_VERSION=v1.1.8
@@ -9,13 +16,12 @@ RUN apt-get update \
 
 WORKDIR /app-image
 
-COPY package.json ./
-RUN npm install --omit=dev
-
+COPY --from=builder /app/node_modules ./node_modules
 COPY public ./public
 COPY scripts ./scripts
 COPY src ./src
 COPY .env.example ./
+COPY package.json ./
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
