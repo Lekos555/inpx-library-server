@@ -792,7 +792,7 @@ export function registerLibraryRoutes(app, deps) {
         indexStatus: getIndexStatus(), sort, order, facet, facetValue: value,
         favorite, seriesRead, breadcrumbs, csrfToken: req.csrfToken || '',
         readBookIds: username ? getReadBookIdSet(username) : null,
-        view, order
+        view
       }));
     } catch (error) {
       next(error);
@@ -861,8 +861,8 @@ export function registerLibraryRoutes(app, deps) {
     const view = ['books', 'read', 'authors', 'series'].includes(String(req.query.view || '')) ? String(req.query.view) : 'books';
     const sort = ['title', 'author', 'date', 'rating', 'name', 'count'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
     const order = String(req.query.order || '');
-    const books = getBookmarks(req.user.username, sort, order);
-    const readBooks = getReadBooks(req.user.username, sort, order);
+    const books = getBookmarks(req.user.username, sort);
+    const readBooks = getReadBooks(req.user.username, sort);
     const authors = getFavoriteAuthors(req.user.username, 50, sort, order);
     const series = getFavoriteSeries(req.user.username, 50, sort, order);
     const readBookIds = getReadBookIdSet(req.user.username);

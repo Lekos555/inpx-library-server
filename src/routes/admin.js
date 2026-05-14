@@ -1085,6 +1085,7 @@ export function registerAdminRoutes(app, deps) {
     try {
       const changes = softDeleteBook(bookId);
       if (changes) {
+        invalidateDuplicatesCache();
         clearPageDataCache();
         logSystemEvent('info', 'operations', 'duplicate book soft-deleted', { actor: req.user.username, bookId });
       }
@@ -1100,6 +1101,7 @@ export function registerAdminRoutes(app, deps) {
     }
     try {
       const result = autoCleanDuplicates();
+      invalidateDuplicatesCache();
       clearPageDataCache();
       logSystemEvent('info', 'operations', 'auto-clean duplicates', {
         actor: req.user.username, groupsCleaned: result.groupsCleaned, totalDeleted: result.totalDeleted
@@ -1127,6 +1129,7 @@ export function registerAdminRoutes(app, deps) {
       const restored = unsuppressBook(bookId);
       if (restored) {
         invalidateDuplicatesCache();
+        refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after unsuppressBook:', err));
       }
       clearPageDataCache();
       logSystemEvent('info', 'operations', 'book unsuppressed', { actor: req.user.username, bookId });
@@ -1144,6 +1147,7 @@ export function registerAdminRoutes(app, deps) {
       const count = unsuppressAll();
       if (count > 0) {
         invalidateDuplicatesCache();
+        refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after unsuppressAll:', err));
       }
       clearPageDataCache();
       logSystemEvent('info', 'operations', 'all books unsuppressed', { actor: req.user.username, count });

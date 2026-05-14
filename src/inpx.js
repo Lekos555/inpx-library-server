@@ -106,6 +106,7 @@ function resetInpxPreparedStatements() {
   _stmtGetStats = null;
   _stmtIsBookRead = null;
   _stmtIsSeriesFullyRead = null;
+  clearRuntimeQueryCaches();
 }
 onViewRebuild(resetInpxPreparedStatements);
 
@@ -1960,7 +1961,8 @@ const SORT_NATURAL_DIR = {
 
 function applyOrder(sql, order) {
   if (order !== 'asc' && order !== 'desc') return sql;
-  const natural = sql.includes(' DESC') ? 'DESC' : 'ASC';
+  const firstMatch = sql.match(/\b(ASC|DESC)\b/);
+  const natural = firstMatch ? firstMatch[1] : 'ASC';
   if (natural === order.toUpperCase()) return sql;
   // Инвертируем первое вхождение ASC/DESC (основное поле сортировки)
   return sql.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
@@ -4425,7 +4427,8 @@ export function getFavoriteAuthors(username, limit = 20, sort = 'name', order = 
   };
   let orderBy = orderMap[sort] || orderMap.name;
   if (order === 'asc' || order === 'desc') {
-    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    const firstMatch = orderBy.match(/\b(ASC|DESC)\b/);
+    const natural = firstMatch ? firstMatch[1] : 'ASC';
     if (natural !== order.toUpperCase()) {
       orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
         .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
@@ -4452,7 +4455,8 @@ export function getFavoriteSeries(username, limit = 20, sort = 'name', order = '
   };
   let orderBy = orderMap[sort] || orderMap.name;
   if (order === 'asc' || order === 'desc') {
-    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    const firstMatch = orderBy.match(/\b(ASC|DESC)\b/);
+    const natural = firstMatch ? firstMatch[1] : 'ASC';
     if (natural !== order.toUpperCase()) {
       orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
         .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');
@@ -4499,14 +4503,14 @@ export function isFavoriteSeries(username, seriesName) {
   return Boolean(_stmtIsFavSeries.get(username, resolved));
 }
 
-export function getBookmarks(username, sort = 'title', order = '') {
+export function getBookmarks(username, sort = 'date') {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
     date: 'bm.created_at DESC',
     rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
-  const orderBy = applyOrder(orderMap[sort] || orderMap.title, order);
+  const orderBy = orderMap[sort] || orderMap.date;
   return db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
            b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
@@ -4632,14 +4636,14 @@ export function addReadBooksIfMissing(username, bookIds) {
   return { added, already, missing };
 }
 
-export function getReadBooks(username, sort = 'title', order = '') {
+export function getReadBooks(username, sort = 'date') {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
     date: 'rb.created_at DESC',
     rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
-  const orderBy = applyOrder(orderMap[sort] || orderMap.title, order);
+  const orderBy = orderMap[sort] || orderMap.date;
   return db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
            b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName

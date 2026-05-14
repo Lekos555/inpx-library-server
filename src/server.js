@@ -43,7 +43,7 @@ import { startScanScheduler } from './services/scheduler.js';
 import {
   STATS_CACHE_TTL_MS, HOME_SECTIONS_CACHE_TTL_MS
 } from './constants.js';
-import { db, getUserByUsername, hasAdminUser, initDb, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView } from './db.js';
+import { db, getUserByUsername, hasAdminUser, initDb, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts } from './db.js';
 import {
   backfillCatalogSearchFields,
   getConfiguredInpxFile,
@@ -947,6 +947,12 @@ async function bootstrap() {
       await rebuildActiveBooksView();
     } catch (err) {
       console.error('[startup] rebuildActiveBooksView failed:', err.message);
+      // Даже если view не пересоздана, пересчитаем counts на основе текущей view
+      try {
+        await refreshCatalogBookCounts();
+      } catch (e) {
+        console.error('[startup] refreshCatalogBookCounts fallback failed:', e.message);
+      }
     }
   }, 50);
 

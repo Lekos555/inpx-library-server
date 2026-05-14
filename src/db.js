@@ -1785,48 +1785,51 @@ export async function rebuildActiveBooksView() {
  * excluded_languages.
  */
 export async function refreshCatalogBookCounts() {
-  // Use efficient set-based UPDATE ... FROM (single GROUP BY pass per table)
-  // instead of correlated subqueries (which are O(catalog_rows × books)).
-  db.exec('UPDATE authors SET book_count = 0;');
-  await new Promise(r => setImmediate(r));
-  db.exec(`
-    UPDATE authors SET book_count = t.cnt
-    FROM (
-      SELECT ba.author_id AS id, COUNT(*) AS cnt
-      FROM book_authors ba
-      JOIN active_books b ON b.id = ba.book_id
-      GROUP BY ba.author_id
-    ) t
-    WHERE authors.id = t.id;
-  `);
-  await new Promise(r => setImmediate(r));
-
-  db.exec('UPDATE series_catalog SET book_count = 0;');
-  await new Promise(r => setImmediate(r));
-  db.exec(`
-    UPDATE series_catalog SET book_count = t.cnt
-    FROM (
-      SELECT bs.series_id AS id, COUNT(*) AS cnt
-      FROM book_series bs
-      JOIN active_books b ON b.id = bs.book_id
-      GROUP BY bs.series_id
-    ) t
-    WHERE series_catalog.id = t.id;
-  `);
+  // Каждая пара (обнуление + пересчёт) в транзакции для атомарности:
+  // если пересчёт упадёт — обнуление откатится и counts останутся на прежних значениях.
+  db.transaction(() => {
+    db.exec('UPDATE authors SET book_count = 0');
+    db.exec(`
+      UPDATE authors SET book_count = t.cnt
+      FROM (
+        SELECT ba.author_id AS id, COUNT(*) AS cnt
+        FROM book_authors ba
+        JOIN active_books b ON b.id = ba.book_id
+        GROUP BY ba.author_id
+      ) t
+      WHERE authors.id = t.id
+    `);
+  })();
   await new Promise(r => setImmediate(r));
 
-  db.exec('UPDATE genres_catalog SET book_count = 0;');
+  db.transaction(() => {
+    db.exec('UPDATE series_catalog SET book_count = 0');
+    db.exec(`
+      UPDATE series_catalog SET book_count = t.cnt
+      FROM (
+        SELECT bs.series_id AS id, COUNT(*) AS cnt
+        FROM book_series bs
+        JOIN active_books b ON b.id = bs.book_id
+        GROUP BY bs.series_id
+      ) t
+      WHERE series_catalog.id = t.id
+    `);
+  })();
   await new Promise(r => setImmediate(r));
-  db.exec(`
-    UPDATE genres_catalog SET book_count = t.cnt
-    FROM (
-      SELECT bg.genre_id AS id, COUNT(*) AS cnt
-      FROM book_genres bg
-      JOIN active_books b ON b.id = bg.book_id
-      GROUP BY bg.genre_id
-    ) t
-    WHERE genres_catalog.id = t.id;
-  `);
+
+  db.transaction(() => {
+    db.exec('UPDATE genres_catalog SET book_count = 0');
+    db.exec(`
+      UPDATE genres_catalog SET book_count = t.cnt
+      FROM (
+        SELECT bg.genre_id AS id, COUNT(*) AS cnt
+        FROM book_genres bg
+        JOIN active_books b ON b.id = bg.book_id
+        GROUP BY bg.genre_id
+      ) t
+      WHERE genres_catalog.id = t.id
+    `);
+  })();
   await new Promise(r => setImmediate(r));
 }
 
@@ -1959,7 +1962,8 @@ export function getReadBooks(username, sort = 'title', order = '') {
   };
   let orderBy = orderMap[sort] || orderMap.title;
   if (order === 'asc' || order === 'desc') {
-    const natural = orderBy.includes(' DESC') ? 'DESC' : 'ASC';
+    const firstMatch = orderBy.match(/\b(ASC|DESC)\b/);
+    const natural = firstMatch ? firstMatch[1] : 'ASC';
     if (natural !== order.toUpperCase()) {
       orderBy = orderBy.replace(/\bASC\b/, '#ASC#').replace(/\bDESC\b/, '#DESC#')
         .replace('#ASC#', 'DESC').replace('#DESC#', 'ASC');

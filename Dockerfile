@@ -4,6 +4,15 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
+# --- Assets stage: сборка минифицированных JS/CSS ---
+FROM node:20-bookworm-slim AS assets
+WORKDIR /build
+COPY package.json ./
+COPY public ./public
+COPY scripts ./scripts
+COPY --from=builder /app/node_modules ./node_modules
+RUN node scripts/build-assets.js
+
 # --- Runtime stage: только slim-образ, без build-tools ---
 FROM node:20-bookworm-slim
 
@@ -17,11 +26,11 @@ RUN apt-get update \
 WORKDIR /app-image
 
 COPY --from=builder /app/node_modules ./node_modules
-COPY public ./public
+COPY package.json ./
+COPY --from=assets /build/public ./public
 COPY scripts ./scripts
 COPY src ./src
 COPY .env.example ./
-COPY package.json ./
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
