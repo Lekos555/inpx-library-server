@@ -123,10 +123,24 @@ export function invalidateFavoritesPage(username) {
 }
 
 /**
+ * Сброс кэша страниц /library/continue и /library/read для юзера.
+ */
+export function invalidateUserLibraryViewCaches(username) {
+  const u = String(username || '').trim();
+  if (!u) return;
+  for (const key of pageDataCache.keys()) {
+    if (key.startsWith(`library:continue:${u}:`) || key.startsWith(`library:read:${u}:`)) {
+      pageDataCache.delete(key);
+    }
+  }
+}
+
+/**
  * Комбинированный сброс всех per-user кэшей страниц при действии юзера.
  * Зовётся из роутов bookmark / read / favorite toggle.
  */
 export function invalidateUserPageCaches(username) {
   invalidateHomeUserSnapshot(username);
   invalidateFavoritesPage(username);
+  invalidateUserLibraryViewCaches(username);
 }

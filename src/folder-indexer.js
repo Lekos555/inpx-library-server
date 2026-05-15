@@ -798,24 +798,27 @@ export async function indexFolder(source, { incremental = true, onProgress = nul
 
   function resolveAuthorId(name) {
     if (authorIdCache.has(name)) return authorIdCache.get(name);
-    insertAuthor.run(name, authorDisplayName(name), createSortKey(authorSortKey(name)), authorSearchName(name));
-    const id = selectAuthor.get(name)?.id || null;
+    const key = name.toLowerCase();
+    insertAuthor.run(key, authorDisplayName(name), createSortKey(authorSortKey(name)), authorSearchName(name));
+    const id = selectAuthor.get(key)?.id || null;
     authorIdCache.set(name, id);
     return id;
   }
 
   function resolveSeriesId(name) {
     if (seriesIdCache.has(name)) return seriesIdCache.get(name);
-    insertSeries.run(name, seriesDisplayName(name), seriesSortName(name), seriesSearchName(name));
-    const id = selectSeries.get(name)?.id || null;
+    const key = name.toLowerCase();
+    insertSeries.run(key, seriesDisplayName(name), seriesSortName(name), seriesSearchName(name));
+    const id = selectSeries.get(key)?.id || null;
     seriesIdCache.set(name, id);
     return id;
   }
 
   function resolveGenreId(name) {
     if (genreIdCache.has(name)) return genreIdCache.get(name);
-    insertGenre.run(name, genreDisplayName(name), genreSortName(name), genreSearchName(name));
-    const id = selectGenre.get(name)?.id || null;
+    const key = name.toLowerCase();
+    insertGenre.run(key, genreDisplayName(name), genreSortName(name), genreSearchName(name));
+    const id = selectGenre.get(key)?.id || null;
     genreIdCache.set(name, id);
     return id;
   }

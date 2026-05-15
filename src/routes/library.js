@@ -7,7 +7,7 @@ import { config } from '../config.js';
 import { t, tp, getLocale } from '../i18n.js';
 import { ApiErrorCode, apiFail } from '../api-errors.js';
 import { requireBrowseAuth, requireBrowseOrOpds, requireWebAuth, requireAdminWeb } from '../middleware/auth.js';
-import { getCachedPageData, getStaleOrSchedule, clearPageDataCache, invalidateHomeUserSnapshot } from '../services/cache.js';
+import { getCachedPageData, getStaleOrSchedule, clearPageDataCache, invalidateUserPageCaches } from '../services/cache.js';
 import { logSystemEvent } from '../services/system-events.js';
 import { getRecommendedLibraryView, getHomeRecommendations, buildSimilarBooks } from '../services/recommendations.js';
 import { safePage } from '../utils/safe-int.js';
@@ -559,11 +559,14 @@ export function registerLibraryRoutes(app, deps) {
     const stats = getCachedStats();
 
     // Grouped view when no search/letter filter and first page
-    if (!query && !letter && page === 1 && sort === 'count') {
-      const allGenres = getStaleOrSchedule('browse:genres:grouped', () => listGenresGrouped(), PAGE_CACHE_TTL_MS, []);
+    if (!query && !letter && page === 1 && (sort === 'count' || sort === 'name')) {
+      const allGenres = getStaleOrSchedule(`browse:genres:grouped:${sort}`, () => listGenresGrouped({ sort }), PAGE_CACHE_TTL_MS, []);
       const groups = getGenreGroups();
       const grouped = [];
-      for (const [groupName, codes] of Object.entries(groups)) {
+      const entries = sort === 'name'
+        ? Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0], getLocale()))
+        : Object.entries(groups);
+      for (const [groupName, codes] of entries) {
         const codesSet = new Set(codes);
         const items = allGenres.filter(g => codesSet.has(g.name));
         if (items.length) grouped.push({ groupName, items });
@@ -654,7 +657,8 @@ export function registerLibraryRoutes(app, deps) {
 
   app.get('/facet/:facet/:value', requireBrowseAuth, async (req, res, next) => {
     try {
-      const sort = String(req.query.sort || 'title');
+      const facetType = String(req.params.facet || '');
+      const sort = String(req.query.sort || (facetType === 'series' ? 'series' : 'title'));
     const order = String(req.query.order || '');
       const page = safePage(req.query.page);
       const pageSize = 24;
@@ -782,7 +786,12 @@ export function registerLibraryRoutes(app, deps) {
         return;
       }
 
-      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort, order });
+      let authorFilter = facet === 'series' ? String(req.query.author || '').trim() : '';
+      if (authorFilter) {
+        const canonical = resolveAuthorName(authorFilter);
+        authorFilter = canonical ?? authorFilter.toLowerCase();
+      }
+      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort, order, author: authorFilter });
       const summary = getFacetSummary(facet, value);
       const seriesRead = facet === 'series' && username ? isSeriesFullyRead(username, value) : false;
       res.send(renderFacetBooks({
@@ -792,7 +801,7 @@ export function registerLibraryRoutes(app, deps) {
         indexStatus: getIndexStatus(), sort, order, facet, facetValue: value,
         favorite, seriesRead, breadcrumbs, csrfToken: req.csrfToken || '',
         readBookIds: username ? getReadBookIdSet(username) : null,
-        view
+        view, authorFilter
       }));
     } catch (error) {
       next(error);
@@ -833,7 +842,7 @@ export function registerLibraryRoutes(app, deps) {
   // --- Book edit (admin) ---
   app.post('/book/:id/edit', requireAdminWeb, (req, res) => {
     const bookId = req.params.id;
-    const { title, authors, series, seriesNo } = req.body;
+    const { title, authors, series, seriesNo, genres, lang, date, keywords, libRate } = req.body;
     if (!title || !String(title).trim()) {
       return res.redirect(`/book/${encodeURIComponent(bookId)}?flash=` + encodeURIComponent(t('book.edit.titleRequired')));
     }
@@ -842,7 +851,12 @@ export function registerLibraryRoutes(app, deps) {
         title: String(title).trim(),
         authors: String(authors || '').trim(),
         series: String(series || '').trim(),
-        seriesNo: String(seriesNo || '').trim()
+        seriesNo: String(seriesNo || '').trim(),
+        genres: String(genres || '').trim(),
+        lang: String(lang || '').trim(),
+        date: String(date || '').trim(),
+        keywords: String(keywords || '').trim(),
+        libRate: String(libRate || '').trim()
       });
       detailsCache.delete(bookId);
       clearPageDataCache();
@@ -1151,7 +1165,7 @@ export function registerLibraryRoutes(app, deps) {
       const username = req.user?.username || '';
       if (username) {
         safeRecordReadingHistory(username, book.id);
-        invalidateHomeUserSnapshot(username);
+        invalidateUserPageCaches(username);
       }
       const details = await getDetails(book);
       res.send(renderReader({ book, details, user: req.user, csrfToken: req.csrfToken || '' }));

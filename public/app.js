@@ -928,14 +928,16 @@ function attachSeriesLongPress() {
   }
 
   function onStart(e) {
-    const row = e.target.closest('.table-row-link[href*="/facet/series/"]');
+    const row = e.target.closest('.table-row-link');
     if (!row) return;
+    const href = row.getAttribute('href') || '';
+    if (!href.includes('/facet/series/')) return;
     fired = false;
     const point = e.touches ? e.touches[0] : e;
     startX = point.clientX;
     startY = point.clientY;
-    const href = row.getAttribute('href') || '';
-    const m = href.match(/\/facet\/series\/(.+)$/);
+    const cleanHref = href.split('?')[0];
+    const m = cleanHref.match(/\/facet\/series\/(.+)$/);
     if (!m) return;
     const seriesName = decodeURIComponent(m[1]);
     timer = setTimeout(() => {
@@ -969,12 +971,15 @@ function attachSeriesLongPress() {
   document.addEventListener('touchend', onEnd);
   document.addEventListener('touchcancel', () => { cancel(); fired = false; });
   document.addEventListener('click', (e) => {
-    if (swallowNextClick && e.target.closest('.table-row-link[href*="/facet/series/"]')) {
-      e.preventDefault();
-      e.stopPropagation();
-      swallowNextClick = false;
-      if (swallowTimer) { clearTimeout(swallowTimer); swallowTimer = null; }
-    }
+    if (!swallowNextClick) return;
+    const row = e.target.closest('.table-row-link');
+    if (!row) return;
+    const href = row.getAttribute('href') || '';
+    if (!href.includes('/facet/series/')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    swallowNextClick = false;
+    if (swallowTimer) { clearTimeout(swallowTimer); swallowTimer = null; }
   }, true);
   // Suppress the native context menu on series rows — on mobile it
   // pops on long-press before our 500ms timer fires, hijacking the "mark as read" UX.
@@ -2387,19 +2392,91 @@ function getReadBookIdSet() {
   return _readBookIdSet;
 }
 
-function renderCardHtml(book, { batchSelect = false } = {}) {
+function uiNormalizeAuthorToken(value = '') {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^,+|,+$/g, '')
+    .replace(/^\?+$/, '')
+    .trim();
+}
+
+function uiSplitAuthorValues(value) {
+  return String(value || '')
+    .replace(/\s*;\s*/g, ':')
+    .replace(/\s*:\s*/g, ':')
+    .split(':')
+    .map((item) => uiNormalizeAuthorToken(item))
+    .filter(Boolean);
+}
+
+function uiFormatSingleAuthorName(value = '') {
+  const raw = uiNormalizeAuthorToken(value);
+  if (!raw) return '';
+  const parts = raw.split(',').map((item) => uiNormalizeAuthorToken(item)).filter(Boolean);
+  if (!parts.length) return raw;
+  return parts.join(' ');
+}
+
+function uiRenderAuthorLinks(authorsList, bookAuthors, popoverId) {
+  const list = (authorsList?.length) ? authorsList : uiSplitAuthorValues(bookAuthors);
+  if (!list.length) return '';
+  const visible = list.slice(0, 1);
+  const rest = list.slice(1);
+  const visibleHtml = visible.map((author) => {
+    const name = uiFormatSingleAuthorName(author) || author;
+    return `<a href="/facet/authors/${encodeURIComponent(author)}">${escapeHtml(name)}</a>`;
+  }).join(', ');
+  if (!rest.length) {
+    return `<span class="author-visible">${visibleHtml}</span>`;
+  }
+  const restHtml = rest.map((author) => {
+    const name = uiFormatSingleAuthorName(author) || author;
+    return `<a href="/facet/authors/${encodeURIComponent(author)}">${escapeHtml(name)}</a>`;
+  }).join(', ');
+  const id = escapeHtml(safeDomIdPart(popoverId));
+  const anchorName = `--${id}`;
+  return `<span class="author-visible">${visibleHtml}</span><button type="button" class="author-popover-trigger" popovertarget="${id}" style="anchor-name:${anchorName}">+${rest.length}</button><div id="${id}" popover="auto" class="author-popover" style="position-anchor:${anchorName}"><div class="author-popover-inner">${restHtml}</div></div>`;
+}
+
+function uiRenderSeriesLinks(seriesList, popoverId, firstAuthor) {
+  const list = seriesList || [];
+  if (!list.length) return '';
+  const visible = list.slice(0, 1);
+  const rest = list.slice(1);
+  const sParam = firstAuthor ? `?author=${encodeURIComponent(firstAuthor)}` : '';
+  const visibleHtml = visible.map((s) => {
+    return `<a href="/facet/series/${encodeURIComponent(s.name)}${sParam}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : ''}</a>`;
+  }).join(', ');
+  if (!rest.length) {
+    return `<span class="series-visible">${visibleHtml}</span>`;
+  }
+  const restHtml = rest.map((s) => {
+    return `<a href="/facet/series/${encodeURIComponent(s.name)}${sParam}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : ''}</a>`;
+  }).join(', ');
+  const id = escapeHtml(safeDomIdPart(popoverId));
+  const anchorName = `--${id}`;
+  return `<span class="series-visible">${visibleHtml}</span><button type="button" class="series-popover-trigger" popovertarget="${id}" style="anchor-name:${anchorName}">+${rest.length}</button><div id="${id}" popover="auto" class="series-popover" style="position-anchor:${anchorName}"><div class="series-popover-inner">${restHtml}</div></div>`;
+}
+
+function renderCardHtml(book, { batchSelect = false, seriesContext = null } = {}) {
   const id = escapeHtml(book.id);
-  const title = escapeHtml(book.title || '');
   const authors = escapeHtml(book.authors || '');
+  const authorKey = book.authorsList?.[0] || book.authors?.split(',')[0]?.trim() || '';
+  const seriesInfo = seriesContext
+    ? (book.seriesList?.find((s) => s.name === seriesContext) || null)
+    : null;
+  const titlePrefix = seriesInfo?.seriesNo ? `${escapeHtml(String(seriesInfo.seriesNo))}. ` : '';
+  const title = titlePrefix + escapeHtml(book.title || '');
+  const showSeries = !seriesContext && (book.seriesList || []).length > 0;
   const seriesList = book.seriesList || [];
-  const seriesHtml = seriesList.length
+  const seriesAuthorParam = authorKey ? `?author=${encodeURIComponent(authorKey)}` : '';
+  const seriesHtml = showSeries
     ? seriesList.map((s) => {
         const dn = escapeHtml(s.displayName || s.name);
         const no = s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : '';
-        return `<a href="/facet/series/${encodeURIComponent(s.name)}">${dn}${no}</a>`;
+        return `<a href="/facet/series/${encodeURIComponent(s.name)}${seriesAuthorParam}">${dn}${no}</a>`;
       }).join(', ')
     : '';
-  const authorKey = book.authorsList?.[0] || book.authors?.split(',')[0]?.trim() || '';
   const sourceFormat = String(book.ext || 'fb2').toLowerCase();
   const formats =
     Array.isArray(book.downloadFormats) && book.downloadFormats.length
@@ -2417,11 +2494,11 @@ function renderCardHtml(book, { batchSelect = false } = {}) {
   const batchCb = batchSelect
     ? `<label class="batch-select-hit" title="${escapeHtml(uiT('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" id="batch-select-${safeDomIdPart(book.id)}" name="batch-select-${safeDomIdPart(book.id)}" data-batch-book-id="${id}" aria-label="${escapeHtml(uiT('batch.selectAria'))}"></label>`
     : '';
-  const coverRating = `<span class="cover-rating">${[1,2,3,4,5].map((i) => `<span class="cover-star${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}</span>`;
+  const coverRating = book.libRate ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>` : '';
   return `<article class="card" data-book-id="${id}">
     ${batchCb}
     <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-      <img class="cover-image is-loaded" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${title}">
+      <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${title}">
       <span class="cover-fallback" hidden>
         <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
         <span class="cover-fallback-overlay"></span>
@@ -2432,8 +2509,8 @@ function renderCardHtml(book, { batchSelect = false } = {}) {
     </a>
     <div class="meta">
       <h3><a href="/book/${encodeURIComponent(book.id)}">${title}</a></h3>
-      <div class="author">${authorKey ? `<a href="/facet/authors/${encodeURIComponent(authorKey)}">${authors}</a>` : escapeHtml(uiT('book.authorUnknown'))}</div>
-      ${seriesHtml ? `<div class="card-series">${seriesHtml}</div>` : ''}
+      <div class="author">${book.authors ? uiRenderAuthorLinks(book.authorsList, book.authors, `ajax-a-${book.id}`) : escapeHtml(uiT('book.authorUnknown'))}</div>
+      ${showSeries ? `<div class="card-series">${uiRenderSeriesLinks(book.seriesList, `ajax-s-${book.id}`, authorKey)}</div>` : ''}
       ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
       ${downloadMenu ? `<div class="card-actions">${downloadMenu}</div>` : ''}
     </div>
@@ -2455,6 +2532,14 @@ function attachLoadMore() {
   const total = Number(container.dataset.loadMoreTotal) || 0;
   const pageSize = Number(container.dataset.loadMorePageSize) || 24;
   const batchSelect = Boolean(container.dataset.batchContext);
+  // Определяем контекст серии из URL API для корректного рендеринга карточек
+  let seriesContext = null;
+  try {
+    const apiUrl = new URL(api, window.location.href);
+    if (apiUrl.searchParams.get('facet') === 'series') {
+      seriesContext = apiUrl.searchParams.get('value') || null;
+    }
+  } catch (_) { /* ignore */ }
 
   let activeFetch = null;
   if (!_pagehideListenerAttached) {
@@ -2501,7 +2586,7 @@ function attachLoadMore() {
           nextItems.push(item);
         }
         const tmp = document.createElement('div');
-        tmp.innerHTML = nextItems.map((b) => renderCardHtml(b, { batchSelect })).join('');
+        tmp.innerHTML = nextItems.map((b) => renderCardHtml(b, { batchSelect, seriesContext })).join('');
         const newCards = [...tmp.children];
         for (const card of newCards) grid.appendChild(card);
 

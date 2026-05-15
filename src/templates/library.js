@@ -11,7 +11,7 @@ import {
   renderAuthorFacetSeriesList, renderFacetSummaryBlock,
   renderSectionIntro, renderFacetHero, renderAlert,
   firstAuthorValue, uniqueBooksById, batchSelectInputAttrs, safeDomIdPart,
-  browseTotalLine, canDownloadInUi,
+  browseTotalLine, canDownloadInUi, renderAuthorLinks, renderSeriesLinks,
   STATIC_ASSET_VERSION, siteTitleForDisplay, READ_CHECK_SVG,
   t, tp, getLocale, plural, countLabel, formatLocaleInt,
   formatLocaleDateLong, serializeClientI18n,
@@ -275,8 +275,9 @@ export function renderBook({
     ? genreCodesSummary.map((code) => `<a href="/facet/genres/${encodeURIComponent(code)}">${escapeHtml(formatGenreLabel(code))}</a>`).join(', ')
     : '';
   const seriesList = book.seriesList || [];
+  const seriesAuthorParam = primaryAuthor ? `?author=${encodeURIComponent(primaryAuthor)}` : '';
   const seriesSummaryHtml = seriesList.length
-    ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')
+    ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}${seriesAuthorParam}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')
     : '';
   const primarySeries = seriesList[0] || null;
   const summaryBits = [
@@ -284,7 +285,7 @@ export function renderBook({
     (book.lang || 'unknown') ? `<a href="/facet/languages/${encodeURIComponent(book.lang || 'unknown')}">${escapeHtml(formatLanguageLabel(book.lang || 'unknown'))}</a>` : '',
     genreSummaryHtml
   ].filter(Boolean);
-  const parentLibraryHref = primarySeries ? `/facet/series/${encodeURIComponent(primarySeries.name)}` : primaryAuthor ? `/facet/authors/${encodeURIComponent(primaryAuthor)}` : '/library/recent';
+  const parentLibraryHref = primarySeries ? `/facet/series/${encodeURIComponent(primarySeries.name)}${seriesAuthorParam}` : primaryAuthor ? `/facet/authors/${encodeURIComponent(primaryAuthor)}` : '/library/recent';
   const parentLibraryLabel = primarySeries
     ? tp('book.seriesPrefix', { name: primarySeries.displayName || primarySeries.name })
     : primaryAuthor
@@ -295,7 +296,7 @@ export function renderBook({
       <div class="book-detail-main card-detail-panel">
         <div class="book-detail-cover">
           <div class="cover ${hasRealCover ? '' : 'cover-fallback-active'}">
-            <img class="cover-image is-loaded" src="/api/books/${encodeURIComponent(book.id)}/cover" alt="${escapeHtml(book.title)}">
+            <img class="cover-image" src="/api/books/${encodeURIComponent(book.id)}/cover" alt="${escapeHtml(book.title)}">
             <span class="cover-fallback" ${hasRealCover ? 'hidden' : ''} aria-hidden="${hasRealCover ? 'true' : 'false'}">
               <img class="cover-fallback-image" src="/book-fallback.png" alt="">
               <span class="cover-fallback-overlay"></span>
@@ -304,17 +305,13 @@ export function renderBook({
                 <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
               </span>
             </span>
+            ${book.libRate ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>` : ''}
           </div>
         </div>
         <div class="book-detail-content">
           <h2 class="book-detail-title">${escapeHtml(book.title)}</h2>
-          <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
+          <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 3, bookAuthors: book.authors, inlineExpand: true }) : escapeHtml(t('book.authorUnknown'))}</div>
           ${summaryBits.length ? `<div class="book-detail-summary">${summaryBits.join('<span class="book-detail-sep">·</span>')}</div>` : ''}
-          ${book.libRate ? `<div class="book-detail-rating">
-            <div class="star-rating">
-              ${[1,2,3,4,5].map(i => `<span class="star-btn${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}
-            </div>
-          </div>` : ''}
           ${
             details.annotationIsHtml && String(details.annotation || '').trim()
               ? `<div class="book-detail-annotation book-detail-annotation--html">${details.annotation}</div>`
@@ -328,7 +325,7 @@ export function renderBook({
           }
           <div class="actions actions-primary">
             ${renderDownloadMenu(book, { accent: true, user })}
-            <a href="/read/${encodeURIComponent(book.id)}" class="button">${escapeHtml(t('book.read'))}</a>
+            <a href="/read/${encodeURIComponent(book.id)}" class="button" target="_blank" rel="noopener noreferrer">${escapeHtml(t('book.read'))}</a>
           </div>
           ${(primaryAuthor || seriesList.length) ? `<div class="book-detail-links">${primaryAuthor ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(t('book.allByAuthor'))}</a>` : ''}${primaryAuthor && seriesList.length ? '<span class="book-detail-sep">·</span>' : ''}${seriesList.length ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(tp('book.allInSeriesNamed', { name: s.displayName || s.name }))}</a>`).join('<span class="book-detail-sep">·</span>') : ''}</div>` : ''}
           ${isAuthenticated ? `<div class="actions actions-secondary"><button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${escapeHtml(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button><button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${escapeHtml(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button><button class="button" type="button" data-add-to-shelf="${escapeHtml(book.id)}">${escapeHtml(t('book.toShelf'))}</button><button class="button" type="button" data-send-to-ereader="${escapeHtml(book.id)}">${escapeHtml(t('book.toEmail'))}</button></div>` : ''}
@@ -358,7 +355,27 @@ export function renderBook({
             </div>
             <div class="book-edit-field">
               <label for="edit-series-no">${escapeHtml(t('book.edit.labelSeriesNo'))}</label>
-              <input type="text" id="edit-series-no" name="seriesNo" value="${escapeHtml(book.seriesNo || '')}" style="max-width:100px">
+              <input type="text" id="edit-series-no" name="seriesNo" value="${escapeHtml(book.seriesNo || '')}" class="book-edit-short">
+            </div>
+            <div class="book-edit-field">
+              <label for="edit-genres">${escapeHtml(t('book.edit.labelGenres'))}</label>
+              <input type="text" id="edit-genres" name="genres" value="${escapeHtml(book.genres || '')}">
+            </div>
+            <div class="book-edit-field">
+              <label for="edit-lang">${escapeHtml(t('book.edit.labelLang'))}</label>
+              <input type="text" id="edit-lang" name="lang" value="${escapeHtml(book.lang || '')}" class="book-edit-short">
+            </div>
+            <div class="book-edit-field">
+              <label for="edit-date">${escapeHtml(t('book.edit.labelDate'))}</label>
+              <input type="text" id="edit-date" name="date" value="${escapeHtml(book.date || '')}" class="book-edit-short">
+            </div>
+            <div class="book-edit-field">
+              <label for="edit-keywords">${escapeHtml(t('book.edit.labelKeywords'))}</label>
+              <input type="text" id="edit-keywords" name="keywords" value="${escapeHtml(book.keywords || '')}">
+            </div>
+            <div class="book-edit-field">
+              <label for="edit-lib-rate">${escapeHtml(t('book.edit.labelLibRate'))}</label>
+              <input type="number" id="edit-lib-rate" name="libRate" value="${escapeHtml(String(book.libRate || ''))}" min="0" max="10" class="book-edit-short">
             </div>
           </div>
           <div class="book-edit-actions">
@@ -545,9 +562,10 @@ export function renderBrowsePage({ title, items, total, page, pageSize, user, st
   return pageShell({ title, content, user, stats, query, indexStatus, breadcrumbs: [{ label: t('nav.home'), href: '/' }, { label: title }], alphabet, currentPath: path, csrfToken });
 }
 
-export function renderFacetBooks({ title, items, total, page, pageSize, user, stats, facetPath, indexStatus, sort, order = '', breadcrumbs, summary = {}, facet = '', facetValue = '', favorite = false, seriesRead = false, csrfToken = '', readBookIds = null, view = 'books', entityItems = null }) {
+export function renderFacetBooks({ title, items, total, page, pageSize, user, stats, facetPath, indexStatus, sort, order = '', breadcrumbs, summary = {}, facet = '', facetValue = '', favorite = false, seriesRead = false, csrfToken = '', readBookIds = null, view = 'books', entityItems = null, authorFilter = '' }) {
   const isGenre = facet === 'genres';
-  const isEntityView = isGenre && (view === 'authors' || view === 'series');
+  const isLang = facet === 'languages';
+  const isEntityView = (isGenre || isLang) && (view === 'authors' || view === 'series');
   const facetAction = user && (facet === 'authors' || facet === 'series')
     ? `<button class="button ${favorite ? 'is-active' : ''}" type="button" ${facet === 'authors' ? `data-favorite-author="${escapeHtml(facetValue)}"` : `data-favorite-series="${escapeHtml(facetValue)}"`} ${favorite ? 'data-active-favorite="true"' : ''}>${favorite ? escapeHtml(t('facet.inFavorite')) : escapeHtml(t('facet.addFavorite'))}</button>`
     : '';
@@ -555,15 +573,17 @@ export function renderFacetBooks({ title, items, total, page, pageSize, user, st
     ? `<button class="button${seriesRead ? ' is-active' : ''}" type="button" data-mark-series-read="${escapeHtml(facetValue)}">${seriesRead ? escapeHtml(t('facet.seriesMarkedRead')) : escapeHtml(t('facet.markSeriesRead'))}</button>`
     : '';
   const hasMore = !isEntityView && items.length > 0 && total > page * pageSize;
+  const loadMoreParams = new URLSearchParams({ facet: String(facet), value: String(facetValue), sort: String(sort || 'recent') });
+  if (authorFilter) loadMoreParams.set('author', authorFilter);
   const facetLoadMoreApi = hasMore
-    ? `/api/facet-books?${new URLSearchParams({ facet: String(facet), value: String(facetValue), sort: String(sort || 'recent') }).toString()}`
+    ? `/api/facet-books?${loadMoreParams.toString()}`
     : '';
   const batchCtx = facet === 'series' && facetValue !== '' ? { facet: 'series', value: facetValue } : null;
   const batchCtxJson = batchCtx ? escapeHtml(JSON.stringify(batchCtx)) : '';
   const showBatch = !isEntityView && Boolean(batchCtx && items.length && canDownloadInUi(user));
 
-  // View switcher tabs for genre pages: Books | By authors | By series
-  const viewTabs = isGenre ? (() => {
+  // View switcher tabs for genre/language pages: Books | By authors | By series
+  const viewTabs = (isGenre || isLang) ? (() => {
     const buildHref = (v) => {
       const params = new URLSearchParams();
       if (v !== 'books') params.set('view', v);
@@ -588,10 +608,16 @@ export function renderFacetBooks({ title, items, total, page, pageSize, user, st
         { value: 'series', label: t('sort.bySeries') },
         { value: 'rating', label: t('sort.byRating') }
       ];
-  const sortExtraHidden = isEntityView ? { view } : {};
-  const paginationBase = isEntityView
-    ? `${facetPath}?view=${encodeURIComponent(view)}&sort=${encodeURIComponent(sort || 'count')}`
-    : `${facetPath}?sort=${encodeURIComponent(sort || 'recent')}`;
+  const sortExtraHidden = isEntityView ? { view } : (authorFilter ? { author: authorFilter } : {});
+  const paginationBaseParams = new URLSearchParams();
+  if (isEntityView) {
+    paginationBaseParams.set('view', view);
+    paginationBaseParams.set('sort', sort || 'count');
+  } else {
+    paginationBaseParams.set('sort', sort || 'recent');
+    if (authorFilter) paginationBaseParams.set('author', authorFilter);
+  }
+  const paginationBase = `${facetPath}?${paginationBaseParams.toString()}`;
 
   // Body block: either entity grid or book grid
   const entityBasePath = view === 'authors' ? '/facet/authors' : '/facet/series';
@@ -602,8 +628,8 @@ export function renderFacetBooks({ title, items, total, page, pageSize, user, st
     : !items.length
       ? renderEmptyState({ title: t('facet.emptyTitle'), text: t('facet.emptyText'), actionHref: '/', actionLabel: t('facet.toCatalog') })
       : hasMore
-        ? `<div data-load-more-grid data-load-more-api="${escapeHtml(facetLoadMoreApi)}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}"${showBatch ? ` data-batch-context="${batchCtxJson}"` : ''}>${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: showBatch, user, readBookIds })}</div>`
-        : renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: showBatch, user, readBookIds });
+        ? `<div data-load-more-grid data-load-more-api="${escapeHtml(facetLoadMoreApi)}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}"${showBatch ? ` data-batch-context="${batchCtxJson}"` : ''}>${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: showBatch, user, readBookIds, seriesContext: facet === 'series' ? facetValue : null })}</div>`
+        : renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: showBatch, user, readBookIds, seriesContext: facet === 'series' ? facetValue : null });
 
   const countLabelKey = isEntityView ? (view === 'authors' ? 'author' : 'series') : 'book';
 
@@ -729,7 +755,7 @@ export function renderAuthorFacetPage({
     ? `/facet/authors/${encodeURIComponent(facetValue)}/outside-series?sort=${encodeURIComponent(sort || 'recent')}`
     : '';
   const seriesListHtml = (series.length || standaloneBooks.length)
-    ? `<section class="library-shelf library-shelf-secondary author-facet-series-block">${renderAuthorFacetSeriesList(series, standaloneBooks.length ? { href: outsideSeriesHref, label: t('authorPage.outsideSeries'), bookCount: standaloneBooks.length } : null, readSeriesNames)}</section>`
+    ? `<section class="library-shelf library-shelf-secondary author-facet-series-block">${renderAuthorFacetSeriesList(series, standaloneBooks.length ? { href: outsideSeriesHref, label: t('authorPage.outsideSeries'), bookCount: standaloneBooks.length } : null, readSeriesNames, facetValue)}</section>`
     : '';
   const listsCombined = seriesListHtml;
 
@@ -893,8 +919,8 @@ export function renderShelfDetail({ shelf, books = [], user, stats, indexStatus,
             ${renderCover(book, { readBookIds })}
             <div class="meta">
               <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
-              <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-              ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
+              <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 1, bookAuthors: book.authors, popoverId: `shelf-a-${book.id}` }) : escapeHtml(t('book.authorUnknown'))}</div>
+              ${book.seriesList?.length ? `<div class="card-series">${renderSeriesLinks(book.seriesList, { limit: 1, popoverId: `shelf-s-${book.id}` })}</div>` : ''}
               <div class="card-actions card-actions-favorites">
                 ${shelfBatch ? '' : renderDownloadMenu(book, { compact: true, user })}
                 <button class="button card-remove-favorite-action" type="button" data-shelf-remove-book="${escapeHtml(book.id)}" data-shelf-id="${shelf.id}">${escapeHtml(t('book.remove'))}</button>
@@ -1186,7 +1212,7 @@ export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmai
               <strong>${escapeHtml(t('profile.readerBookmarks'))}</strong> <span class="muted" style="font-size:.85em;">(<span data-profile-reader-bm-count>${formatLocaleInt(readerBmTotal)}</span>)</span>
               ${readerBookmarks.length ? `<div style="margin-top:6px;">${readerBookmarks.map((bm) => `
                 <div class="profile-list-item" data-profile-bookmark="${escapeHtml(String(bm.id))}" data-reader-bm-book-id="${escapeHtml(String(bm.bookId))}" data-reader-bm-position="${escapeHtml(String(bm.position ?? ''))}" data-reader-bm-title="${escapeHtml(String(bm.label || ''))}">
-                  <a class="profile-list-link" href="/read/${encodeURIComponent(bm.bookId)}?pos=${encodeURIComponent(bm.position)}" title="${escapeHtml(bm.bookTitle)}">${escapeHtml(bm.label || bm.bookTitle)}</a>
+                  <a class="profile-list-link" href="/read/${encodeURIComponent(bm.bookId)}?pos=${encodeURIComponent(bm.position)}" title="${escapeHtml(bm.bookTitle)}" target="_blank" rel="noopener noreferrer">${escapeHtml(bm.label || bm.bookTitle)}</a>
                   <span class="muted profile-list-meta">${escapeHtml(bm.bookTitle !== bm.label && bm.label ? bm.bookTitle : '')}</span>
                   <button type="button" class="profile-remove-btn" data-remove-bookmark="${escapeHtml(String(bm.id))}" title="${escapeHtml(t('profile.removeTitle'))}">&times;</button>
                 </div>`).join('')}</div>` : `<div class="muted" style="padding:4px 0;margin-top:6px;">${escapeHtml(t('profile.noBookmarks'))}</div>`}

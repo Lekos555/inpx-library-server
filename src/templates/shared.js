@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, parseGenreCodes } from '../genre-map.js';
 import { getAvailableDownloadFormats, FORMAT_LABELS } from '../conversion.js';
 import { config } from '../config.js';
+import { formatSingleAuthorName, splitAuthorValues } from '../inpx.js';
 import {
   t,
   tp,
@@ -90,7 +91,7 @@ export const READ_CHECK_SVG = '<svg viewBox="0 0 24 24"><polyline points="20 6 9
 export function renderCover(book, { readBookIds = null } = {}) {
   const readBadge = readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : '';
   const coverRating = book.libRate
-    ? `<span class="cover-rating">${[1,2,3,4,5].map((i) => `<span class="cover-star${book.libRate && i <= book.libRate ? ' is-active' : ''}">★</span>`).join('')}</span>`
+    ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>`
     : '';
   return `
     <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
@@ -393,6 +394,51 @@ export function firstAuthorValue(value = '') {
     .filter(Boolean)[0] || '';
 }
 
+export function renderAuthorLinks(authorsList = [], { limit = 1, bookAuthors = '', popoverId = '', inlineExpand = false } = {}) {
+  const list = authorsList?.length ? authorsList : splitAuthorValues(bookAuthors);
+  if (!list.length) return '';
+  const visible = list.slice(0, limit);
+  const rest = list.slice(limit);
+  const visibleHtml = visible.map((author) => {
+    const name = formatSingleAuthorName(author) || author;
+    return `<a href="/facet/authors/${encodeURIComponent(author)}">${escapeHtml(name)}</a>`;
+  }).join(', ');
+  if (!rest.length) {
+    return `<span class="author-visible">${visibleHtml}</span>`;
+  }
+  const restHtml = rest.map((author) => {
+    const name = formatSingleAuthorName(author) || author;
+    return `<a href="/facet/authors/${encodeURIComponent(author)}">${escapeHtml(name)}</a>`;
+  }).join(', ');
+  if (inlineExpand) {
+    const uid = escapeHtml(safeDomIdPart(`inline-${bookAuthors}`));
+    return `<span class="author-visible">${visibleHtml}</span> <label class="author-inline"><input type="checkbox" class="author-inline-check" id="${uid}"><span class="author-inline-trigger"><span class="muted">и ещё ${rest.length}</span> <span class="author-inline-arrow"></span></span><span class="author-inline-rest">${restHtml}</span></label>`;
+  }
+  const id = escapeHtml(safeDomIdPart(popoverId));
+  const anchorName = `--${id}`;
+  return `<span class="author-visible">${visibleHtml}</span><button type="button" class="author-popover-trigger" popovertarget="${id}" style="anchor-name:${anchorName}">+${rest.length}</button><div id="${id}" popover="auto" class="author-popover" style="position-anchor:${anchorName}"><div class="author-popover-inner">${restHtml}</div></div>`;
+}
+
+export function renderSeriesLinks(seriesList = [], { limit = 1, popoverId = '', firstAuthor = '' } = {}) {
+  const list = seriesList || [];
+  if (!list.length) return '';
+  const visible = list.slice(0, limit);
+  const rest = list.slice(limit);
+  const sParam = firstAuthor ? `?author=${encodeURIComponent(firstAuthor)}` : '';
+  const visibleHtml = visible.map((s) => {
+    return `<a href="/facet/series/${encodeURIComponent(s.name)}${sParam}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : ''}</a>`;
+  }).join(', ');
+  if (!rest.length) {
+    return `<span class="series-visible">${visibleHtml}</span>`;
+  }
+  const restHtml = rest.map((s) => {
+    return `<a href="/facet/series/${encodeURIComponent(s.name)}${sParam}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(String(s.seriesNo))}` : ''}</a>`;
+  }).join(', ');
+  const id = escapeHtml(safeDomIdPart(popoverId));
+  const anchorName = `--${id}`;
+  return `<span class="series-visible">${visibleHtml}</span><button type="button" class="series-popover-trigger" popovertarget="${id}" style="anchor-name:${anchorName}">+${rest.length}</button><div id="${id}" popover="auto" class="series-popover" style="position-anchor:${anchorName}"><div class="series-popover-inner">${restHtml}</div></div>`;
+}
+
 /**
  * Контейнер для AJAX-секций (рекомендации, "продолжить читать" и т.п.).
  * Намеренно пустой — никаких скелетонов. Карточки рендерятся при подгрузке
@@ -578,12 +624,12 @@ function setCachedCardHtml(key, html) {
 /** Clear all cached card HTML fragments. Call when book metadata is edited. */
 export function clearCardHtmlCache() { _cardHtmlCache.clear(); }
 
-export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetails = false, batchSelect = false, user = null, hideDownloads = false, readBookIds = null } = {}) {
+export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetails = false, batchSelect = false, user = null, hideDownloads = false, readBookIds = null, seriesContext = null } = {}) {
   const uniqueItems = uniqueBooksById(items);
   const effectiveBatch = batchSelect && !hideDownloads;
   const canDl = canDownloadInUi(user);
   // Flags string encodes rendering-affecting state for cache key
-  const flags = `${effectiveBatch ? '1' : '0'}${hideDownloads ? '1' : '0'}${canDl ? '1' : '0'}`;
+  const flags = `${effectiveBatch ? '1' : '0'}${hideDownloads ? '1' : '0'}${canDl ? '1' : '0'}${seriesContext ? 's' : ''}`;
   const batchCb = (book) =>
     effectiveBatch
       ? `<label class="batch-select-hit" title="${escapeHtml(t('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" ${batchSelectInputAttrs(book.id)} data-batch-book-id="${escapeHtml(book.id)}" aria-label="${escapeHtml(t('batch.selectAria'))}"></label>`
@@ -596,14 +642,19 @@ export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetail
         const cached = getCachedCardHtml(cacheKey);
         if (cached) return cached;
         const cardDl = effectiveBatch || hideDownloads ? '' : renderDownloadMenu(book, { compact: true, user });
+        const seriesInfo = seriesContext
+          ? (book.seriesList?.find((s) => s.name === seriesContext) || null)
+          : null;
+        const titlePrefix = seriesInfo?.seriesNo ? `${escapeHtml(String(seriesInfo.seriesNo))}. ` : '';
+        const showSeries = !seriesContext && book.seriesList?.length;
         const html = `
         <article class="card" data-book-id="${escapeHtml(book.id)}">
           ${batchCb(book)}
           ${renderCover(book, { readBookIds })}
           <div class="meta">
-            <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
-            <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-            ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
+            <h3><a href="/book/${encodeURIComponent(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
+            <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 1, bookAuthors: book.authors, popoverId: `card-a-${book.id}` }) : escapeHtml(t('book.authorUnknown'))}</div>
+            ${showSeries ? `<div class="card-series">${renderSeriesLinks(book.seriesList, { limit: 1, popoverId: `card-s-${book.id}`, firstAuthor: book.authorsList?.[0] || firstAuthorValue(book.authors) })}</div>` : ''}
             ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
             ${cardDl ? `<div class="card-actions">${cardDl}</div>` : ''}
           </div>
@@ -614,7 +665,7 @@ export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetail
     </div>`;
 }
 
-export function renderFavoriteBookGrid(items = [], { batchSelect = false, user = null, readBookIds = null } = {}) {
+export function renderFavoriteBookGrid(items = [], { batchSelect = false, user = null, readBookIds = null, seriesContext = null } = {}) {
   const uniqueItems = uniqueBooksById(items);
   const batchCb = (book) =>
     batchSelect
@@ -622,21 +673,27 @@ export function renderFavoriteBookGrid(items = [], { batchSelect = false, user =
       : '';
   return `
     <div class="grid">
-      ${uniqueItems.map((book) => `
+      ${uniqueItems.map((book) => {
+        const seriesInfo = seriesContext
+          ? (book.seriesList?.find((s) => s.name === seriesContext) || null)
+          : null;
+        const titlePrefix = seriesInfo?.seriesNo ? `${escapeHtml(String(seriesInfo.seriesNo))}. ` : '';
+        const showSeries = !seriesContext && book.seriesList?.length;
+        return `
         <article class="card" data-book-id="${escapeHtml(book.id)}">
           ${batchCb(book)}
           ${renderCover(book, { readBookIds })}
           <div class="meta">
-            <h3><a href="/book/${encodeURIComponent(book.id)}">${escapeHtml(book.title)}</a></h3>
-            <div class="author">${book.authors ? `<a href="/facet/authors/${encodeURIComponent(book.authorsList?.[0] || firstAuthorValue(book.authors))}">${escapeHtml(formatAuthorLabel(book.authors))}</a>` : escapeHtml(t('book.authorUnknown'))}</div>
-            ${book.seriesList?.length ? `<div class="card-series">${book.seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(s.displayName || s.name)}${s.seriesNo ? ` #${escapeHtml(s.seriesNo)}` : ''}</a>`).join(', ')}</div>` : ''}
+            <h3><a href="/book/${encodeURIComponent(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
+            <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 1, bookAuthors: book.authors, popoverId: `fav-a-${book.id}` }) : escapeHtml(t('book.authorUnknown'))}</div>
+            ${showSeries ? `<div class="card-series">${renderSeriesLinks(book.seriesList, { limit: 1, popoverId: `card-s-${book.id}`, firstAuthor: book.authorsList?.[0] || firstAuthorValue(book.authors) })}</div>` : ''}
             <div class="card-actions card-actions-favorites">
               ${batchSelect ? '' : renderDownloadMenu(book, { compact: true, user })}
               <button class="button card-remove-favorite-action" type="button" data-bookmark-button="${escapeHtml(book.id)}">${escapeHtml(t('book.remove'))}</button>
             </div>
           </div>
-        </article>
-      `).join('')}
+        </article>`;
+      }).join('')}
     </div>`;
 }
 
@@ -665,12 +722,16 @@ export function renderEntityGrid(items = [], facetBasePath = '/facet/authors', e
 }
 
 /** Список серий на странице автора (как в разделе «Серии», счётчик — книги этого автора в серии). */
-export function renderAuthorFacetSeriesList(series = [], outsideSeries = null, readSeriesNames = null) {
+export function renderAuthorFacetSeriesList(series = [], outsideSeries = null, readSeriesNames = null, authorName = '') {
   if (!series.length && !outsideSeries) {
     return '';
   }
-  const seriesBadge = (name) => readSeriesNames && readSeriesNames.has(name) ? `<span class="read-series-badge">${READ_CHECK_SVG}</span>` : '';
-  const outsideRow = outsideSeries && outsideSeries.href
+  const authorParam = authorName ? `?author=${encodeURIComponent(authorName)}` : '';
+  const seriesBadge = (seriesName) =>
+    readSeriesNames && readSeriesNames.has(seriesName)
+      ? `<span class="read-series-badge">${READ_CHECK_SVG}</span>`
+      : '';
+  const outsideRow = outsideSeries
     ? `
         <a class="table-row table-row-link" href="${escapeHtml(outsideSeries.href)}">
           <div>
@@ -683,7 +744,7 @@ export function renderAuthorFacetSeriesList(series = [], outsideSeries = null, r
     <div class="table-list entity-list author-facet-series-entity-list">
       ${series.map(
         (s) => `
-        <a class="table-row table-row-link" href="/facet/series/${encodeURIComponent(s.name)}">
+        <a class="table-row table-row-link" href="/facet/series/${encodeURIComponent(s.name)}${authorParam}">
           <div style="display:flex;align-items:center">
             <span><strong>${escapeHtml(s.displayName || s.name)}</strong><br>
             <span class="muted">${countLabel('book', s.bookCount)}</span></span>

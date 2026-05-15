@@ -1220,8 +1220,6 @@ export function updateSource(id, { name, enabled }) {
   return getSourceById(id);
 }
 
-const DELETE_SOURCE_BOOKS_CHUNK = 300;
-
 /**
  * Удаляет orphan-записи из authors, series_catalog, genres_catalog —
  * записи, на которые больше ни одна книга не ссылается через junction-таблицы.
@@ -1238,10 +1236,8 @@ async function cleanupOrphanedCatalogs() {
 export async function deleteSourceProgressive(
   id,
   {
-    chunkSize = DELETE_SOURCE_BOOKS_CHUNK,
     onProgress = null,
-    deleteSourceRow = true,
-    interChunkDelayMs = 0
+    deleteSourceRow = true
   } = {}
 ) {
   // Wait for post-index maintenance (ANALYZE) to finish before modifying the DB
@@ -1253,12 +1249,6 @@ export async function deleteSourceProgressive(
   const sid = Number(id);
   if (!Number.isFinite(sid)) {
     throw new Error('Некорректный id источника');
-  }
-  // Backup database before destructive deletion
-  try {
-    await createDatabaseBackup('delete-source');
-  } catch (err) {
-    console.warn('[db] Pre-deletion backup failed (proceeding anyway):', err.message);
   }
 
   try {
@@ -1277,25 +1267,18 @@ export async function deleteSourceProgressive(
     db.exec(`DELETE FROM reader_bookmarks WHERE book_id IN (SELECT id FROM books WHERE source_id = ${sid})`);
     await new Promise(r => setImmediate(r));
 
-    let deleted = 0;
-
     // Drop books indexes and FTS triggers for fast bulk DELETE.
-    // Keep junction indexes — FK CASCADE needs them.
     dropBooksFtsTriggers();
     dropBooksTableIndexes();
+    let deleted = 0;
     try {
-      const chunk = Math.max(1000, Math.min(5000, Math.floor(Number(chunkSize) || DELETE_SOURCE_BOOKS_CHUNK)));
-      const deleteBooks = db.prepare(`DELETE FROM books WHERE rowid IN (SELECT rowid FROM books WHERE source_id = ? LIMIT ${chunk})`);
-      for (;;) {
-        const changes = deleteBooks.run(sid).changes;
-        if (changes === 0) break;
-        deleted += changes;
-        onProgress?.({ deleted, total, stage: 'books' });
-        await new Promise(r => setImmediate(r));
-        if (interChunkDelayMs > 0) {
-          await new Promise(r => setTimeout(r, interChunkDelayMs));
-        }
-      }
+      db.transaction(() => {
+        db.prepare('DELETE FROM book_authors WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(sid);
+        db.prepare('DELETE FROM book_series  WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(sid);
+        db.prepare('DELETE FROM book_genres  WHERE book_id IN (SELECT id FROM books WHERE source_id = ?)').run(sid);
+        deleted = db.prepare('DELETE FROM books WHERE source_id = ?').run(sid).changes;
+      })();
+      onProgress?.({ deleted, total, stage: 'books' });
     } finally {
       ensureBooksTableIndexes();
       ensureBooksFtsTriggers();
@@ -1998,18 +1981,22 @@ function _ensureReadStmts() {
   }
   if (!_stmtReadSeries) {
     _stmtReadSeries = db.prepare(`
-      WITH user_series AS (
-        SELECT DISTINCT ab.series
+      WITH candidate_series AS (
+        SELECT DISTINCT sc.id AS series_id, sc.name AS series_name
         FROM read_books rb
-        JOIN active_books ab ON ab.id = rb.book_id
-        WHERE rb.username = ? AND ab.series IS NOT NULL AND ab.series != ''
+        JOIN book_series bs ON bs.book_id = rb.book_id
+        JOIN series_catalog sc ON sc.id = bs.series_id
+        WHERE rb.username = ?
       )
-      SELECT us.series
-      FROM user_series us
+      SELECT cs.series_name
+      FROM candidate_series cs
       WHERE NOT EXISTS (
-        SELECT 1 FROM active_books ab2
-        WHERE ab2.series = us.series
-          AND NOT EXISTS (SELECT 1 FROM read_books rb2 WHERE rb2.username = ? AND rb2.book_id = ab2.id)
+        SELECT 1 FROM book_series bs2
+        JOIN active_books ab2 ON ab2.id = bs2.book_id
+        WHERE bs2.series_id = cs.series_id
+          AND NOT EXISTS (
+            SELECT 1 FROM read_books rb2 WHERE rb2.username = ? AND rb2.book_id = bs2.book_id
+          )
       )
     `);
   }
@@ -2027,7 +2014,7 @@ function _buildReadCache(username) {
   const rows = _stmtReadIds.all(username);
   const ids = new Set(rows.map((r) => r.book_id));
   const sRows = _stmtReadSeries.all(username, username);
-  const series = new Set(sRows.map((r) => r.series));
+  const series = new Set(sRows.map((r) => String(r.series_name || '')).filter(Boolean));
   const entry = { ids, series, expiresAt: Date.now() + READ_CACHE_TTL_MS };
   _readCache.set(username, entry);
   // Evict oldest if too many users cached

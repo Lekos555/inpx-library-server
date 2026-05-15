@@ -9,6 +9,7 @@ import {
   getBooksByFacetCoalesced,
   getLibraryView,
   getSuggestions,
+  resolveAuthorName,
   searchCatalog
 } from '../inpx.js';
 import { getRecommendedLibraryView } from '../services/recommendations.js';
@@ -70,7 +71,7 @@ export function registerBrowseApiRoutes(app) {
     try {
       const facet = String(req.query.facet || '').trim();
       const value = String(req.query.value ?? '').trim();
-      const sort = String(req.query.sort || 'title').trim();
+      const sort = String(req.query.sort || (facet === 'series' ? 'series' : 'title')).trim();
       const order = String(req.query.order || '');
       const page = safePage(req.query.page);
       const pageSize = 24;
@@ -78,7 +79,12 @@ export function registerBrowseApiRoutes(app) {
       if (!allowed.has(facet) || !value) {
         return apiFail(res, 400, ApiErrorCode.FACET_INVALID, t('api.facet.invalid'), { items: [], total: 0, page, pageSize });
       }
-      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort, order });
+      let author = facet === 'series' ? String(req.query.author || '').trim() : '';
+      if (author) {
+        const canonical = resolveAuthorName(author);
+        author = canonical ?? author.toLowerCase();
+      }
+      const result = await getBooksByFacetCoalesced({ facet, value, page, pageSize, sort, order, author });
       res.json({ items: result.items, total: result.total, page, pageSize });
     } catch (error) {
       next(error);

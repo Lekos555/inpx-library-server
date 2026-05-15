@@ -628,8 +628,6 @@ export function registerAdminRoutes(app, deps) {
       try {
         await deleteSourceProgressive(id, {
           deleteSourceRow: true,
-          chunkSize: 2000,
-          interChunkDelayMs: 0,
           onProgress(p) { operationsState.sourceDeleteProgress = { ...p, sourceId: id, sourceName: source.name }; }
         });
         logSystemEvent('info', 'settings', 'source deleted', { actor: req.user.username, source: source.name, sourceId: id, mode: 'inline' });
