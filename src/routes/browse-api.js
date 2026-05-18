@@ -43,13 +43,19 @@ export function registerBrowseApiRoutes(app) {
         : view === 'continue' || view === 'read'
           ? getStaleOrSchedule(`library:${view}:${username}:sort:${sort}:${order}:p${page}:s${pageSize}`, () => getLibraryView(view, { page, pageSize, username, type, sort, order }), PAGE_CACHE_TTL_MS, { total: 0, items: [] })
           : getLibraryView(view, { page, pageSize, username, type, sort, order });
-    res.json({ items: result.items, total: result.total, page, pageSize });
+    const json = { items: result.items, total: result.total, page, pageSize };
+    if (result.computing) json.computing = true;
+    res.json(json);
   });
 
   app.get('/api/catalog', requireBrowseAuth, (req, res) => {
     const query = String(req.query.q || '');
-    const field = String(req.query.field || 'books');
-    const sort = String(req.query.sort || 'title');
+    const field = ['books', 'authors', 'series'].includes(String(req.query.field || '')) ? String(req.query.field) : 'books';
+    const isBookField = field === 'books';
+    const bookSorts = ['recent', 'title', 'author', 'series', 'rating'];
+    const entitySorts = ['name', 'count'];
+    const allowedSorts = isBookField ? bookSorts : entitySorts;
+    const sort = allowedSorts.includes(String(req.query.sort || '')) ? String(req.query.sort) : (isBookField ? 'title' : 'name');
     const order = String(req.query.order || '');
     const genre = String(req.query.genre || '');
     const letter = String(req.query.letter || '').trim().slice(0, 2);

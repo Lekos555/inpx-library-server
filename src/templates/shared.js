@@ -167,6 +167,35 @@ export function escapeHtml(value = '') {
     .replace(/'/g, '&#39;');
 }
 
+const ALLOWED_HTML_TAG_RE = /^(b|i|em|strong|p|br|span|div|ul|ol|li|h[1-6]|blockquote|sup|sub|a|img|table|thead|tbody|tr|td|th)$/i;
+
+export function sanitizeHtml(html) {
+  return String(html || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/javascript:/gi, 'blocked:')
+    .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/<(\/?)(\w+)([^>]*)>/g, (match, slash, tag, attrs) => {
+      const lowerTag = tag.toLowerCase();
+      if (!ALLOWED_HTML_TAG_RE.test(lowerTag)) return '';
+      if (lowerTag === 'a') {
+        const hrefMatch = attrs.match(/\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const href = (hrefMatch?.[1] || hrefMatch?.[2] || hrefMatch?.[3] || '').trim();
+        if (!href || !/^(https?:\/\/|mailto:|tel:|#)/i.test(href)) return '';
+        return `<${slash}a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">`;
+      }
+      if (lowerTag === 'img') {
+        const srcMatch = attrs.match(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const src = (srcMatch?.[1] || srcMatch?.[2] || srcMatch?.[3] || '').trim();
+        if (!src || !/^(https?:\/\/|data:image\/)/i.test(src)) return '';
+        const altMatch = attrs.match(/\salt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const alt = escapeHtml(altMatch?.[1] || altMatch?.[2] || altMatch?.[3] || '');
+        return `<img src="${escapeHtml(src)}" alt="${alt}">`;
+      }
+      return `<${slash}${lowerTag}>`;
+    });
+}
+
 /** Фрагмент для HTML id/name (аудит DevTools: у полей формы должен быть id или name). */
 export function safeDomIdPart(value = '') {
   const s = String(value).trim().replace(/\s+/g, '_');
@@ -204,7 +233,7 @@ const ALERT_ICONS = {
 export function renderAlert(type, content, { extraClass = '', attrs = '' } = {}) {
   const icon = ALERT_ICONS[type] || ALERT_ICONS.success;
   const cls = ['alert', type !== 'success' ? `alert-${type}` : '', extraClass].filter(Boolean).join(' ');
-  return `<div class="${cls}"${attrs ? ' ' + attrs : ''}><span class="alert-icon">${icon}</span><span class="alert-content">${content}</span></div>`;
+  return `<div class="${cls}"${attrs ? ' ' + attrs : ''}><span class="alert-icon">${icon}</span><span class="alert-content">${escapeHtml(content)}</span></div>`;
 }
 
 export function renderIndexStatus(indexStatus, stats) {
@@ -213,11 +242,11 @@ export function renderIndexStatus(indexStatus, stats) {
   }
 
   if (indexStatus.active) {
-    return renderAlert('info', escapeHtml(t('index.active')), { attrs: 'data-index-status' });
+    return renderAlert('info', t('index.active'), { attrs: 'data-index-status' });
   }
 
   if (indexStatus.error) {
-    return renderAlert('error', escapeHtml(t('index.error')) + ' ' + escapeHtml(indexStatus.error), { attrs: 'data-index-status' });
+    return renderAlert('error', t('index.error') + ' ' + indexStatus.error, { attrs: 'data-index-status' });
   }
 
   return '';
@@ -226,10 +255,10 @@ export function renderIndexStatus(indexStatus, stats) {
 function renderAdminIndexStatus(indexStatus) {
   if (!indexStatus) return '';
   if (indexStatus.active) {
-    return renderAlert('info', escapeHtml(t('index.active')), { attrs: 'data-index-status' });
+    return renderAlert('info', t('index.active'), { attrs: 'data-index-status' });
   }
   if (indexStatus.error) {
-    return renderAlert('error', escapeHtml(t('index.error')) + ' ' + escapeHtml(indexStatus.error), { attrs: 'data-index-status' });
+    return renderAlert('error', t('index.error') + ' ' + indexStatus.error, { attrs: 'data-index-status' });
   }
   return '';
 }
@@ -887,7 +916,9 @@ export function renderMiniBookList(title, items = [], emptyText = null) {
 }
 
 export function renderHomeShelf({ title, href, items, type = 'books', facetBasePath = '', isAuthenticated = false, showBatch = false, user = null, readBookIds = null } = {}) {
-  const batchToolbar = '';
+  const batchToolbar = showBatch && items.length && canDownloadInUi(user)
+    ? renderBatchDownloadToolbar({ adhoc: true }, { user })
+    : '';
   const body = type === 'books'
     ? (items.length
         ? renderBookGrid(items, { isAuthenticated, batchSelect: Boolean(batchToolbar), user, readBookIds })
@@ -1022,7 +1053,7 @@ export function pageShell({ title, content, user, query = '', field = 'all', sta
         </div>
       </header>
     ${isAdmin ? renderAdminIndexControls(indexStatus) : renderIndexStatus(indexStatus, stats)}
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
     ${renderBreadcrumbs(breadcrumbs)}
     <div class="layout">
       <main id="main-content" class="panel">${content}</main>
@@ -1097,7 +1128,7 @@ export function renderLoginScreen({ title, subtitle, action, error = '', extraHt
         <h2>${escapeHtml(title)}</h2>
         <p>${escapeHtml(subtitle)}</p>
       </div>
-      ${error ? renderAlert('error', escapeHtml(error)) : ''}
+      ${error ? renderAlert('error', error) : ''}
       ${hideForm ? '' : `<div class="vertical-form">
         <div>
           <label for="username">${escapeHtml(t('login.username'))}</label>

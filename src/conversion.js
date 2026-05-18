@@ -141,18 +141,23 @@ const DEFAULT_MAX_CONVERTERS = (() => {
 const MAX_CONVERTERS = Math.max(1, Math.min(8, Number(process.env.FB2CNG_MAX_PARALLEL) || DEFAULT_MAX_CONVERTERS));
 
 async function acquireConverterSlot() {
-  if (activeConverters < MAX_CONVERTERS) {
+  return new Promise((resolve) => {
+    converterWaiters.push(resolve);
+    tryGrantConverterSlot();
+  });
+}
+
+function tryGrantConverterSlot() {
+  while (activeConverters < MAX_CONVERTERS && converterWaiters.length > 0) {
     activeConverters += 1;
-    return;
+    const next = converterWaiters.shift();
+    next();
   }
-  await new Promise((resolve) => converterWaiters.push(resolve));
-  activeConverters += 1;
 }
 
 function releaseConverterSlot() {
   activeConverters = Math.max(0, activeConverters - 1);
-  const next = converterWaiters.shift();
-  if (next) next();
+  tryGrantConverterSlot();
 }
 
 /**

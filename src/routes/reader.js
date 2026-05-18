@@ -28,10 +28,12 @@ export function registerReaderRoutes(app) {
     if (!getBookById(bookId)) {
       return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
     }
-    setReadingPosition(username, bookId, position, progress);
-    // Auto-mark as read when progress reaches 95%+
+    const progressNum = Number.isFinite(Number(progress)) ? Math.max(0, Math.min(100, Number(progress))) : 0;
+    const posStr = String(position || '');
+    setReadingPosition(username, bookId, posStr, progressNum);
+    // Auto-mark as read when progress reaches 99%+
     let markedRead = false;
-    if (Number(progress) >= 99 && !isBookRead(username, bookId)) {
+    if (progressNum >= 99 && !isBookRead(username, bookId)) {
       addReadBooksIfMissing(username, [bookId]);
       markedRead = true;
     }
@@ -59,7 +61,14 @@ export function registerReaderRoutes(app) {
   }));
 
   app.post('/api/books/:id/bookmarks', requireApiAuth, asyncHandler(async (req, res) => {
-    const { position, title } = req.body;
+    const position = String(req.body?.position ?? '');
+    const title = String(req.body?.title ?? '');
+    if (!position || position.length > 2000) {
+      return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.bookmark.positionRequired'));
+    }
+    if (title.length > 500) {
+      return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.bookmark.titleTooLong'));
+    }
     if (!getBookById(req.params.id)) {
       return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
     }
@@ -97,7 +106,8 @@ export function registerReaderRoutes(app) {
       return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
     }
     const lastOpenedAt = String(req.body?.lastOpenedAt || '').trim();
-    const openCount = req.body?.openCount;
+    const openCountRaw = req.body?.openCount;
+    const openCount = Number.isFinite(Number(openCountRaw)) ? Math.max(0, Math.floor(Number(openCountRaw))) : undefined;
     upsertReadingHistoryEntry(req.user.username, bookId, lastOpenedAt, openCount);
     invalidateUserPageCaches(req.user.username);
     res.json({ ok: true });

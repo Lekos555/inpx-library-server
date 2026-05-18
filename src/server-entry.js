@@ -36,6 +36,9 @@ const cpuCount = Array.isArray(os.cpus()) ? os.cpus().length : 4;
 const numWorkers = requestedWorkers > 0 ? Math.min(requestedWorkers, cpuCount) : 0;
 
 if (numWorkers > 1 && cluster.isPrimary) {
+  if (process.platform === 'win32') {
+    cluster.setupPrimary({ windowsHide: true });
+  }
   console.log(`[cluster] Primary ${process.pid}: запуск ${numWorkers} воркеров`);
   for (let i = 0; i < numWorkers; i++) {
     cluster.fork();

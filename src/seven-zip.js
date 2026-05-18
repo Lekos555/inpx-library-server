@@ -14,15 +14,21 @@ const SEVEN_Z_QUEUE_TIMEOUT_MS = Number(process.env.SEVEN_Z_QUEUE_TIMEOUT_MS) ||
 let active7z = 0;
 const queue7z = [];
 
-function acquire7zSlot() {
-  if (active7z < SEVEN_Z_MAX_CONCURRENT) {
+function tryGrant7zSlot() {
+  while (active7z < SEVEN_Z_MAX_CONCURRENT && queue7z.length > 0) {
+    const entry = queue7z.shift();
+    clearTimeout(entry.timer);
     active7z++;
-    return Promise.resolve();
+    entry.resolve();
   }
-  if (queue7z.length >= SEVEN_Z_MAX_QUEUE) {
-    return Promise.reject(new Error('Очередь 7z переполнена, попробуйте позже'));
-  }
+}
+
+function acquire7zSlot() {
   return new Promise((resolve, reject) => {
+    if (queue7z.length >= SEVEN_Z_MAX_QUEUE) {
+      reject(new Error('Очередь 7z переполнена, попробуйте позже'));
+      return;
+    }
     const entry = { resolve, reject, timer: null };
     entry.timer = setTimeout(() => {
       const idx = queue7z.indexOf(entry);
@@ -30,17 +36,13 @@ function acquire7zSlot() {
       reject(new Error('7z queue timeout: waited too long for available slot'));
     }, SEVEN_Z_QUEUE_TIMEOUT_MS);
     queue7z.push(entry);
+    tryGrant7zSlot();
   });
 }
 
 function release7zSlot() {
-  if (queue7z.length > 0) {
-    const entry = queue7z.shift();
-    clearTimeout(entry.timer);
-    entry.resolve();
-  } else {
-    active7z--;
-  }
+  active7z = Math.max(0, active7z - 1);
+  tryGrant7zSlot();
 }
 
 function parseTimeoutMs(envName, defaultMs) {

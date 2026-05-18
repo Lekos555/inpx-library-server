@@ -39,8 +39,8 @@ export function registerUserApiRoutes(app, deps) {
 
   app.get('/api/favorites', requireApiAuth, (req, res) => {
     res.json({
-      authors: getFavoriteAuthors(req.user.username, 20),
-      series: getFavoriteSeries(req.user.username, 20)
+      authors: getFavoriteAuthorsLight(req.user.username, 20),
+      series: getFavoriteSeriesLight(req.user.username, 20)
     });
   });
 

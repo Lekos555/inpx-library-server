@@ -2,7 +2,7 @@
  * Library template functions: home, catalog, browse, book detail, favorites, shelves, reader, profile.
  */
 import {
-  escapeHtml, csrfHiddenField, pageShell,
+  escapeHtml, sanitizeHtml, csrfHiddenField, pageShell,
   renderBookGrid, renderFavoriteBookGrid, renderEntityGrid, renderCover,
   renderPagination, renderSortControl, renderEmptyState,
   renderDownloadMenu, renderBatchDownloadToolbar,
@@ -112,14 +112,11 @@ export function renderCatalog({ items, total, page, pageSize, query, field, sort
     actionHref: '/catalog',
     actionLabel: t('catalog.resetSearch')
   });
-  const catalogBatch = false;
   const resultsMarkup = !hasSearchContext
     ? ''
     : items.length
       ? isBookField
-        ? catalogBatch
-          ? `<div class="batch-select-scope">${renderBatchDownloadToolbar({ adhoc: true }, { user })}${catalogHintBlock}<div data-load-more-grid data-load-more-api="/api/catalog?${catalogApiParams}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}" data-batch-context="${batchAdhocJson}">${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: true, user, readBookIds })}</div></div>`
-          : `${catalogHintBlock}<div data-load-more-grid data-load-more-api="/api/catalog?${catalogApiParams}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}">${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: false, user, readBookIds })}</div>`
+        ? `${catalogHintBlock}<div data-load-more-grid data-load-more-api="/api/catalog?${catalogApiParams}" data-load-more-page="${page}" data-load-more-total="${total}" data-load-more-page-size="${pageSize}">${renderBookGrid(items, { isAuthenticated: Boolean(user), batchSelect: false, user, readBookIds })}</div>`
         : `${catalogHintBlock}${renderEntityGrid(items, field === 'authors' ? '/facet/authors' : '/facet/series', t('browse.empty'))}`
       : `${catalogHintBlock}${catalogEmpty}`;
   const content = `
@@ -167,7 +164,21 @@ export function renderCatalog({ items, total, page, pageSize, query, field, sort
 }
 
 
-export function renderLibraryView({ view, title, subtitle = '', items, total, page, pageSize, type = '', itemType = '', sort = 'title', order = '', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null }) {
+export function renderLibraryView({ view, title, subtitle = '', items, total, page, pageSize, type = '', itemType = '', sort = 'title', order = '', user, stats, indexStatus, csrfToken = '', readBookIds = null, readSeriesNames = null, computing = false }) {
+  if (computing) {
+    const content = `
+      <section class="page-intro">
+        <div class="page-intro-copy">
+          <h1>${escapeHtml(title)}</h1>
+          ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+        </div>
+      </section>
+      <section class="library-shelf library-shelf-primary">
+        ${renderSkeletonGrid(12)}
+      </section>
+      <script>setTimeout(function(){location.reload()},2500)</script>`;
+    return pageShell({ title, content, user, stats, indexStatus, breadcrumbs: [{ label: t('nav.home'), href: '/' }, { label: title }], currentPath: `/library/${view}`, csrfToken, readBookIds });
+  }
   const emptyStates = {
     recent: {
       title: t('library.empty.recent.title'),
@@ -193,7 +204,6 @@ export function renderLibraryView({ view, title, subtitle = '', items, total, pa
   const totalN = Math.max(0, Math.floor(Number(total) || 0));
   const totalNum = formatLocaleInt(totalN);
   const totalBookWord = isSeries ? plural('series', totalN) : plural('book', totalN);
-  const libBatchJson = '';
   const sortOptions = isSeries ? [] : [
     { value: 'recent', label: t('sort.recentFirst') },
     { value: 'title', label: t('sort.byTitle') },
@@ -202,7 +212,7 @@ export function renderLibraryView({ view, title, subtitle = '', items, total, pa
     { value: 'rating', label: t('sort.byRating') }
   ];
   const sortControl = isSeries ? '' : `<div class="actions">${renderSortControl({ action: `/library/${view}`, sort, order, options: sortOptions, extraHidden: type ? { type } : {} })}</div>`;
-  const currentPath = type ? `/library/${view}?sort=${encodeURIComponent(sort)}&type=${encodeURIComponent(type)}` : `/library/${view}?sort=${encodeURIComponent(sort)}`;
+  const currentPath = type ? `/library/${view}?type=${encodeURIComponent(type)}` : `/library/${view}`;
   const content = `
     <section class="page-intro">
       <div class="page-intro-copy">
@@ -314,7 +324,7 @@ export function renderBook({
           ${summaryBits.length ? `<div class="book-detail-summary">${summaryBits.join('<span class="book-detail-sep">·</span>')}</div>` : ''}
           ${
             details.annotationIsHtml && String(details.annotation || '').trim()
-              ? `<div class="book-detail-annotation book-detail-annotation--html">${details.annotation}</div>`
+              ? `<div class="book-detail-annotation book-detail-annotation--html">${sanitizeHtml(details.annotation)}</div>`
               : `<p class="book-detail-annotation">${escapeHtml(details.annotation || t('book.noAnnotation'))}</p>`
           }
           <div class="book-detail-review-mount" data-book-review-mount data-book-review-for="${escapeHtml(String(book.id))}" data-review-heading="${escapeHtml(t('book.review'))}" hidden aria-hidden="true"></div>
@@ -334,7 +344,7 @@ export function renderBook({
     </section>
     ${user?.role === 'admin' ? `
     <section class="book-edit-section">
-      ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+      ${flash ? renderAlert('success', flash) : ''}
       <details class="book-edit-disclosure">
         <summary class="book-edit-summary">${escapeHtml(t('book.edit.title'))}</summary>
         <form class="book-edit-form" action="/book/${encodeURIComponent(book.id)}/edit" method="post">
@@ -444,8 +454,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
         ${authors.map((item) => `
           <a class="table-row table-row-link favorites-row" href="/facet/authors/${encodeURIComponent(item.name)}">
             <div class="favorites-row-main">
-              <strong>${escapeHtml(item.displayName || item.name)}</strong><br>
-              <span class="muted">${countLabel('book', item.bookCount)} ${escapeHtml(t('entity.inLibrary'))}</span>
+              <strong>${escapeHtml(item.displayName || item.name)}</strong>
             </div>
             <div class="actions favorites-row-actions">
               <button class="button" type="button" data-favorite-author="${escapeHtml(item.name)}">${escapeHtml(t('book.remove'))}</button>
@@ -464,8 +473,7 @@ export function renderFavorites({ books = [], readBooks = [], authors = [], seri
         ${series.map((item) => `
           <a class="table-row table-row-link favorites-row" href="/facet/series/${encodeURIComponent(item.name)}">
             <div class="favorites-row-main" style="display:flex;align-items:center">
-              <span><strong>${escapeHtml(item.displayName || item.name)}</strong><br>
-              <span class="muted">${countLabel('book', item.bookCount)} ${escapeHtml(t('entity.inLibrary'))}</span></span>
+              <span><strong>${escapeHtml(item.displayName || item.name)}</strong></span>
               ${readSeriesNames && readSeriesNames.has(item.name) ? `<span class="read-series-badge">${READ_CHECK_SVG}</span>` : ''}
             </div>
             <div class="actions favorites-row-actions">
@@ -713,7 +721,7 @@ export function renderAuthorFacetPage({
       </span>`;
   const bioBlock =
     authorBioHtml && String(authorBioHtml).trim()
-      ? `<section class="book-detail-side-block author-facet-bio-block"><h3>${escapeHtml(t('book.aboutAuthor'))}</h3><div class="book-detail-author-bio book-detail-author-bio--facet">${authorBioHtml}</div></section>`
+      ? `<section class="book-detail-side-block author-facet-bio-block"><h3>${escapeHtml(t('book.aboutAuthor'))}</h3><div class="book-detail-author-bio book-detail-author-bio--facet">${sanitizeHtml(authorBioHtml)}</div></section>`
       : '';
 
   const hero = `
@@ -1161,7 +1169,7 @@ export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmai
   const tabActivityActive = initialTab === 'activity';
 
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
     <div class="section-title">
       <h2>${escapeHtml(user.username)}</h2>
       <div class="muted">${escapeHtml(fmtDate(userStats.createdAt))} · ${escapeHtml(user.role === 'admin' ? t('profile.admin') : t('profile.user'))}</div>

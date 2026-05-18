@@ -282,7 +282,7 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
     </details>
   `).join('');
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
 
     <div class="admin-card">
       <form method="post" action="/admin/settings/anonymous-access" class="admin-action-item" data-track-dirty>
@@ -428,7 +428,7 @@ export function renderAdminEvents({ user, stats, indexStatus, events = [], total
           </div>`).join('')
     : `<div class="muted admin-events-empty">${escapeHtml(t('admin.events.empty'))}</div>`;
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
 
     <div class="admin-card" data-admin-events-page>
       <div class="admin-events-bar">
@@ -567,7 +567,7 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
   }
 
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
     <div class="admin-card" style="margin-bottom:16px;border-left:4px solid var(--accent-color)">
       <div class="admin-card-title">${escapeHtml(t('admin.content.statsTitle'))}</div>
       <p class="muted" style="margin:8px 0">${escapeHtml(tp('admin.content.statsDesc', { langTotal: languages.length, langExcluded: langExcludedCount, genreTotal: genres.length, genreExcluded: genreExcludedCount }))}</p>
@@ -687,7 +687,7 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
 
 export function renderAdminDuplicates({ user, stats, indexStatus, flash = '', csrfToken = '' }) {
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
     <div data-duplicates-page data-page="1">
       <div id="dup-start-container" class="admin-card" style="text-align:center;padding:48px 24px;">
         <p style="margin-bottom:1rem;color:var(--muted);">${escapeHtml(t('admin.duplicates.description'))}</p>
@@ -730,7 +730,7 @@ export function renderAdminSources({ user, stats, indexStatus, sources = [], fla
   `).join('');
 
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
 
     <div class="admin-card" data-sources-card>
       <div class="admin-card-title">${escapeHtml(t('admin.sources.cardTitle'))}</div>
@@ -811,7 +811,7 @@ export function renderAdminSources({ user, stats, indexStatus, sources = [], fla
 
 export function renderAdminSmtp({ user, stats, indexStatus, smtp = {}, flash = '', csrfToken = '' }) {
   const content = `
-    ${flash ? renderAlert('success', escapeHtml(flash)) : ''}
+    ${flash ? renderAlert('success', flash) : ''}
     <div class="admin-card">
       <div class="admin-card-title">${escapeHtml(t('admin.smtp.cardTitle'))}</div>
       <div class="admin-card-subtitle">${escapeHtml(t('admin.smtp.cardSubtitle'))}</div>

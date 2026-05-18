@@ -1,7 +1,7 @@
 /**
  * OPDS (Open Publication Distribution System) template functions.
  */
-import { escapeHtml, siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel } from './shared.js';
+import { escapeHtml, sanitizeHtml, siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel } from './shared.js';
 
 function renderOpdsBaseLinks(baseUrl, selfPath, { acquisition = false } = {}) {
   const selfType = acquisition
@@ -83,7 +83,7 @@ function renderOpdsBookEntries(baseUrl, items, { includeContent = false } = {}) 
       const ann = String(book.annotation);
       const hasHtml = /<[a-z][\s\S]*?>/i.test(ann);
       if (hasHtml) {
-        contentXml = `<content type="text/html">${escapeHtml(ann)}</content>`;
+        contentXml = `<content type="text/html">${sanitizeHtml(ann)}</content>`;
       } else {
         contentXml = `<content type="text">${escapeHtml(ann.slice(0, 500))}${seriesStr ? ` \u2014 ${escapeHtml(seriesStr)}` : ''}</content>`;
       }

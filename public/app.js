@@ -7,7 +7,7 @@ function escapeHtml(value = '') {
     .replace(/'/g, '&#39;');
 }
 
-async function loadHomeRecommendationsProgressively() {
+async function loadHomeRecommendationsProgressively(attempt = 0) {
   const section = document.querySelector('[data-home-recommendations]');
   if (!section || section.dataset.loaded === '1') return;
   const gridMount = section.querySelector('[data-home-recommendations-grid]');
@@ -19,6 +19,16 @@ async function loadHomeRecommendationsProgressively() {
       return;
     }
     const data = await r.json();
+    if (data.computing) {
+      if (attempt < 10) {
+        setTimeout(() => {
+          if (document.querySelector('[data-home-recommendations]')) {
+            loadHomeRecommendationsProgressively(attempt + 1);
+          }
+        }, 2000);
+      }
+      return;
+    }
     const items = Array.isArray(data?.items) ? data.items : [];
     if (!items.length) {
       gridMount.innerHTML = '';
@@ -361,6 +371,7 @@ function attachCoverErrorFallback(scope = document) {
 
 const CARD_DETAILS_BATCH_SIZE = 48;
 const CARD_DETAILS_FLUSH_DELAY_MS = 35;
+const CARD_DETAILS_CACHE_MAX = 300;
 const _cardDetailsCache = new Map();
 const _cardDetailsQueued = new Set();
 const _cardDetailsInFlight = new Set();
@@ -382,6 +393,14 @@ function applyCardDetailsForId(id, details) {
     }
     const hasRenderedImage = Boolean(img && img.complete && img.naturalWidth > 0);
     setCoverFallbackState(card, !details.coverAvailable && !hasRenderedImage);
+  }
+}
+
+function trimCardDetailsCache() {
+  while (_cardDetailsCache.size > CARD_DETAILS_CACHE_MAX) {
+    const first = _cardDetailsCache.keys().next().value;
+    if (first === undefined) break;
+    _cardDetailsCache.delete(first);
   }
 }
 
@@ -409,6 +428,7 @@ function scheduleCardDetailsFlush() {
           const details = items[id];
           if (!details) continue;
           _cardDetailsCache.set(id, details);
+          trimCardDetailsCache();
           applyCardDetailsForId(id, details);
         }
       } catch (error) {
@@ -510,7 +530,38 @@ function attachThemeToggle() {
     }
   };
 
+  /* Автоопределение темы: ручной выбор в localStorage важнее системной настройки */
+  try {
+    const saved = localStorage.getItem('theme-preference');
+    if (saved === 'light' || saved === 'dark') {
+      root.dataset.theme = saved;
+    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+      root.dataset.theme = 'light';
+    }
+  } catch {
+    /* ignore storage errors */
+  }
+
   render();
+
+  /* Следим за системной темой, пока пользователь не сделал ручной выбор */
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = (e) => {
+      try {
+        if (localStorage.getItem('theme-preference')) return;
+      } catch {
+        return;
+      }
+      root.dataset.theme = e.matches ? 'light' : 'dark';
+      render();
+    };
+    if (mq.addEventListener) {
+      mq.addEventListener('change', onChange);
+    } else if (mq.addListener) {
+      mq.addListener(onChange);
+    }
+  }
 
   for (const button of buttons) {
     button.addEventListener('click', () => {

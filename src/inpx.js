@@ -86,7 +86,8 @@ const archiveStemLookupCache = new Map();
 /* ── Reset cached prepared statements when active_books VIEW is rebuilt ── */
 function resetInpxPreparedStatements() {
   _stmtGetBookById = null;
-  _stmtGenresGrouped = null;
+  _stmtGenresGroupedCount = null;
+  _stmtGenresGroupedName = null;
   _stmtDupTotal = null;
   _stmtDupGroups = null;
   _stmtLibSections = null;
@@ -105,6 +106,11 @@ function resetInpxPreparedStatements() {
   _stmtGetStats = null;
   _stmtIsBookRead = null;
   _stmtIsSeriesFullyRead = null;
+  _stmtBookmarksBySort.clear();
+  _stmtBookmarksLimitedBySort.clear();
+  _stmtReadBooksBySort.clear();
+  _stmtReadBooksLimitedBySort.clear();
+  _recStmtCache.clear();
   clearRuntimeQueryCaches();
 }
 onViewRebuild(resetInpxPreparedStatements);
@@ -711,8 +717,75 @@ function beginIndexControlState(mode = 'all', sourceId = null) {
   indexState.sourceId = sourceId;
 }
 
+/* ── Cluster-safe index state (sharing через meta-таблицу) ── */
+
+const INDEX_HEARTBEAT_INTERVAL_MS = 5_000;
+const INDEX_HEARTBEAT_STALE_MS = 30_000;
+let _indexHeartbeatTimer = null;
+
+function isClusterIndexActive() {
+  if (getMeta('index_active') !== '1') return false;
+  const hb = getMeta('index_heartbeat');
+  if (!hb) return false;
+  if (Date.now() - new Date(hb).getTime() > INDEX_HEARTBEAT_STALE_MS) {
+    clearClusterIndexState();
+    return false;
+  }
+  return true;
+}
+
+function setClusterIndexActive() {
+  setMeta('index_active', '1');
+  setMeta('index_pid', String(process.pid));
+  setMeta('index_heartbeat', new Date().toISOString());
+  setMeta('index_pause_requested', '');
+  setMeta('index_cancel_requested', '');
+  _indexHeartbeatTimer = setInterval(() => {
+    try {
+      setMeta('index_heartbeat', new Date().toISOString());
+      writeClusterIndexProgress();
+    } catch {}
+  }, INDEX_HEARTBEAT_INTERVAL_MS);
+  if (typeof _indexHeartbeatTimer.unref === 'function') _indexHeartbeatTimer.unref();
+}
+
+function clearClusterIndexState() {
+  if (_indexHeartbeatTimer) {
+    clearInterval(_indexHeartbeatTimer);
+    _indexHeartbeatTimer = null;
+  }
+  try {
+    writeClusterIndexProgress();
+    setMeta('index_active', '');
+    setMeta('index_pid', '');
+    setMeta('index_heartbeat', '');
+    setMeta('index_pause_requested', '');
+    setMeta('index_cancel_requested', '');
+  } catch {}
+}
+
+function writeClusterIndexProgress() {
+  try {
+    setMeta('index_progress', JSON.stringify({
+      processedArchives: indexState.processedArchives,
+      totalArchives: indexState.totalArchives,
+      importedBooks: indexState.importedBooks,
+      currentArchive: String(indexState.currentArchive || '').slice(0, 500),
+      startedAt: indexState.startedAt,
+      mode: indexState.mode,
+      sourceId: indexState.sourceId,
+      paused: indexState.paused
+    }));
+  } catch {}
+}
+
+function readClusterIndexProgress() {
+  try { return JSON.parse(getMeta('index_progress') || '{}'); } catch { return {}; }
+}
+
 function throwIfIndexCancelled() {
-  if (indexState.cancelRequested) {
+  if (indexState.cancelRequested || getMeta('index_cancel_requested') === '1') {
+    indexState.cancelRequested = true;
     throw new Error('Indexing cancelled by user');
   }
 }
@@ -723,15 +796,19 @@ function isIndexCancelledError(error) {
 }
 
 async function waitIfIndexPaused() {
-  if (!indexState.pauseRequested) {
+  const dbPause = getMeta('index_pause_requested') === '1';
+  if (!indexState.pauseRequested && !dbPause) {
     indexState.paused = false;
     return;
   }
   indexState.paused = true;
-  while (indexState.pauseRequested && !indexState.cancelRequested) {
+  indexState.pauseRequested = true;
+  while ((indexState.pauseRequested || getMeta('index_pause_requested') === '1')
+         && !indexState.cancelRequested && getMeta('index_cancel_requested') !== '1') {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   indexState.paused = false;
+  indexState.pauseRequested = false;
   throwIfIndexCancelled();
 }
 
@@ -741,22 +818,44 @@ async function checkIndexControlPoint() {
 }
 
 export function requestIndexPause() {
-  if (!indexState.active) return false;
-  indexState.pauseRequested = true;
-  return true;
+  if (indexState.active) {
+    indexState.pauseRequested = true;
+    try { setMeta('index_pause_requested', '1'); } catch {}
+    return true;
+  }
+  if (isClusterIndexActive()) {
+    setMeta('index_pause_requested', '1');
+    return true;
+  }
+  return false;
 }
 
 export function requestIndexResume() {
-  if (!indexState.active) return false;
-  indexState.pauseRequested = false;
-  return true;
+  if (indexState.active) {
+    indexState.pauseRequested = false;
+    try { setMeta('index_pause_requested', ''); } catch {}
+    return true;
+  }
+  if (isClusterIndexActive()) {
+    setMeta('index_pause_requested', '');
+    return true;
+  }
+  return false;
 }
 
 export function requestIndexStop() {
-  if (!indexState.active) return false;
-  indexState.cancelRequested = true;
-  indexState.pauseRequested = false;
-  return true;
+  if (indexState.active) {
+    indexState.cancelRequested = true;
+    indexState.pauseRequested = false;
+    try { setMeta('index_cancel_requested', '1'); setMeta('index_pause_requested', ''); } catch {}
+    return true;
+  }
+  if (isClusterIndexActive()) {
+    setMeta('index_cancel_requested', '1');
+    setMeta('index_pause_requested', '');
+    return true;
+  }
+  return false;
 }
 
 function repairMojibake(value) {
@@ -953,8 +1052,36 @@ function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
 
 export function getIndexStatus() {
   const indexedAt = getMeta('indexed_at');
-  /** Не мутируем indexState при опросе API — иначе плывут ready/архивы и «индексация обрывается» визуально. */
-  const catalogIndexedOnce = Boolean(indexedAt) && !indexState.active && !indexState.error;
+
+  /* Локальная индексация — полный прогресс */
+  if (indexState.active) {
+    return { ...indexState, ready: indexState.ready, indexedAt };
+  }
+
+  /* Другой воркер кластера индексирует — прогресс из meta */
+  if (isClusterIndexActive()) {
+    const p = readClusterIndexProgress();
+    return {
+      active: true,
+      ready: false,
+      startedAt: p.startedAt || null,
+      finishedAt: null,
+      processedArchives: p.processedArchives || 0,
+      totalArchives: p.totalArchives || 0,
+      importedBooks: p.importedBooks || 0,
+      currentArchive: p.currentArchive || '',
+      error: '',
+      pauseRequested: getMeta('index_pause_requested') === '1',
+      paused: p.paused || false,
+      cancelRequested: getMeta('index_cancel_requested') === '1',
+      mode: p.mode || '',
+      sourceId: p.sourceId ?? null,
+      indexedAt
+    };
+  }
+
+  /* Не индексируется нигде */
+  const catalogIndexedOnce = Boolean(indexedAt) && !indexState.error;
   const ready = indexState.ready || catalogIndexedOnce;
 
   let legacyInpArchiveCount = 0;
@@ -962,14 +1089,9 @@ export function getIndexStatus() {
     legacyInpArchiveCount = Object.keys(JSON.parse(getMeta('inp_sizes') || '{}')).length;
   } catch {}
 
-  const out = {
-    ...indexState,
-    ready,
-    indexedAt
-  };
+  const out = { ...indexState, ready, indexedAt };
 
   if (
-    !indexState.active &&
     indexState.processedArchives === 0 &&
     indexState.totalArchives === 0 &&
     legacyInpArchiveCount > 0
@@ -987,12 +1109,18 @@ export function startBackgroundIndexing(force = false, incremental = true) {
     logSystemEvent('warn', 'index', 'global reindex skipped: already running', {});
     return false;
   }
+  if (isClusterIndexActive()) {
+    console.warn('[index] reindex skipped: another cluster worker is indexing');
+    logSystemEvent('warn', 'index', 'reindex skipped: another cluster worker is indexing', {});
+    return false;
+  }
 
   indexState.active = true;
   indexState.error = '';
   indexState.startedAt = new Date().toISOString();
   indexState.finishedAt = null;
   beginIndexControlState('all', null);
+  setClusterIndexActive();
 
   if (force) {
     setMeta('catalog_normalization_v1', '');
@@ -1013,6 +1141,7 @@ export function startBackgroundIndexing(force = false, incremental = true) {
         indexState.ready = true;
         indexState.active = false;
         indexState.finishedAt = new Date().toISOString();
+        clearClusterIndexState();
         await refreshCatalogBookCounts();
         invalidateAllRecommendations();
         resetIndexControlState();
@@ -1021,6 +1150,7 @@ export function startBackgroundIndexing(force = false, incremental = true) {
         indexState.ready = false;
         indexState.error = err.message;
         indexState.finishedAt = new Date().toISOString();
+        clearClusterIndexState();
         resetIndexControlState();
         logSystemEvent('error', 'index', 'global index post-processing failed', { error: err.message });
         console.error(err);
@@ -1028,6 +1158,7 @@ export function startBackgroundIndexing(force = false, incremental = true) {
     })
     .catch((error) => {
       indexState.active = false;
+      clearClusterIndexState();
       if (isIndexCancelledError(error)) {
         indexState.error = '';
         logSystemEvent('warn', 'index', 'global index stopped by user', {});
@@ -1051,12 +1182,18 @@ export function startSourceIndexing(sourceId, force = false) {
     logSystemEvent('warn', 'index', 'source reindex skipped: global indexer already running', { sourceId });
     return false;
   }
+  if (isClusterIndexActive()) {
+    console.warn('[index] source reindex skipped: another cluster worker is indexing');
+    logSystemEvent('warn', 'index', 'source reindex skipped: another cluster worker is indexing', { sourceId });
+    return false;
+  }
 
   indexState.active = true;
   indexState.error = '';
   indexState.startedAt = new Date().toISOString();
   indexState.finishedAt = null;
   beginIndexControlState('source', Number(sourceId) || null);
+  setClusterIndexActive();
 
   if (force) {
     setMeta('catalog_normalization_v1', '');
@@ -1076,6 +1213,7 @@ export function startSourceIndexing(sourceId, force = false) {
         indexState.ready = true;
         indexState.active = false;
         indexState.finishedAt = new Date().toISOString();
+        clearClusterIndexState();
         await refreshCatalogBookCounts();
         invalidateAllRecommendations();
         resetIndexControlState();
@@ -1084,6 +1222,7 @@ export function startSourceIndexing(sourceId, force = false) {
         indexState.ready = false;
         indexState.error = err.message;
         indexState.finishedAt = new Date().toISOString();
+        clearClusterIndexState();
         resetIndexControlState();
         logSystemEvent('error', 'index', 'single source index post-processing failed', {
           sourceId, name: srcRow?.name || '', error: err.message
@@ -1093,6 +1232,7 @@ export function startSourceIndexing(sourceId, force = false) {
     })
     .catch((error) => {
       indexState.active = false;
+      clearClusterIndexState();
       if (isIndexCancelledError(error)) {
         indexState.error = '';
         logSystemEvent('warn', 'index', 'single source index stopped by user', { sourceId, name: srcRow?.name || '' });
@@ -2798,62 +2938,71 @@ export function softDeleteBook(bookId) {
 export function autoCleanDuplicates() {
   const FORMAT_RANK = { epub: 1, fb2: 2, mobi: 3, azw3: 4, djvu: 5, pdf: 6, doc: 7, docx: 8, rtf: 9, txt: 10 };
   const maxRank = 99;
+  const BATCH = 5000;
 
-  // Fetch ALL duplicate books in one query
-  const rows = db.prepare(`
-    WITH dup_keys AS (
-      SELECT title_sort, authors
-      FROM active_books
-      WHERE title_sort IS NOT NULL AND title_sort != ''
-      GROUP BY title_sort, authors
-      HAVING COUNT(*) > 1
-    )
-    SELECT b.id, b.ext, b.size, b.title_sort, b.authors
-    FROM active_books b
-    JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = b.authors
-    ORDER BY b.title_sort ASC, b.authors ASC
-  `).all();
-
-  // Group
-  const groups = [];
-  let cur = null;
-  for (const r of rows) {
-    const key = `${r.title_sort}\0${r.authors}`;
-    if (!cur || cur.key !== key) {
-      cur = { key, items: [] };
-      groups.push(cur);
-    }
-    cur.items.push(r);
-  }
-
-  // Rank & delete in transaction
   const delStmt = db.prepare('UPDATE books SET deleted = 1 WHERE id = ? AND deleted = 0');
   const suppressStmt = db.prepare(`INSERT INTO suppressed_books(book_id, title, authors, reason) VALUES(?, ?, ?, 'auto_clean')
     ON CONFLICT(book_id) DO UPDATE SET reason = 'auto_clean', suppressed_at = CURRENT_TIMESTAMP`);
   let totalDeleted = 0;
-  const doClean = db.transaction(() => {
-    for (const g of groups) {
-      // Sort: best first (lowest format rank, then largest size)
-      g.items.sort((a, b) => {
-        const fa = FORMAT_RANK[(a.ext || '').toLowerCase()] || maxRank;
-        const fb = FORMAT_RANK[(b.ext || '').toLowerCase()] || maxRank;
-        if (fa !== fb) return fa - fb;
-        return (b.size || 0) - (a.size || 0);
-      });
-      // Keep first, delete rest
-      for (let i = 1; i < g.items.length; i++) {
-        const item = g.items[i];
-        const changes = delStmt.run(item.id).changes;
-        if (changes) {
-          suppressStmt.run(item.id, item.title_sort || '', item.authors || '');
-          totalDeleted += changes;
-        }
+  let groupsCleaned = 0;
+
+  for (let offset = 0; ; offset += BATCH) {
+    /* Берём батч дубликатов — не загружаем всё в память сразу */
+    const rows = db.prepare(`
+      WITH dup_keys AS (
+        SELECT title_sort, authors
+        FROM active_books
+        WHERE title_sort IS NOT NULL AND title_sort != ''
+        GROUP BY title_sort, authors
+        HAVING COUNT(*) > 1
+      )
+      SELECT b.id, b.ext, b.size, b.title_sort, b.authors
+      FROM active_books b
+      JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = b.authors
+      ORDER BY b.title_sort ASC, b.authors ASC, b.id ASC
+      LIMIT ? OFFSET ?
+    `).all(BATCH, offset);
+
+    if (!rows.length) break;
+
+    // Group
+    const groups = [];
+    let cur = null;
+    for (const r of rows) {
+      const key = `${r.title_sort}\0${r.authors}`;
+      if (!cur || cur.key !== key) {
+        cur = { key, items: [] };
+        groups.push(cur);
       }
+      cur.items.push(r);
     }
-  });
-  doClean();
+
+    const doClean = db.transaction(() => {
+      for (const g of groups) {
+        g.items.sort((a, b) => {
+          const fa = FORMAT_RANK[(a.ext || '').toLowerCase()] || maxRank;
+          const fb = FORMAT_RANK[(b.ext || '').toLowerCase()] || maxRank;
+          if (fa !== fb) return fa - fb;
+          return (b.size || 0) - (a.size || 0);
+        });
+        for (let i = 1; i < g.items.length; i++) {
+          const item = g.items[i];
+          const changes = delStmt.run(item.id).changes;
+          if (changes) {
+            suppressStmt.run(item.id, item.title_sort || '', item.authors || '');
+            totalDeleted += changes;
+          }
+        }
+        groupsCleaned++;
+      }
+    });
+    doClean();
+
+    if (rows.length < BATCH) break;
+  }
+
   refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after autoCleanDuplicates:', err));
-  return { groupsCleaned: groups.length, totalDeleted };
+  return { groupsCleaned, totalDeleted };
 }
 
 /** Preview: how many books would be deleted by auto-clean */
@@ -3362,6 +3511,7 @@ export function listLanguages({ page = 1, pageSize = 50, query = '', sort = 'nam
 
 /* ── Pre-cached prepared statements for getBooksByFacet (finite set: 4 facets × 4 sorts) ── */
 const _facetStmtCache = new Map();
+const FACET_STMT_CACHE_MAX = 200;
 
 function _getFacetStmts(facet, sort, order = '', author = '') {
   const key = `${facet}|${sort}|${order}|${author ? 'a' : ''}`;
@@ -3391,7 +3541,43 @@ function _getFacetStmts(facet, sort, order = '', author = '') {
     items: db.prepare(itemsSql[facet])
   };
   _facetStmtCache.set(key, entry);
+  if (_facetStmtCache.size > FACET_STMT_CACHE_MAX) {
+    const oldest = _facetStmtCache.keys().next().value;
+    if (oldest !== undefined) _facetStmtCache.delete(oldest);
+  }
   return entry;
+}
+
+/**
+ * Лёгкая выборка книг по фасету для рекомендаций.
+ * Один SELECT без COUNT, без attachSeriesListsToBooks, без LEFT JOIN sources.
+ * Поддерживает только sort='rating' и sort='recent'.
+ */
+const _recStmtCache = new Map();
+const REC_STMT_CACHE_MAX = 50;
+
+export function getBooksByFacetLight(facet, value, limit = 8, sort = 'rating') {
+  if (facet === 'series') value = resolveSeriesCatalogName(String(value || ''));
+  const key = `${facet}|${sort}`;
+  let stmt = _recStmtCache.get(key);
+  if (!stmt) {
+    const ratingOrder = 'b.lib_rate DESC, b.title_sort ASC, b.id DESC';
+    const recentOrder = "COALESCE(NULLIF(b.date, ''), b.imported_at) DESC, b.imported_at DESC, b.id DESC";
+    const orderBy = sort === 'rating' ? ratingOrder : recentOrder;
+    const sql = {
+      authors: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_authors ba JOIN authors a ON a.id = ba.author_id JOIN active_books b ON b.id = ba.book_id WHERE a.name = ? ORDER BY ${orderBy} LIMIT ?`,
+      series: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_series bs JOIN series_catalog sc ON sc.id = bs.series_id JOIN active_books b ON b.id = bs.book_id WHERE sc.name = ? ORDER BY ${orderBy} LIMIT ?`,
+      genres: `SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.lib_rate AS libRate, b.archive_name AS archiveName FROM book_genres bg JOIN genres_catalog g ON g.id = bg.genre_id JOIN active_books b ON b.id = bg.book_id WHERE g.name = ? ORDER BY ${orderBy} LIMIT ?`
+    };
+    if (!sql[facet]) return [];
+    stmt = db.prepare(sql[facet]);
+    _recStmtCache.set(key, stmt);
+    if (_recStmtCache.size > REC_STMT_CACHE_MAX) {
+      const oldest = _recStmtCache.keys().next().value;
+      if (oldest !== undefined) _recStmtCache.delete(oldest);
+    }
+  }
+  return stmt.all(value, limit).map(mapBookListRow);
 }
 
 export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 'title', order = '', author = '' }) {
@@ -4527,6 +4713,29 @@ export function getFavoriteSeries(username, limit = 20, sort = 'name', order = '
   `).all(username, limit);
 }
 
+/* Лёгкие версии — только имя и displayName, без подсчёта bookCount через JOIN на active_books */
+export function getFavoriteAuthorsLight(username, limit = 20) {
+  return db.prepare(`
+    SELECT a.name, COALESCE(a.display_name, a.name) AS displayName
+    FROM favorite_authors fa
+    JOIN authors a ON a.id = fa.author_id
+    WHERE fa.username = ?
+    ORDER BY COALESCE(a.display_name, a.name) COLLATE NOCASE ASC
+    LIMIT ?
+  `).all(username, limit);
+}
+
+export function getFavoriteSeriesLight(username, limit = 20) {
+  return db.prepare(`
+    SELECT s.name, COALESCE(s.display_name, s.name) AS displayName
+    FROM favorite_series fs
+    JOIN series_catalog s ON s.id = fs.series_id
+    WHERE fs.username = ?
+    ORDER BY COALESCE(s.display_name, s.name) COLLATE NOCASE ASC
+    LIMIT ?
+  `).all(username, limit);
+}
+
 let _stmtIsFavAuthor = null;
 export function isFavoriteAuthor(username, authorName) {
   const resolvedName = resolveAuthorName(authorName);
@@ -4555,7 +4764,9 @@ export function isFavoriteSeries(username, seriesName) {
   return Boolean(_stmtIsFavSeries.get(username, resolved));
 }
 
-export function getBookmarks(username, sort = 'date') {
+const _stmtBookmarksBySort = new Map();
+const _stmtBookmarksLimitedBySort = new Map();
+export function getBookmarks(username, sort = 'date', limit = 0) {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
@@ -4563,14 +4774,35 @@ export function getBookmarks(username, sort = 'date') {
     rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
   const orderBy = orderMap[sort] || orderMap.date;
-  return db.prepare(`
-    SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
-           b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
-    FROM bookmarks bm
-    JOIN active_books b ON b.id = bm.book_id
-    WHERE bm.username = ?
-    ORDER BY ${orderBy}
-  `).all(username).map(mapBookListRow);
+  if (limit > 0) {
+    let stmt = _stmtBookmarksLimitedBySort.get(orderBy);
+    if (!stmt) {
+      stmt = db.prepare(`
+        SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+               b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+        FROM bookmarks bm
+        JOIN active_books b ON b.id = bm.book_id
+        WHERE bm.username = ?
+        ORDER BY ${orderBy}
+        LIMIT ?
+      `);
+      _stmtBookmarksLimitedBySort.set(orderBy, stmt);
+    }
+    return stmt.all(username, limit).map(mapBookListRow);
+  }
+  let stmt = _stmtBookmarksBySort.get(orderBy);
+  if (!stmt) {
+    stmt = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+             b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+      FROM bookmarks bm
+      JOIN active_books b ON b.id = bm.book_id
+      WHERE bm.username = ?
+      ORDER BY ${orderBy}
+    `);
+    _stmtBookmarksBySort.set(orderBy, stmt);
+  }
+  return stmt.all(username).map(mapBookListRow);
 }
 
 let _stmtIsBookmarked = null;
@@ -4689,7 +4921,9 @@ export function addReadBooksIfMissing(username, bookIds) {
   return { added, already, missing };
 }
 
-export function getReadBooks(username, sort = 'date') {
+const _stmtReadBooksBySort = new Map();
+const _stmtReadBooksLimitedBySort = new Map();
+export function getReadBooks(username, sort = 'date', limit = 0) {
   const orderMap = {
     title: 'b.title COLLATE NOCASE ASC',
     author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
@@ -4697,14 +4931,35 @@ export function getReadBooks(username, sort = 'date') {
     rating: 'b.lib_rate DESC, b.title_sort ASC'
   };
   const orderBy = orderMap[sort] || orderMap.date;
-  return db.prepare(`
-    SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
-           b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
-    FROM read_books rb
-    JOIN active_books b ON b.id = rb.book_id
-    WHERE rb.username = ?
-    ORDER BY ${orderBy}
-  `).all(username).map(mapBookListRow);
+  if (limit > 0) {
+    let stmt = _stmtReadBooksLimitedBySort.get(orderBy);
+    if (!stmt) {
+      stmt = db.prepare(`
+        SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+               b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+        FROM read_books rb
+        JOIN active_books b ON b.id = rb.book_id
+        WHERE rb.username = ?
+        ORDER BY ${orderBy}
+        LIMIT ?
+      `);
+      _stmtReadBooksLimitedBySort.set(orderBy, stmt);
+    }
+    return stmt.all(username, limit).map(mapBookListRow);
+  }
+  let stmt = _stmtReadBooksBySort.get(orderBy);
+  if (!stmt) {
+    stmt = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+             b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+      FROM read_books rb
+      JOIN active_books b ON b.id = rb.book_id
+      WHERE rb.username = ?
+      ORDER BY ${orderBy}
+    `);
+    _stmtReadBooksBySort.set(orderBy, stmt);
+  }
+  return stmt.all(username).map(mapBookListRow);
 }
 
 /** Лёгкий запрос — только ID прочитанных книг без JOIN и сортировки */

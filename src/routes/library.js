@@ -28,6 +28,8 @@ import {
   getFacetSummary,
   getFavoriteAuthors,
   getFavoriteSeries,
+  getFavoriteAuthorsLight,
+  getFavoriteSeriesLight,
   getIndexStatus,
   getBookmarks,
   getLibrarySections,
@@ -445,7 +447,10 @@ export function registerLibraryRoutes(app, deps) {
     const year = Number(req.query.year) || 0;
     const field = ['books', 'authors', 'series'].includes(String(req.query.field || '')) ? String(req.query.field) : 'books';
     const isBookField = field === 'books';
-    const sort = String(req.query.sort || (isBookField ? 'title' : 'name'));
+    const bookSorts = ['recent', 'title', 'author', 'series', 'rating'];
+    const entitySorts = ['name', 'count'];
+    const allowedSorts = isBookField ? bookSorts : entitySorts;
+    const sort = allowedSorts.includes(String(req.query.sort || '')) ? String(req.query.sort) : (isBookField ? 'title' : 'name');
     const order = String(req.query.order || '');
     const page = safePage(req.query.page);
     const pageSize = 24;
@@ -504,7 +509,8 @@ export function registerLibraryRoutes(app, deps) {
       indexStatus: getIndexStatus(),
       csrfToken: req.csrfToken || '',
       readBookIds,
-      readSeriesNames
+      readSeriesNames,
+      computing: Boolean(result.computing)
     }));
   });
 
@@ -875,10 +881,10 @@ export function registerLibraryRoutes(app, deps) {
     const view = ['books', 'read', 'authors', 'series'].includes(String(req.query.view || '')) ? String(req.query.view) : 'books';
     const sort = ['title', 'author', 'date', 'rating', 'name', 'count'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
     const order = String(req.query.order || '');
-    const books = getBookmarks(req.user.username, sort);
-    const readBooks = getReadBooks(req.user.username, sort);
-    const authors = getFavoriteAuthors(req.user.username, 50, sort, order);
-    const series = getFavoriteSeries(req.user.username, 50, sort, order);
+    const books = getBookmarks(req.user.username, sort, 200);
+    const readBooks = getReadBooks(req.user.username, sort, 200);
+    const authors = getFavoriteAuthorsLight(req.user.username, 50);
+    const series = getFavoriteSeriesLight(req.user.username, 50);
     const readBookIds = getReadBookIdSet(req.user.username);
     const readSeriesNames = getFullyReadSeriesNames(req.user.username);
     res.send(renderFavorites({ books, readBooks, authors, series, view, sort, order, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds, readSeriesNames }));

@@ -2,6 +2,7 @@
  * In-memory page data cache with TTL and LRU-like eviction.
  */
 import { PAGE_CACHE_MAX, PAGE_CACHE_TTL_MS } from '../constants.js';
+import { invalidateRecommendationsCache } from './recommendations.js';
 
 const pageDataCache = new Map();
 const refreshing = new Set();
@@ -143,4 +144,5 @@ export function invalidateUserPageCaches(username) {
   invalidateHomeUserSnapshot(username);
   invalidateFavoritesPage(username);
   invalidateUserLibraryViewCaches(username);
+  invalidateRecommendationsCache(username);
 }

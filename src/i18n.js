@@ -16,8 +16,8 @@ export function resolveLocale(req) {
   const c = req?.cookies?.lang;
   if (c === 'en' || c === 'ru') return c;
   const al = String(req?.get?.('Accept-Language') || '');
-  if (/^\s*en\b/i.test(al) || /,\s*en\b/i.test(al)) return 'en';
-  return 'ru';
+  if (/^\s*ru\b/i.test(al) || /,\s*ru\b/i.test(al)) return 'ru';
+  return 'en';
 }
 
 export function runWithLocale(req, fn) {
@@ -32,7 +32,7 @@ export function runWithLocaleLang(locale, fn) {
 }
 
 export function getLocale() {
-  return localeStore.getStore()?.locale || 'ru';
+  return localeStore.getStore()?.locale || 'en';
 }
 
 export function t(key) {
