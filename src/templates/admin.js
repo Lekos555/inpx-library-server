@@ -706,14 +706,19 @@ export function renderAdminSources({ user, stats, indexStatus, sources = [], fla
   const fmtDate = (d) => formatLocaleDateTimeShort(d);
 
   const sourceRows = sources.map((s) => `
-    <tr data-source-id="${s.id}">
+    <tr data-source-id="${s.id}" data-source-path="${escapeHtml(s.path)}">
       <td data-label="${escapeHtml(t('admin.sources.thType'))}">${typeBadge(s.type)}</td>
-      <td data-label="${escapeHtml(t('admin.sources.thName'))}"><strong>${escapeHtml(s.name)}</strong><br><span class="muted admin-compact-btn" style="word-break:break-all">${escapeHtml(s.path)}</span></td>
+      <td data-label="${escapeHtml(t('admin.sources.thName'))}">
+        <strong data-source-name="${s.id}">${escapeHtml(s.name)}</strong>
+        <div style="margin-top:4px">
+          <span class="muted admin-compact-btn source-path-text" style="word-break:break-all" data-path-status="${s.id}">${escapeHtml(s.path)}</span>
+        </div>
+      </td>
       <td data-label="${escapeHtml(t('admin.sources.thBooks'))}" style="text-align:center" data-source-books>${formatLocaleInt(Number(s.bookCount || 0))}</td>
       <td data-label="${escapeHtml(t('admin.sources.thEnabled'))}" style="text-align:center">${s.enabled ? escapeHtml(t('common.yes')) : escapeHtml(t('common.no'))}</td>
       <td data-label="${escapeHtml(t('admin.sources.thIndexed'))}" class="admin-compact-btn" data-source-indexed>${escapeHtml(fmtDate(s.lastIndexedAt))}</td>
       <td data-label="${escapeHtml(t('admin.sources.thActions'))}">
-        <div class="admin-inline-row" style="gap:6px">
+        <div class="admin-inline-row" style="gap:6px" data-source-actions="${s.id}">
           <button type="button" class="admin-compact-btn" data-reindex-btn data-source-id="${s.id}" data-mode="incremental">${escapeHtml(t('admin.sources.reindexInc'))}</button>
           <button type="button" class="admin-compact-btn button-danger" data-reindex-btn data-source-id="${s.id}" data-mode="full">${escapeHtml(t('admin.sources.reindexFull'))}</button>
           <form action="/admin/sources/${s.id}/update" method="post" class="admin-inline-form">
@@ -721,10 +726,29 @@ export function renderAdminSources({ user, stats, indexStatus, sources = [], fla
             <input type="hidden" name="enabled" value="${s.enabled ? '0' : '1'}">
             <button type="submit" class="admin-compact-btn">${escapeHtml(s.enabled ? t('admin.sources.off') : t('admin.sources.on'))}</button>
           </form>
+          <button type="button" class="admin-compact-btn" data-edit-source="${s.id}">${escapeHtml(t('admin.sources.edit'))}</button>
         </div>
       </td>
       <td data-label="">
         <button type="button" class="admin-compact-btn button-danger" data-delete-source="${s.id}" data-source-name="${escapeHtml(s.name)}">${escapeHtml(t('admin.sources.delete'))}</button>
+      </td>
+    </tr>
+    <tr class="source-edit-row" id="source-edit-${s.id}" style="display:none">
+      <td colspan="7" style="padding:8px 16px;background:var(--admin-bg-alt);border-top:none">
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+          <div>
+            <label style="display:block;font-size:0.85em;margin-bottom:4px">${escapeHtml(t('admin.sources.name'))}</label>
+            <input type="text" class="admin-input-sm" data-edit-name="${s.id}" value="${escapeHtml(s.name)}">
+          </div>
+          <div>
+            <label style="display:block;font-size:0.85em;margin-bottom:4px">${escapeHtml(t('admin.sources.path'))}</label>
+            <input type="text" class="admin-input-sm" data-edit-path="${s.id}" value="${escapeHtml(s.path)}" style="width:320px">
+          </div>
+          <button type="button" class="admin-compact-btn" data-check-edit="${s.id}">${escapeHtml(t('admin.sources.checkPath'))}</button>
+          <button type="button" class="admin-compact-btn" data-save-edit="${s.id}">${escapeHtml(t('admin.save'))}</button>
+          <button type="button" class="admin-compact-btn" data-cancel-edit="${s.id}">${escapeHtml(t('common.cancel'))}</button>
+        </div>
+        <span data-edit-hint="${s.id}" style="font-size:0.85em;margin-top:6px;display:block"></span>
       </td>
     </tr>
   `).join('');

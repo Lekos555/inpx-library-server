@@ -913,6 +913,24 @@ async function bootstrap() {
   setSiteName(getSetting('site_name'));
   setAllowAnonymousDownload(getSetting('allow_anonymous_download') === '1');
 
+  /* Проверка путей источников при старте — предупреждение, если не найдены */
+  const libRoot = getLibraryRoot();
+  if (libRoot && !fs.existsSync(libRoot)) {
+    console.warn(`[WARN] Library root not found: ${libRoot}. Update the path in admin panel → Sources or set LIBRARY_ROOT / INPX_FILE.`);
+    logSystemEvent('warn', 'server', 'library root not found at startup', { libraryRoot: libRoot });
+  }
+  try {
+    const sources = getSources();
+    for (const s of sources) {
+      if (s.path && !fs.existsSync(s.path)) {
+        console.warn(`[WARN] Source path not found: ${s.name} → ${s.path}`);
+        logSystemEvent('warn', 'server', 'source path not found at startup', { sourceId: s.id, sourceName: s.name, path: s.path });
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
   const httpServer = app.listen(config.port, () => {
     console.log(`INPX Library Server listening on http://localhost:${config.port}`);
     console.log(`Library root: ${getLibraryRoot()}`);

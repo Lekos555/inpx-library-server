@@ -1201,7 +1201,7 @@ export function addSource({ name, type, path: sourcePath }) {
   return getSourceById(result.lastInsertRowid);
 }
 
-export function updateSource(id, { name, enabled }) {
+export function updateSource(id, { name, enabled, path: sourcePath }) {
   const parts = [];
   const params = [];
   if (name !== undefined) {
@@ -1213,6 +1213,14 @@ export function updateSource(id, { name, enabled }) {
   if (enabled !== undefined) {
     parts.push('enabled = ?');
     params.push(enabled ? 1 : 0);
+  }
+  if (sourcePath !== undefined) {
+    const trimmed = String(sourcePath || '').trim();
+    if (!trimmed) throw new Error('Путь к источнику не указан');
+    const existing = getSourceByPath(trimmed);
+    if (existing && existing.id !== id) throw new Error('Источник с таким путём уже существует');
+    parts.push('path = ?');
+    params.push(trimmed);
   }
   if (!parts.length) return getSourceById(id);
   params.push(id);

@@ -4054,6 +4054,127 @@ function attachAdminRecaptchaDisclosure() {
   });
 }
 
+function attachSourceEdit() {
+  const editBtns = document.querySelectorAll('[data-edit-source]');
+  if (!editBtns.length) return;
+
+  for (const btn of editBtns) {
+    const id = btn.dataset.editSource;
+    const editRow = document.getElementById(`source-edit-${id}`);
+    const nameInput = editRow?.querySelector(`[data-edit-name="${id}"]`);
+    const pathInput = editRow?.querySelector(`[data-edit-path="${id}"]`);
+    const hint = editRow?.querySelector(`[data-edit-hint="${id}"]`);
+    const checkBtn = editRow?.querySelector(`[data-check-edit="${id}"]`);
+    const saveBtn = editRow?.querySelector(`[data-save-edit="${id}"]`);
+    const cancelBtn = editRow?.querySelector(`[data-cancel-edit="${id}"]`);
+    const actionsDiv = document.querySelector(`[data-source-actions="${id}"]`);
+    const nameText = document.querySelector(`[data-source-name="${id}"]`);
+    const pathText = document.querySelector(`[data-path-status="${id}"]`);
+
+    if (!editRow || !nameInput || !pathInput || !hint || !checkBtn || !saveBtn || !cancelBtn) continue;
+
+    const showEditor = () => {
+      editRow.style.display = '';
+      if (actionsDiv) actionsDiv.style.display = 'none';
+      hint.textContent = '';
+      hint.style.color = '';
+      nameInput.focus();
+    };
+    const hideEditor = () => {
+      editRow.style.display = 'none';
+      if (actionsDiv) actionsDiv.style.display = '';
+      hint.textContent = '';
+      hint.style.color = '';
+    };
+
+    btn.addEventListener('click', showEditor);
+    cancelBtn.addEventListener('click', hideEditor);
+
+    checkBtn.addEventListener('click', async () => {
+      hint.textContent = uiT('app.adminProbeRunning') || 'Checking…';
+      hint.style.color = '';
+      try {
+        const probe = await fetch('/api/sources/probe', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ path: pathInput.value })
+        }).then(r => r.json());
+        if (probe.ok && probe.exists) {
+          hint.textContent = (uiT('app.adminPathFound') || 'Path found') + (probe.isFile ? ' (INPX)' : ` (${probe.inpxFiles?.length ?? 0} INPX)`);
+          hint.style.color = 'var(--success)';
+        } else {
+          hint.textContent = uiT('app.adminPathMissing') || 'Path not found';
+          hint.style.color = 'var(--danger)';
+        }
+      } catch {
+        hint.textContent = 'Error';
+        hint.style.color = 'var(--danger)';
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      const newName = nameInput.value.trim();
+      const newPath = pathInput.value.trim();
+      if (!newName || !newPath) return;
+      saveBtn.disabled = true;
+      try {
+        const csrf = getCsrfTokenFromPage();
+        const headers = { 'Content-Type': 'application/json' };
+        if (csrf) headers['X-CSRF-Token'] = csrf;
+        const resp = await fetch(`/api/admin/sources/${id}/edit`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          body: JSON.stringify({ name: newName, path: newPath })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (data.ok && data.source) {
+          if (nameText) nameText.textContent = data.source.name;
+          if (pathText) pathText.textContent = data.source.path;
+          const row = document.querySelector(`tr[data-source-id="${id}"]`);
+          if (row) row.dataset.sourcePath = data.source.path;
+          const delBtn = document.querySelector(`[data-delete-source="${id}"]`);
+          if (delBtn) delBtn.dataset.sourceName = data.source.name;
+          hideEditor();
+          showToast(uiT('app.adminPathSaved') || 'Saved', 'success');
+        } else {
+          hint.textContent = data.error || 'Error';
+          hint.style.color = 'var(--danger)';
+        }
+      } catch {
+        hint.textContent = 'Error';
+        hint.style.color = 'var(--danger)';
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+  }
+
+  /* Автопроверка текущих путей при загрузке страницы */
+  async function checkCurrentPaths() {
+    for (const row of document.querySelectorAll('tr[data-source-id]')) {
+      const id = row.dataset.sourceId;
+      const pathText = row.querySelector(`[data-path-status="${id}"]`);
+      if (!pathText || !id) continue;
+      try {
+        const res = await fetch(`/api/admin/sources/${id}/check-path`, { credentials: 'same-origin' });
+        const data = await res.json();
+        if (!data.exists) {
+          pathText.style.color = 'var(--danger)';
+          pathText.title = uiT('app.adminPathMissing') || 'Path not found — click Edit to fix';
+        } else {
+          pathText.style.color = '';
+          pathText.title = '';
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  checkCurrentPaths();
+}
+
 function attachSourcesReindex() {
   const buttons = document.querySelectorAll('[data-reindex-btn]');
   if (!buttons.length) return;
@@ -4579,6 +4700,7 @@ if (document.querySelector('[data-admin-events-page]')) pollAdminEventsPage();
 attachSourcesReindex();
 attachSourceDelete();
 attachAddSourceForm();
+attachSourceEdit();
 attachDirtyFormTracking();
 
 // --- Dirty form tracking ---

@@ -601,6 +601,61 @@ export function registerAdminRoutes(app, deps) {
     }
   });
 
+  app.post('/api/admin/sources/:id/edit', requireAdminApi, (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const name = req.body.name !== undefined ? String(req.body.name).trim() : undefined;
+      const sourcePath = req.body.path !== undefined ? String(req.body.path).trim() : undefined;
+      if (name === '' || sourcePath === '') {
+        return apiFail(res, 400, ApiErrorCode.PROBE_PATH_REQUIRED, t('admin.probe.pathRequired'));
+      }
+      if (sourcePath) {
+        const resolvedPath = path.resolve(sourcePath);
+        if (!fs.existsSync(resolvedPath)) {
+          return res.status(400).json({ ok: false, error: t('admin.probe.pathMissing') });
+        }
+      }
+      const source = updateSource(id, { name, path: sourcePath });
+      clearArchiveReadCaches();
+      clearPageDataCache();
+      logSystemEvent('info', 'settings', 'source edited', { actor: req.user?.username || 'admin', sourceId: id });
+      res.json({ ok: true, source });
+    } catch (error) {
+      return apiFail(res, 500, ApiErrorCode.INTERNAL, translateKnownErrorMessage(error.message));
+    }
+  });
+
+  app.get('/api/admin/sources/:id/check-path', requireAdminApi, (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const source = getSourceById(id);
+      if (!source) {
+        return apiFail(res, 404, ApiErrorCode.ADMIN_SOURCE_NOT_FOUND, t('admin.sources.notFound'));
+      }
+      const resolvedPath = path.resolve(source.path);
+      let exists = false;
+      let isDirectory = false;
+      let isFile = false;
+      let fileCount = 0;
+      try {
+        if (fs.existsSync(resolvedPath)) {
+          const stat = fs.statSync(resolvedPath);
+          exists = true;
+          isDirectory = stat.isDirectory();
+          isFile = stat.isFile();
+          if (isDirectory) {
+            fileCount = fs.readdirSync(resolvedPath).length;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      res.json({ ok: true, exists, isDirectory, isFile, fileCount, path: resolvedPath });
+    } catch (error) {
+      return apiFail(res, 500, ApiErrorCode.INTERNAL, translateKnownErrorMessage(error.message));
+    }
+  });
+
   app.post('/api/admin/sources/:id/delete', requireAdminApi, async (req, res) => {
     const id = Number(req.params.id);
     try {
