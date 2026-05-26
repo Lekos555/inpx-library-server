@@ -304,6 +304,11 @@ export function renderBook({
   const content = `
     <section class="book-detail-shell">
       <div class="book-detail-main card-detail-panel">
+        ${isAuthenticated ? `<div class="book-detail-corner-actions">
+          <button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${escapeHtml(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button>
+          <button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${escapeHtml(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button>
+          <button class="button" type="button" data-add-to-shelf="${escapeHtml(book.id)}">${escapeHtml(t('book.toShelf'))}</button>
+        </div>` : ''}
         <div class="book-detail-cover">
           <div class="cover ${hasRealCover ? '' : 'cover-fallback-active'}">
             <img class="cover-image" src="/api/books/${encodeURIComponent(book.id)}/cover" alt="${escapeHtml(book.title)}">
@@ -315,7 +320,7 @@ export function renderBook({
                 <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
               </span>
             </span>
-            ${book.libRate ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>` : ''}
+            ${(() => { const r = Math.max(0, Math.min(5, Math.floor(Number(book.libRate) || 0))); return r ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${r}">${Array.from({ length: r }, () => '<span>★</span>').join('')}</span></span>` : ''; })()}
           </div>
         </div>
         <div class="book-detail-content">
@@ -336,17 +341,14 @@ export function renderBook({
           <div class="actions actions-primary">
             ${renderDownloadMenu(book, { accent: true, user })}
             <a href="/read/${encodeURIComponent(book.id)}" class="button" target="_blank" rel="noopener noreferrer">${escapeHtml(t('book.read'))}</a>
+            ${isAuthenticated ? `<button class="button" type="button" data-send-to-ereader="${escapeHtml(book.id)}">${escapeHtml(t('book.toEmail'))}</button>` : ''}
           </div>
-          ${(primaryAuthor || seriesList.length) ? `<div class="book-detail-links">${primaryAuthor ? `<a href="/facet/authors/${encodeURIComponent(primaryAuthor)}">${escapeHtml(t('book.allByAuthor'))}</a>` : ''}${primaryAuthor && seriesList.length ? '<span class="book-detail-sep">·</span>' : ''}${seriesList.length ? seriesList.map((s) => `<a href="/facet/series/${encodeURIComponent(s.name)}">${escapeHtml(tp('book.allInSeriesNamed', { name: s.displayName || s.name }))}</a>`).join('<span class="book-detail-sep">·</span>') : ''}</div>` : ''}
-          ${isAuthenticated ? `<div class="actions actions-secondary"><button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${escapeHtml(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button><button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${escapeHtml(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button><button class="button" type="button" data-add-to-shelf="${escapeHtml(book.id)}">${escapeHtml(t('book.toShelf'))}</button><button class="button" type="button" data-send-to-ereader="${escapeHtml(book.id)}">${escapeHtml(t('book.toEmail'))}</button></div>` : ''}
         </div>
-      </div>
-    </section>
-    ${user?.role === 'admin' ? `
-    <section class="book-edit-section">
-      ${flash ? renderAlert('success', flash) : ''}
-      <details class="book-edit-disclosure">
-        <summary class="book-edit-summary">${escapeHtml(t('book.edit.title'))}</summary>
+        ${user?.role === 'admin' ? `<details class="book-edit-disclosure book-edit-disclosure--inline">
+          <summary class="book-edit-summary book-edit-summary--inline" title="${escapeHtml(t('book.edit.title'))}">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.25.25 0 0 0-.064.108l-.558 1.953 1.953-.558a.249.249 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z"/></svg>
+          <span>${escapeHtml(t('book.edit.title'))}</span>
+        </summary>
         <form class="book-edit-form" action="/book/${encodeURIComponent(book.id)}/edit" method="post">
           ${csrfHiddenField(csrfToken)}
           <div class="book-edit-grid">
@@ -385,16 +387,18 @@ export function renderBook({
             </div>
             <div class="book-edit-field">
               <label for="edit-lib-rate">${escapeHtml(t('book.edit.labelLibRate'))}</label>
-              <input type="number" id="edit-lib-rate" name="libRate" value="${escapeHtml(String(book.libRate || ''))}" min="0" max="10" class="book-edit-short">
+              <input type="number" id="edit-lib-rate" name="libRate" value="${escapeHtml(String(book.libRate || ''))}" min="0" max="5" step="1" class="book-edit-short">
             </div>
           </div>
           <div class="book-edit-actions">
             <button type="submit">${escapeHtml(t('book.edit.save'))}</button>
+            <button type="button" class="button" data-book-edit-cancel>${escapeHtml(t('common.cancel'))}</button>
           </div>
         </form>
-      </details>
+        </details>` : ''}
+      </div>
     </section>
-    ` : ''}
+    ${user?.role === 'admin' && flash ? `<section class="book-edit-flash">${renderAlert('success', flash)}</section>` : ''}
     <section class="library-shelf library-shelf-secondary book-detail-related-shelf">
       <div class="section-title">
         <h2>${escapeHtml(similar.title || t('book.similar'))}</h2>

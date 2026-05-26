@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import Database from 'better-sqlite3';
+import { parseLine } from '../src/inpx.js';
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -64,6 +65,34 @@ function authorSeriesBooksSql(db, authorName, seriesText) {
   `).all(authorName, seriesText);
 }
 
+test('INPX parseLine scopes colliding LIBIDs by archive/file within a source', () => {
+  const sep = String.fromCharCode(4);
+  const mkLine = ({ title, fileName, libId }) => [
+    'Авторов,Нет,',
+    '',
+    title,
+    'Покоривший стену',
+    '1',
+    fileName,
+    '12345',
+    libId,
+    '0',
+    'fb2',
+    '2024-01-01',
+    'ru',
+    ''
+  ].join(sep);
+
+  const a = parseLine(mkLine({ title: 'Книга A', fileName: 'wall_1', libId: '777' }), 'flibusta.zip', 5);
+  const b = parseLine(mkLine({ title: 'Книга B', fileName: 'wall_2', libId: '777' }), 'librusec.zip', 5);
+
+  assert.ok(a);
+  assert.ok(b);
+  assert.notStrictEqual(a.id, b.id, 'same LIBID from different archives must not collide inside one source');
+  assert.ok(a.id.startsWith('5:777\u0000flibusta.zip\u0000wall_1\u0000fb2'));
+  assert.ok(b.id.startsWith('5:777\u0000librusec.zip\u0000wall_2\u0000fb2'));
+});
+
 test('OPDS author → series drilldown returns the same books that were grouped on b.series', () => {
   const db = setupDb();
   const authorName = 'Толкин Дж. Р. Р.';
@@ -97,6 +126,7 @@ test('OPDS author → series drilldown returns the same books that were grouped 
   assert.deepStrictEqual(drillBooks.map((b) => b.id), [1, 2]);
   db.close();
 });
+
 
 test('OPDS drilldown matches even when series text contains whitespace and Cyrillic ё', () => {
   const db = new Database(':memory:');

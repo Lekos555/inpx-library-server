@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import express from 'express';
 import { config } from '../config.js';
-import { runWithLocaleLang, resolveLocale, t, tp, countLabel, translateKnownErrorMessage } from '../i18n.js';
+import { runWithLocaleLang, resolveLocale, t, tp, countLabel, translateKnownErrorMessage, setDefaultLocale } from '../i18n.js';
 import { ApiErrorCode, apiFail } from '../api-errors.js';
 import { requireAdminWeb, requireAdminApi } from '../middleware/auth.js';
 import { clearPageDataCache } from '../services/cache.js';
@@ -14,7 +14,7 @@ import {
   getRecentSystemEvents, retainRecentSystemEvents, clearSystemEventsTable, subscribeSystemEvents
 } from '../services/system-events.js';
 import { getRecentRuntimeLogs, subscribeRuntimeLogs, getRuntimeLogFilePath } from '../services/runtime-logs.js';
-import { restartScanScheduler, getSchedulerIntervalHours } from '../services/scheduler.js';
+import { restartScanScheduler, getSchedulerIntervalHours, getScheduleConfig, getNextRunAt } from '../services/scheduler.js';
 import {
   getUpdateState, isUpdateTimedOut, readUpdateLog, appendUpdateLog,
   beginUpdate, endUpdate, runUpdateFromZip
@@ -25,7 +25,7 @@ import {
   getSmtpSettings, setSmtpSettings, hasAdminUser, listUsers, countAdminUsers,
   getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser,
   db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView, refreshCatalogBookCounts,
-  getSuppressedBooks, unsuppressBook, unsuppressAll
+  getSuppressedBooks, unsuppressBook, unsuppressAll, getScheduleLog
 } from '../db.js';
 import {
   getBookById, getIndexStatus, getConfiguredInpxFile, setConfiguredInpxFile,
@@ -131,16 +131,78 @@ export function registerAdminRoutes(app, deps) {
     }
   });
 
+  /* Legacy: одиночное число часов. Оставлено для совместимости со старыми
+     закладками/скриптами — внутри переводим в новую модель (mode=interval). */
   app.post('/admin/settings/scan-interval', requireAdminWeb, (req, res) => {
     try {
       const hours = Math.max(0, Math.min(8760, Math.floor(Number(req.body.hours) || 0)));
       setSetting('scan_interval_hours', String(hours));
+      setSetting('scan_schedule_mode', hours > 0 ? 'interval' : 'off');
+      setSetting('scan_schedule_hours', String(hours));
       restartScanScheduler();
-      logSystemEvent('info', 'admin', 'scan interval updated', { admin: req.user.username, hours });
+      logSystemEvent('info', 'admin', 'scan interval updated (legacy form)', { admin: req.user.username, hours });
       res.redirect('/admin/sources?flash=' + encodeURIComponent(hours ? `Scan interval: ${hours}h` : 'Scan scheduler disabled'));
     } catch (error) {
       res.redirect('/admin/sources?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));
     }
+  });
+
+  /* Новая, богатая форма расписания: режимы off/interval/daily/weekly + full/incremental. */
+  app.post('/admin/settings/scan-schedule', requireAdminWeb, (req, res) => {
+    try {
+      const VALID_MODES = ['off', 'interval', 'daily', 'weekly'];
+      let mode = String(req.body.mode || '').toLowerCase().trim();
+      if (!VALID_MODES.includes(mode)) mode = 'off';
+
+      const hours = Math.max(0, Math.min(8760, Math.floor(Number(req.body.hours) || 0)));
+      const timeRaw = String(req.body.time || '').trim();
+      const time = /^([01]?\d|2[0-3]):([0-5]\d)$/.test(timeRaw) ? timeRaw : '';
+      /* DOW приходит как массив значений (или одиночное) от чекбоксов. */
+      const dowField = req.body.dow;
+      const dowArr = Array.isArray(dowField) ? dowField : (dowField ? [dowField] : []);
+      const dow = dowArr
+        .map((v) => Number(v))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+        .filter((n, i, a) => a.indexOf(n) === i)
+        .sort((a, b) => a - b)
+        .join(',');
+      const full = String(req.body.full || '') === '1';
+
+      /* Валидация согласованности: если параметры режима не заданы — переключаем в off,
+         чтобы не было «выбран daily без времени» и таймер встал на None. */
+      if (mode === 'interval' && hours <= 0) mode = 'off';
+      if ((mode === 'daily' || mode === 'weekly') && !time) mode = 'off';
+      if (mode === 'weekly' && !dow) mode = 'off';
+
+      setSetting('scan_schedule_mode', mode);
+      setSetting('scan_schedule_hours', String(hours));
+      setSetting('scan_schedule_time', time);
+      setSetting('scan_schedule_dow', dow);
+      setSetting('scan_schedule_full', full ? '1' : '0');
+      /* Сохраняем зеркало в legacy-ключе, чтобы getSchedulerIntervalHours() и
+         внешние интеграции продолжали отдавать осмысленное число. */
+      if (mode === 'interval') setSetting('scan_interval_hours', String(hours));
+      else if (mode === 'off') setSetting('scan_interval_hours', '0');
+
+      restartScanScheduler();
+      logSystemEvent('info', 'admin', 'scan schedule updated', {
+        admin: req.user.username, mode, hours, time, dow, full
+      });
+      res.redirect('/admin/sources?flash=' + encodeURIComponent(t('admin.schedule.flashSaved') || 'Schedule saved'));
+    } catch (error) {
+      res.redirect('/admin/sources?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));
+    }
+  });
+
+  app.get('/api/admin/scan-schedule', requireAdminApi, (req, res) => {
+    const cfg = getScheduleConfig();
+    const nextRunAt = getNextRunAt();
+    res.json({
+      ok: true,
+      schedule: cfg,
+      nextRunAt,
+      log: getScheduleLog(10)
+    });
   });
 
   app.post('/admin/settings/covers', requireAdminWeb, (req, res) => {
@@ -451,7 +513,9 @@ export function registerAdminRoutes(app, deps) {
     res.send(renderOperations({
       user: req.user, stats, indexStatus: getIndexStatus(),
       operations: getOperationsSnapshot(), flash: String(req.query.flash || ''),
-      siteName: getSetting('site_name') || '', homeSubtitle: getSetting('home_subtitle') || '', csrfToken: req.csrfToken || ''
+      siteName: getSetting('site_name') || '', homeSubtitle: getSetting('home_subtitle') || '',
+      defaultLocale: getSetting('default_locale') || 'auto',
+      csrfToken: req.csrfToken || ''
     }));
   });
 
@@ -525,8 +589,15 @@ export function registerAdminRoutes(app, deps) {
       setSiteName(name);
       const subtitle = String(req.body.homeSubtitle ?? '').trim();
       setSetting('home_subtitle', subtitle);
+      /* Язык интерфейса по умолчанию для гостей без Accept-Language / lang-cookie.
+         Принимает 'ru' | 'en' | 'auto'. Применяется в i18n.resolveLocale —
+         критично для OPDS-клиентов вроде KOReader, которые не шлют Accept-Language. */
+      const localeRaw = String(req.body.defaultLocale || '').toLowerCase().trim();
+      const locale = (localeRaw === 'ru' || localeRaw === 'en') ? localeRaw : 'auto';
+      setSetting('default_locale', locale);
+      setDefaultLocale(locale);
       clearPageDataCache();
-      logSystemEvent('info', 'settings', 'site settings updated', { actor: req.user.username, siteName: name || '(default)', homeSubtitle: subtitle || '(default)' });
+      logSystemEvent('info', 'settings', 'site settings updated', { actor: req.user.username, siteName: name || '(default)', homeSubtitle: subtitle || '(default)', defaultLocale: locale });
       res.redirect('/admin?flash=' + encodeURIComponent(t('admin.flash.siteNameUpdated')));
     } catch (error) {
       res.redirect('/admin?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));
@@ -554,6 +625,9 @@ export function registerAdminRoutes(app, deps) {
       user: req.user, stats, indexStatus: getIndexStatus(), sources,
       flash: String(req.query.flash || ''), csrfToken: req.csrfToken || '',
       scanIntervalHours: getSchedulerIntervalHours(),
+      scanSchedule: getScheduleConfig(),
+      scanScheduleNextRunAt: getNextRunAt(),
+      scanScheduleLog: getScheduleLog(10),
       coverWidth: Number(getSetting('cover_max_width')) || config.coverMaxWidth,
       coverHeight: Number(getSetting('cover_max_height')) || config.coverMaxHeight,
       coverQuality: Number(getSetting('cover_quality')) || config.coverQuality

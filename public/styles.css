@@ -1,4 +1,4 @@
-/* === Kavita-inspired dark library UI === */
+/* === Modern Kavita Bookish Library UI === */
 :root {
   --bg: #1e1a16;
   --bg-side: #1a1612;
@@ -7,9 +7,9 @@
   --border: rgba(145, 109, 43, 0.14);
   --text: #e8e0d4;
   --muted: #9a8e7e;
-  --accent: #9a8e7e;
+  --accent: #9a8e7e; /* Muted warm tan — палитра 1.6.7, мягче чем «золото» */
   --accent-hover: #a1671b;
-  /* Текстовые ссылки (не путать с --muted / --accent) */
+  /* Текстовые ссылки (намеренно отличаются от --accent: ссылки — золотые, акценты — тёплый нейтрал) */
   --link: #d4ac5c;
   --link-hover: #efc06f;
   --danger: #c61700;
@@ -26,20 +26,27 @@
   --card-cover-fallback-bg: linear-gradient(180deg, #181410 0%, #100e0b 100%);
   --card-cover-border: rgba(180,145,80,0.10);
   --card-cover-shadow:
-      6px 10px 16px rgba(0,0,0,0.55),
-      2px 2px 4px rgba(0,0,0,0.40);
+      0 1px 1px rgba(0,0,0,0.5),
+      2px 3px 3px rgba(0,0,0,0.35),
+      5px 8px 12px rgba(0,0,0,0.3),
+      10px 18px 24px rgba(0,0,0,0.25);
+  --card-cover-shadow-hover:
+      0 2px 2px rgba(0,0,0,0.6),
+      4px 6px 6px rgba(0,0,0,0.45),
+      12px 18px 24px rgba(0,0,0,0.4),
+      24px 38px 48px rgba(0,0,0,0.3);
   --panel-soft-bg: rgba(180,145,80,0.03);
-  --flash-bg: rgba(74,198,148,0.1);
-  --flash-border: rgba(74,198,148,0.25);
-  --login-shadow: 0 8px 32px rgba(0,0,0,0.45);
-  --radius: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
+  --flash-bg: rgba(16,185,129,0.08);
+  --flash-border: rgba(16,185,129,0.2);
+  --login-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --sidenav-w: 220px;
   --topbar-h: 60px;
-  --shadow-sm: 0 2px 8px rgba(0,0,0,0.08);
-  --shadow-md: 0 8px 24px rgba(0,0,0,0.14);
-  --shadow-lg: 0 16px 48px rgba(0,0,0,0.18);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px -2px rgba(0,0,0,0.3);
+  --shadow-lg: 0 12px 28px -4px rgba(0,0,0,0.4);
   --card-bg: rgba(180,145,80,0.025);
   --card-bg-hover: rgba(180,145,80,0.055);
 }
@@ -52,11 +59,11 @@ html[data-theme="light"] {
   --border: rgba(97,78,55,0.14);
   --text: #2e2418;
   --muted: #7a6a58;
-  --accent: #7a6a58;
+  --accent: #7a6a58;       /* нейтральный приглушённый — палитра 1.6.7 */
   --accent-hover: #a1671b;
   --link: #8b5a12;
   --link-hover: #a86a0a;
-  --danger: #c84d68;
+  --danger: #c84d68;        /* мягкая роза, не Tailwind rose */
   --shell-bg: #efe7da;
   --sidebar-bg: #eadfce;
   --sidebar-brand-border: rgba(97,78,55,0.1);
@@ -70,15 +77,22 @@ html[data-theme="light"] {
   --card-cover-fallback-bg: linear-gradient(180deg, #efe5d5 0%, #e2d2bb 100%);
   --card-cover-border: rgba(97,78,55,0.12);
   --card-cover-shadow:
-      6px 10px 16px rgba(76,58,36,0.20),
-      2px 2px 4px rgba(76,58,36,0.30);
+      0 1px 1px rgba(32,24,14,0.35),
+      2px 3px 3px rgba(32,24,14,0.22),
+      5px 8px 12px rgba(32,24,14,0.18),
+      10px 18px 24px rgba(32,24,14,0.14);
+  --card-cover-shadow-hover:
+      0 2px 2px rgba(32,24,14,0.42),
+      4px 6px 6px rgba(32,24,14,0.28),
+      12px 18px 24px rgba(32,24,14,0.24),
+      24px 38px 48px rgba(32,24,14,0.18);
   --panel-soft-bg: rgba(255,255,255,0.62);
-  --flash-bg: rgba(47,122,93,0.1);
-  --flash-border: rgba(47,122,93,0.2);
-  --login-shadow: 0 10px 30px rgba(76,58,36,0.12);
-  --shadow-sm: 0 2px 8px rgba(76,58,36,0.05);
-  --shadow-md: 0 8px 24px rgba(76,58,36,0.08);
-  --shadow-lg: 0 16px 48px rgba(76,58,36,0.10);
+  --flash-bg: rgba(16,185,129,0.05);
+  --flash-border: rgba(16,185,129,0.15);
+  --login-shadow: 0 20px 48px -12px rgba(32,24,14,0.25);
+  --shadow-sm: 0 1px 2px rgba(32,24,14,0.08);
+  --shadow-md: 0 6px 18px -4px rgba(32,24,14,0.16);
+  --shadow-lg: 0 16px 36px -12px rgba(32,24,14,0.24);
   --card-bg: rgba(255,255,255,0.5);
   --card-bg-hover: rgba(255,255,255,0.75);
 }
@@ -113,13 +127,14 @@ body {
 /* ── Текстовые ссылки (весь сайт, обе темы) ── */
 a {
   color: var(--link);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
-  text-underline-offset: 0.2em;
+  text-decoration: none;
+  transition: color 0.15s ease, text-decoration-color 0.15s ease;
 }
 a:hover {
   color: var(--link-hover);
-  text-decoration-color: color-mix(in srgb, var(--link-hover) 55%, transparent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link-hover) 35%, transparent);
+  text-underline-offset: 0.25em;
 }
 a:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--link) 50%, transparent);
@@ -151,7 +166,7 @@ a.cover:hover {
   text-decoration: none;
 }
 a.cover:active {
-  transform: scale(0.96);
+  transform: scale(0.98);
 }
 
 /* Строка целиком — ссылкой выглядит заголовок */
@@ -165,7 +180,7 @@ a.table-row-link:hover {
   text-decoration: none;
 }
 a.table-row-link:active {
-  transform: scale(0.98);
+  transform: scale(0.99);
 }
 
 /* ── Shell: sidenav + main area ── */
@@ -184,7 +199,7 @@ a.table-row-link:active {
 }
 .sidebar .brand { padding: 0 16px 16px; border-bottom: 1px solid var(--sidebar-brand-border); }
 .sidebar .brand-logo { display: block; max-width: 100%; max-height: 48px; margin-bottom: 8px; object-fit: contain; transition: transform 0.2s ease; }
-.sidebar .brand-home-link:hover .brand-logo { transform: scale(1.05); }
+.sidebar .brand-home-link:hover .brand-logo { transform: scale(1.02); }
 .sidebar .brand h1, .sidebar .brand h2 { font-size: 14px; font-weight: 600; color: var(--text); }
 .sidebar .brand p { display: none; }
 
@@ -202,7 +217,7 @@ a.table-row-link:active {
 .admin-sidebar-version {
   display: inline-block; font-size: 12px; font-weight: 600; color: var(--muted);
   padding: 6px 10px; border-radius: var(--radius);
-  background: rgba(180,145,80,0.06); border: 1px solid rgba(180,145,80,0.14);
+  background: var(--button-bg); border: 1px solid var(--border);
   color: var(--text);
 }
 .admin-sidebar-version:hover { color: var(--link-hover); }
@@ -212,16 +227,16 @@ a.table-row-link:active {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 16px;
   border-radius: var(--radius);
-  color: var(--link);
+  color: var(--muted);
   font-size: 13px; font-weight: 500;
   text-decoration: none;
-  transition: transform 0.1s ease, background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, transform 0.15s ease;
 }
-.sidenav-links a:hover { background: var(--button-bg); color: var(--link-hover); transform: translateX(2px); }
-.sidenav-links a:active { transform: scale(0.97); }
+.sidenav-links a:hover { background: var(--button-bg); color: var(--text); }
+.sidenav-links a:active { transform: scale(0.98); }
 .sidenav-links a.active {
   background: var(--button-bg-hover);
-  color: var(--link);
+  color: var(--accent);
   font-weight: 600;
 }
 .sidenav-section { padding: 16px 16px 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
@@ -273,6 +288,58 @@ html[data-theme="light"] .topbar-admin {
   width: 1px; height: 16px; background: var(--border); flex-shrink: 0;
 }
 
+/* ── Форма «Расписание сканирования» (admin/sources) ── */
+.scan-schedule-fields {
+  display: flex; flex-direction: column; gap: 14px;
+  max-width: 480px; margin-top: 12px;
+}
+.scan-schedule-fields .admin-field-group {
+  margin-bottom: 0; /* gap у родителя уже даёт расстояние */
+}
+.scan-schedule-fields .admin-inline-row {
+  align-items: center; flex-wrap: wrap; gap: 8px;
+}
+.scan-schedule-fields select,
+.scan-schedule-fields input[type="number"],
+.scan-schedule-fields input[type="time"] {
+  max-width: 220px;
+}
+.scan-schedule-next {
+  margin-top: 14px; padding: 8px 12px;
+  background: var(--panel-soft-bg); border: 1px dashed var(--border);
+  border-radius: var(--radius); font-size: 13px;
+}
+.scan-schedule-log-wrap { margin-top: 10px; }
+.scan-schedule-log-wrap summary {
+  cursor: pointer; padding: 4px 0; user-select: none;
+}
+.scan-schedule-log-wrap summary:hover { color: var(--text); }
+.scan-schedule-log-wrap table {
+  margin-top: 8px; width: 100%;
+  font-size: 13px;
+}
+
+/* Дни недели в форме расписания сканирования — компактные «pill»-чекбоксы. */
+.admin-dow-row {
+  display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.admin-dow-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--button-bg);
+  font-size: 12px; cursor: pointer; user-select: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.admin-dow-chip:hover { background: var(--button-bg-hover); border-color: var(--button-border-hover); }
+.admin-dow-chip input[type="checkbox"] {
+  width: 13px; height: 13px; margin: 0; accent-color: var(--accent-hover);
+}
+.admin-dow-chip:has(input:checked) {
+  background: var(--button-bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  color: var(--text);
+}
+
 .admin-grid-2col {
   display: grid; grid-template-columns: 340px minmax(0, 1fr);
   gap: 18px; align-items: start; margin-bottom: 18px;
@@ -281,6 +348,10 @@ html[data-theme="light"] .topbar-admin {
 .admin-field-group {
   display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px;
 }
+/* HTML-атрибут [hidden] имеет user-agent-стиль display:none, но любой класс
+   с display:flex/grid его перебивает по специфичности. Возвращаем ожидаемое
+   поведение для админских полей формы. */
+.admin-field-group[hidden] { display: none; }
 .admin-field-group label {
   font-size: 11px; font-weight: 600; color: var(--muted);
   text-transform: uppercase; letter-spacing: 0.04em;
@@ -390,14 +461,156 @@ html[data-theme="light"] .topbar-admin {
   border-radius: 4px;
   background: color-mix(in srgb, var(--muted) 10%, transparent);
 }
+/* Большой спарклайн для CPU / Память — высота отдаёт лучше тренд при отсутствии
+   текстовой подсказки под графиком. */
+.monitor-spark--lg {
+  height: 56px;
+}
+/* Короткая подсказка под каждым тайлом — объясняет, что метрика значит и где порог
+   тревоги. Видна без hover, чтобы новый админ не гадал, что такое «event-loop lag». */
+.monitor-hint {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* Тайл «База данных»: цветной стэковый бар по категориям + текстовая легенда.
+   Полная ширина = размер БД (100%), сегменты — относительные доли категорий. */
+.db-stacked-bar {
+  display: flex;
+  margin-top: 8px;
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+.db-stacked-bar > .db-seg {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  transition: width .3s ease;
+}
+.db-legend {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.db-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.db-seg-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.db-legend-label { color: var(--text); }
+.db-legend-size { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Цвета категорий — спокойная палитра, отличимая для admins без идеального зрения. */
+.db-seg-books { background: #5b9bd5; }   /* спокойный синий */
+.db-seg-catalogs { background: #70c08a; } /* зелёный */
+.db-seg-covers { background: #e8a648; }   /* тёплый оранжевый */
+.db-seg-sidecar { background: #b487d5; }  /* лиловый */
+.db-seg-activity { background: #e07a7a; } /* розово-красный */
+.db-seg-other { background: #909090; }    /* нейтральный серый */
+
+/* ── Тайл «Диск»: толстая полоса использования с пороговыми рисками
+   на 75% / 90% и тройной статистикой (использовано / свободно / всего) ── */
+.monitor-item--disk .disk-bar-track {
+  position: relative;
+  margin-top: 10px;
+  height: 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  overflow: hidden;
+}
+.disk-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  transition: width .35s ease, background .25s ease;
+}
+.disk-bar-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  border-radius: 1px;
+  pointer-events: none;
+}
+.disk-bar-tick--warn  { background: color-mix(in srgb, #e2bb4f 50%, transparent); }
+.disk-bar-tick--alert { background: color-mix(in srgb, #d95050 60%, transparent); }
+.disk-bar-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.disk-bar-stat {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.disk-bar-stat .muted {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.disk-bar-stat strong {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
 .monitor-spark path.spark-line {
   fill: none;
-  stroke: var(--accent);
+  stroke: #3fb95e; /* зелёный severity-good, не зависит от темы (одинаково читаемо на тёмной и светлой) */
   stroke-width: 1.8;
   vector-effect: non-scaling-stroke;
 }
 .monitor-spark path.spark-fill {
-  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  fill: color-mix(in srgb, #3fb95e 22%, transparent);
+}
+/* Тонкая сетка на 25 / 50 / 75 % для визуальной шкалы. */
+.monitor-spark line.spark-grid {
+  stroke: color-mix(in srgb, var(--muted) 30%, transparent);
+  stroke-width: 0.6;
+  stroke-dasharray: 2 3;
+  vector-effect: non-scaling-stroke;
+}
+.monitor-spark line.spark-grid-mid {
+  stroke: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+/* Ряд статистики под графиком: «сейчас X% · min Y% · max Z%». */
+.spark-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.spark-stats .spark-stat-now {
+  color: var(--text);
+  font-weight: 600;
 }
 .monitor-foot {
   margin-top: 10px;
@@ -942,27 +1155,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 @media (hover: hover) and (pointer: fine) {
   .card:hover .cover {
     transform: translateY(-8px);
-    box-shadow:
-      0 2px 1px rgba(0,0,0,0.6),
-      2px 3px 2px rgba(0,0,0,0.45),
-      10px 16px 16px rgba(0,0,0,0.55),
-      20px 32px 28px rgba(0,0,0,0.45),
-      30px 52px 44px rgba(0,0,0,0.32),
-      40px 72px 64px rgba(0,0,0,0.22);
-  }
-  html[data-theme="light"] .card:hover .cover {
-    box-shadow:
-      0 2px 1px rgba(76,58,36,0.32),
-      2px 3px 2px rgba(76,58,36,0.24),
-      10px 16px 16px rgba(76,58,36,0.34),
-      20px 32px 28px rgba(76,58,36,0.26),
-      30px 52px 44px rgba(76,58,36,0.18),
-      40px 72px 64px rgba(76,58,36,0.12);
+    box-shadow: var(--card-cover-shadow-hover);
   }
 }
 
 .card:active .cover {
-  transform: translateY(-1px) scale(0.98);
+  transform: translateY(-1px) scale(0.99);
 }
 
 .card:hover,
@@ -985,17 +1183,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   aspect-ratio: 2 / 3;
   background: var(--card-cover-bg);
   position: relative;
-  border-radius: 2px;
+  border-radius: 4px;
   display: block;
   isolation: isolate;
-  box-shadow:
-    0 2px 1px rgba(0,0,0,0.6),
-    2px 3px 2px rgba(0,0,0,0.45),
-    6px 10px 10px rgba(0,0,0,0.5),
-    12px 20px 18px rgba(0,0,0,0.42),
-    18px 32px 28px rgba(0,0,0,0.3),
-    24px 44px 44px rgba(0,0,0,0.2);
-  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.3s ease;
+  box-shadow: var(--card-cover-shadow);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   /* Long-press on the cover toggles "read" — suppress native callout/selection/drag
      so iOS/Android Chrome don't hijack the gesture with image preview menus. */
   -webkit-touch-callout: none;
@@ -1032,7 +1224,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
    visual cue at the moment the "mark as read" toggle fires. */
 @keyframes coverLongPressFlash {
   0%   { transform: scale(1);    filter: brightness(1); }
-  35%  { transform: scale(0.93); filter: brightness(1.45); }
+  35%  { transform: scale(0.95); filter: brightness(1.25); }
   100% { transform: scale(1);    filter: brightness(1); }
 }
 .cover.cover-longpress-flash {
@@ -1043,13 +1235,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 
 html[data-theme="light"] .cover {
-  box-shadow:
-    0 2px 1px rgba(76,58,36,0.32),
-    2px 3px 2px rgba(76,58,36,0.24),
-    6px 10px 10px rgba(76,58,36,0.3),
-    12px 20px 18px rgba(76,58,36,0.24),
-    18px 32px 28px rgba(76,58,36,0.16),
-    24px 44px 44px rgba(76,58,36,0.1);
+  box-shadow: var(--card-cover-shadow);
 }
 
 .cover-inner {
@@ -1468,33 +1654,150 @@ html[data-theme="light"] .cover-fallback-overlay {
 .cover-rating-wrapper {
   position: absolute;
   top: 0;
-  left: 8px;
+  left: 5px;  /* было 6px, уменьшил */
   z-index: 4;
   pointer-events: none;
-  filter: drop-shadow(2px 3px 5px rgba(0,0,0,.35)) drop-shadow(6px 10px 10px rgba(0,0,0,.25));
+  filter:
+    drop-shadow(1px 2px 2px rgba(0, 0, 0, 0.55))
+    drop-shadow(2px 5px 6px rgba(0, 0, 0, 0.35))
+    drop-shadow(0 8px 14px rgba(0, 0, 0, 0.2));
 }
+
 .cover-rating-badge {
-  width: 24px;
-  padding: 4px 2px 14px;
-  font-size: 13px;
+  width: 17px;      /* было 20px (20 × 0.85 = 17) */
+  height: 75px;     /* было 88px (88 × 0.85 = 74.8 → 75) */
+  padding: 3px 2px 14px;  /* было 4px 2px 16px */
+  font-size: 10px;  /* было 12px (12 × 0.85 = 10.2 → 10) */
   font-weight: 800;
-  line-height: 1.25;
+  line-height: 1;
   color: #fff;
-  border-radius: 0 0 3px 3px;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 88%, 0 100%);
-  text-shadow: 0 1px 2px rgba(0,0,0,.45);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+  border-radius: 0 0 2px 2px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column-reverse;
   align-items: center;
   justify-content: flex-start;
-  min-height: 110px;
+  gap: 1px;        /* было 2px */
+  position: relative;
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.12),
+    0 2px 3px rgba(0, 0, 0, 0.18);
 }
-.cover-rating-badge > span { color: #ffd700; }
-.cover-rating-5 { background: linear-gradient(180deg, #81c784 0%, #1b5e20 100%); }
-.cover-rating-4 { background: linear-gradient(180deg, #ffb74d 0%, #e65100 100%); }
-.cover-rating-3 { background: linear-gradient(180deg, #ff8a80 0%, #b71c1c 100%); }
-.cover-rating-2 { background: linear-gradient(180deg, #bf360c 0%, #3e2723 100%); }
-.cover-rating-1 { background: linear-gradient(180deg, #a1887f 0%, #3e2723 100%); }
+
+/* Слой освещения поверх содержимого */
+.cover-rating-badge::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Декоративная окантовка */
+.cover-rating-badge::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-left: 0.5px dashed rgba(255, 255, 255, 0.45);
+  border-right: 0.5px dashed rgba(255, 255, 255, 0.45);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+  pointer-events: none;
+}
+
+.cover-rating-badge > span {
+  height: 10px;      /* было 12px (12 × 0.85 = 10.2 → 10) */
+  line-height: 10px; /* было 12px */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffe14d;
+}
+
+.cover-rating-badge .star-active {
+  color: #ffe14d;
+}
+
+.cover-rating-badge .star-inactive {
+  visibility: hidden;
+}
+
+/* Общие стили текстуры фона — без изменений */
+.cover-rating-1, .cover-rating-2, .cover-rating-3, .cover-rating-4, .cover-rating-5 {
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+/* 5 ЗВЁЗД */
+.cover-rating-5 {
+  background:
+    repeating-linear-gradient(-30deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 0.3px),
+    repeating-linear-gradient(60deg, rgba(0, 0, 0, 0.03) 0px, rgba(0, 0, 0, 0.03) 1px, transparent 1px, transparent 0.3px),
+    linear-gradient(180deg, #1bc459 0%, #0a6327 100%);
+}
+.cover-rating-5::before {
+  /* Верхний блик и тёмная кромка раньше съедали ~четверть высоты бейджа —
+     визуально воспринималось как «серое затемнение с изгибом». Сокращено
+     примерно втрое: блик 25% → 8%, тёмная полоса 6px → 2px. */
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 8%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+/* 4 ЗВЕЗДЫ */
+.cover-rating-4 {
+  background:
+    repeating-linear-gradient(-30deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 0.3px),
+    repeating-linear-gradient(60deg, rgba(0, 0, 0, 0.03) 0px, rgba(0, 0, 0, 0.03) 1px, transparent 1px, transparent 0.3px),
+    linear-gradient(180deg, #ff9500 0%, #a84200 100%);
+}
+.cover-rating-4::before {
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 8%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+/* 3 ЗВЕЗДЫ */
+.cover-rating-3 {
+  background:
+    repeating-linear-gradient(-30deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 0.3px),
+    repeating-linear-gradient(60deg, rgba(0, 0, 0, 0.03) 0px, rgba(0, 0, 0, 0.03) 1px, transparent 1px, transparent 0.3px),
+    linear-gradient(180deg, #b83030 0%, #661212 100%);
+}
+.cover-rating-3::before {
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0) 7%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+/* 2 ЗВЕЗДЫ */
+.cover-rating-2 {
+  background:
+    repeating-linear-gradient(-30deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 0.3px),
+    repeating-linear-gradient(60deg, rgba(0, 0, 0, 0.03) 0px, rgba(0, 0, 0, 0.03) 1px, transparent 1px, transparent 0.3px),
+    linear-gradient(180deg, #822f08 0%, #391002 100%);
+}
+.cover-rating-2::before {
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0) 7%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.45) 100%);
+}
+
+/* 1 ЗВЕЗДА */
+.cover-rating-1 {
+  background:
+    repeating-linear-gradient(-30deg, rgba(255, 255, 255, 0.04) 0px, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 0.3px),
+    repeating-linear-gradient(60deg, rgba(0, 0, 0, 0.03) 0px, rgba(0, 0, 0, 0.03) 1px, transparent 1px, transparent 0.3px),
+    linear-gradient(180deg, #241410 0%, #0d0503 100%);
+}
+.cover-rating-1::before {
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 2px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 7%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.45) 100%);
+}
+
 
 /* ── Read badge (large checkmark stamp on covers) ── */
 .read-badge {
@@ -1504,19 +1807,21 @@ html[data-theme="light"] .cover-fallback-overlay {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.52);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
   pointer-events: none;
 }
 .read-badge svg {
-  width: 48%;
+  width: 42%;
   aspect-ratio: 1;
-  padding: 12%;
-  border-radius: 999px;
-  background: rgba(34, 160, 100, 0.88);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  padding: 10%;
+  border-radius: 50%;
+  background: rgba(16, 185, 129, 0.95);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   fill: none;
   stroke: #fff;
-  stroke-width: 2.4;
+  stroke-width: 3;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -2715,10 +3020,31 @@ button.download-format-link {
 }
 
 .book-detail-main {
+  position: relative; /* для абсолютного позиционирования .book-detail-corner-actions */
   border: none;
   border-radius: var(--radius-xl);
   background: var(--card-bg);
   box-shadow: var(--shadow-md);
+}
+
+/* Угловые действия в правом верхнем углу карточки книги: Прочитано/Избранное/На полку.
+   На десктопе — абсолютно позиционированный ряд, на мобильном (card-detail-panel
+   в одну колонку) перенесён в общий поток над контентом. */
+.book-detail-corner-actions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  z-index: 2;
+  max-width: calc(100% - 280px); /* не залезаем поверх обложки слева */
+}
+.book-detail-corner-actions .button {
+  font-size: 12px;
+  padding: 5px 10px;
+  white-space: nowrap;
 }
 
 .card-detail-panel {
@@ -3077,9 +3403,15 @@ button.download-format-link {
   font-weight: 800;
   color: #fff;
   border-radius: 4px 4px 3px 3px;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 86%, 0 100%);
-  box-shadow: 0 2px 5px rgba(0,0,0,.25);
-  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 88%, 0 100%);
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.35),
+    0 6px 10px rgba(0, 0, 0, 0.2),
+    inset 1px 0 2px rgba(255, 255, 255, 0.25),
+    inset -1px 0 2px rgba(0, 0, 0, 0.35),
+    inset 0 2px 3px rgba(255, 255, 255, 0.15),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.3);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 .detail-rating-5 { background: linear-gradient(180deg, #43a047 0%, #2e7d32 100%); }
 .detail-rating-4 { background: linear-gradient(180deg, #9ccc65 0%, #7cb342 100%); }
@@ -3406,6 +3738,73 @@ html[data-theme="light"] .alert-info {
 .book-edit-summary { padding: 12px 16px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--accent); border-radius: var(--radius-lg); }
 .book-edit-summary::-webkit-details-marker { display: none; }
 .book-edit-disclosure[open] > .book-edit-summary { border-bottom: 1px solid var(--border); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+
+/* ── «Редактирование метаданных»: блок занимает обе колонки в гриде
+   карточки книги (cover + content), за счёт чего раскрытая форма получает
+   полную ширину карточки, а не остаётся в узкой правой колонке.
+   Закрытое состояние — тонкая полоска с компактной кнопкой справа;
+   открытое — полноразмерная панель с фоном и рамкой. */
+.book-edit-disclosure--inline {
+  grid-column: 1 / -1;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-lg);
+}
+.book-edit-summary--inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--button-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  user-select: none;
+  /* Прижимаем кнопку к правому краю когда details закрыт: <details>
+     блочный, summary внутри по умолчанию инлайн — выводим его как
+     inline-flex с margin-left:auto в flex-родителе. */
+}
+.book-edit-summary--inline:hover {
+  background: var(--button-bg-hover);
+  border-color: var(--button-border-hover);
+  color: var(--text);
+}
+.book-edit-summary--inline svg { flex-shrink: 0; opacity: 0.75; }
+.book-edit-summary--inline:hover svg { opacity: 1; }
+/* Закрытое состояние: <details> является flex-контейнером, чтобы summary
+   корректно прижимался к правому краю через margin-left:auto. */
+.book-edit-disclosure--inline:not([open]) {
+  display: flex;
+  justify-content: flex-end;
+}
+/* Открытое состояние: окрашенная панель на всю ширину карточки. */
+.book-edit-disclosure--inline[open] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.book-edit-disclosure--inline[open] .book-edit-summary--inline {
+  display: flex;
+  margin-left: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  padding: 10px 14px;
+  font-weight: 600;
+  font-size: 13px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-bottom: 1px solid var(--border);
+}
+.book-edit-disclosure--inline[open] .book-edit-summary--inline:hover {
+  background: var(--button-bg);
+}
+.book-edit-disclosure--inline[open] > .book-edit-form {
+  padding: 16px;
+}
 .book-edit-form { padding: 16px; }
 .book-edit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 600px) { .book-edit-grid { grid-template-columns: 1fr; } }
@@ -3717,6 +4116,15 @@ html[data-theme="light"] .cover-fallback-overlay {
     padding: 14px;
     gap: 14px;
   }
+  /* На мобильном корнер-действия превращаются в обычный flex-ряд под обложкой
+     (абсолютное позиционирование в углу не имеет смысла — мало места). */
+  .book-detail-corner-actions {
+    position: static;
+    max-width: none;
+    margin-bottom: 4px;
+    justify-content: flex-start;
+  }
+  .book-detail-corner-actions .button { font-size: 13px; padding: 6px 12px; }
   .book-detail-cover {
     max-width: none;
     width: 100%;
@@ -4325,4 +4733,55 @@ html[data-theme="light"] .cover-fallback-overlay {
   /* Update page */
   .admin-card > div[style*="display:flex"] { flex-direction: column; align-items: stretch !important; }
 }
+
+/* ── Modern fluid MPA View Transitions (Chrome 118+) ── */
+@view-transition {
+  navigation: auto;
+}
+
+/* General page fade transition */
+::view-transition-old(root) {
+  animation: 160ms cubic-bezier(0.4, 0, 1, 1) both global-fade-out;
+}
+::view-transition-new(root) {
+  animation: 380ms cubic-bezier(0.16, 1, 0.3, 1) both global-fade-in;
+}
+
+@keyframes global-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes global-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Elegant Book Cover Morph Animation */
+::view-transition-group(vt-cover-selected) {
+  animation-duration: 380ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+::view-transition-old(vt-cover-selected),
+::view-transition-new(vt-cover-selected) {
+  animation-duration: 380ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  mix-blend-mode: normal;
+  height: 100%;
+}
+
+/* Book page details text and controls slide & fade-in reveal */
+.book-detail-content {
+  animation: 500ms cubic-bezier(0.16, 1, 0.3, 1) 100ms both details-content-reveal;
+}
+@keyframes details-content-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 

@@ -88,8 +88,9 @@ function resetInpxPreparedStatements() {
   _stmtGetBookById = null;
   _stmtGenresGroupedCount = null;
   _stmtGenresGroupedName = null;
-  _stmtDupTotal = null;
   _stmtDupGroups = null;
+  _stmtDupSummary = null;
+  _dupSummaryCache = null;
   _stmtLibSections = null;
   _stmtContinueCount = null;
   _stmtContinueItems = null;
@@ -165,6 +166,33 @@ export function invalidateDuplicatesCache() {
   facetDedupTotalCache.clear();
   facetBooksCache.clear();
   facetSummaryCache.clear();
+  _dupSummaryCache = null;
+}
+
+/* Короткий кеш сводки по дубликатам: один полный проход вместо двух (total + preview). */
+let _dupSummaryCache = null;
+const DUP_SUMMARY_TTL_MS = 60_000;
+let _stmtDupSummary = null;
+function getDuplicatesSummary() {
+  if (_dupSummaryCache && Date.now() < _dupSummaryCache.expiresAt) {
+    return _dupSummaryCache.value;
+  }
+  _stmtDupSummary ??= db.prepare(`
+    SELECT COALESCE(SUM(c), 0) AS totalBooks, COUNT(*) AS totalGroups
+    FROM (
+      SELECT COUNT(*) AS c FROM active_books
+      WHERE title_sort IS NOT NULL AND title_sort != ''
+      GROUP BY title_sort, authors
+      HAVING COUNT(*) > 1
+    )
+  `);
+  const row = _stmtDupSummary.get() || { totalBooks: 0, totalGroups: 0 };
+  const value = {
+    totalBooks: Number(row.totalBooks) || 0,
+    totalGroups: Number(row.totalGroups) || 0
+  };
+  _dupSummaryCache = { value, expiresAt: Date.now() + DUP_SUMMARY_TTL_MS };
+  return value;
 }
 
 /**
@@ -684,6 +712,22 @@ export function enrichBookRow(row) {
 
 const FIELD_SEPARATOR = String.fromCharCode(4);
 const TEXT_ENCODING = 'win1251';
+
+function buildScopedBookId({ rawId, sourceId = null, archiveName = '', fileName = '', ext = '' }) {
+  const baseId = String(rawId || '').trim();
+  if (!baseId) {
+    return '';
+  }
+  if (sourceId == null || sourceId === '') {
+    return baseId;
+  }
+  const sid = Number(sourceId);
+  const archivePart = String(archiveName || '').trim().toLowerCase();
+  const filePart = String(fileName || '').trim().toLowerCase();
+  const extPart = String(ext || '').trim().toLowerCase();
+  return `${sid}:${baseId}\u0000${archivePart}\u0000${filePart}\u0000${extPart}`;
+}
+
 const indexState = {
   active: false,
   ready: false,
@@ -692,6 +736,7 @@ const indexState = {
   processedArchives: 0,
   totalArchives: 0,
   importedBooks: 0,
+  uniqueBooks: 0,
   currentArchive: '',
   error: '',
   pauseRequested: false,
@@ -770,6 +815,7 @@ function writeClusterIndexProgress() {
       processedArchives: indexState.processedArchives,
       totalArchives: indexState.totalArchives,
       importedBooks: indexState.importedBooks,
+      uniqueBooks: indexState.uniqueBooks,
       currentArchive: String(indexState.currentArchive || '').slice(0, 500),
       startedAt: indexState.startedAt,
       mode: indexState.mode,
@@ -983,7 +1029,32 @@ function parseStructureInfo(text) {
   return map;
 }
 
-function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
+function createIndexDiagnostics() {
+  return {
+    totalLines: 0,
+    parsedRows: 0,
+    importedRows: 0,
+    deletedRows: 0,
+    parseSkipped: 0,
+    suppressedRows: 0,
+    collisionScopedRows: 0,
+    legacyRows: 0,
+    longLineSkipped: 0,
+    oversizedInpSkipped: 0,
+    readErrors: 0
+  };
+}
+
+function addIndexDiagnostics(target, delta) {
+  if (!target || !delta) return target;
+  for (const [key, value] of Object.entries(delta)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    target[key] = (target[key] || 0) + value;
+  }
+  return target;
+}
+
+export function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
   if (!line) {
     return null;
   }
@@ -1025,10 +1096,13 @@ function parseLine(line, archiveName, sourceId = null, fieldMap = null) {
     return null;
   }
   /** Несколько INPX-источников: одинаковые lib_id в разных выкладках — уникальный первичный ключ. */
-  const id =
-    sourceId != null && sourceId !== ''
-      ? `${Number(sourceId)}:${rawId}`
-      : rawId;
+  const id = buildScopedBookId({
+    rawId,
+    sourceId,
+    archiveName: effectiveArchive,
+    fileName,
+    ext
+  });
 
   return {
     id,
@@ -1061,23 +1135,25 @@ export function getIndexStatus() {
   /* Другой воркер кластера индексирует — прогресс из meta */
   if (isClusterIndexActive()) {
     const p = readClusterIndexProgress();
-    return {
-      active: true,
-      ready: false,
-      startedAt: p.startedAt || null,
-      finishedAt: null,
-      processedArchives: p.processedArchives || 0,
-      totalArchives: p.totalArchives || 0,
-      importedBooks: p.importedBooks || 0,
-      currentArchive: p.currentArchive || '',
-      error: '',
-      pauseRequested: getMeta('index_pause_requested') === '1',
-      paused: p.paused || false,
-      cancelRequested: getMeta('index_cancel_requested') === '1',
-      mode: p.mode || '',
-      sourceId: p.sourceId ?? null,
-      indexedAt
-    };
+      return {
+        active: true,
+        ready: false,
+        startedAt: p.startedAt || null,
+        finishedAt: null,
+        processedArchives: p.processedArchives || 0,
+        totalArchives: p.totalArchives || 0,
+        importedBooks: p.importedBooks || 0,
+        uniqueBooks: p.uniqueBooks || 0,
+        currentArchive: p.currentArchive || '',
+        error: '',
+        pauseRequested: getMeta('index_pause_requested') === '1',
+        paused: p.paused || false,
+        cancelRequested: getMeta('index_cancel_requested') === '1',
+        mode: p.mode || '',
+        sourceId: p.sourceId ?? null,
+        indexedAt
+      };
+
   }
 
   /* Не индексируется нигде */
@@ -1664,6 +1740,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   indexState.totalArchives = inpEntries.length;
   indexState.processedArchives = skippedCount;
   indexState.importedBooks = 0;
+  indexState.uniqueBooks = 0;
   indexState.currentArchive = incremental && skippedCount > 0
     ? `(пропущено ${skippedCount} неизменённых)`
     : '';
@@ -1710,6 +1787,10 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   const unlinkSeries = db.prepare('DELETE FROM book_series WHERE book_id = ?');
   const unlinkGenres = db.prepare('DELETE FROM book_genres WHERE book_id = ?');
   const suppressedIds = getSuppressedBookIds();
+  const legacyIdCollisions = new Set();
+  const legacyIdOwners = new Map();
+  const diagnosticsTotal = createIndexDiagnostics();
+  const seenUniqueBookIds = new Set();
   const insert = db.prepare(`
     INSERT INTO books (
       id, title, authors, genres, series, series_no, title_sort, author_sort,
@@ -1794,12 +1875,64 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
   }
 
   const archiveSeenIds = new Set();
-  const processChunk = db.transaction((batch, archiveName) => {
+  const processChunk = db.transaction((batch, archiveName, diagnostics) => {
     for (const line of batch) {
+      diagnostics.totalLines += 1;
       const row = enrichBookRow(parseLine(line, archiveName, sourceId, fieldMap));
-      if (row && !row.deleted && !suppressedIds.has(row.id)) {
+      if (!row) {
+        diagnostics.parseSkipped += 1;
+        continue;
+      }
+      diagnostics.parsedRows += 1;
+      if (row.deleted) {
+        diagnostics.deletedRows += 1;
+        continue;
+      }
+      {
+        const legacyId = sourceId != null && sourceId !== ''
+          ? `${Number(sourceId)}:${String(row.libId || row.fileName || '').trim()}`
+          : row.id;
+        const rowSignature = `${String(row.archiveName || '')}\u0000${String(row.fileName || '')}\u0000${String(row.ext || '').toLowerCase()}`;
+        const knownOwner = legacyIdOwners.get(legacyId);
+        let usesScopedId = false;
+        if (legacyIdCollisions.has(legacyId)) {
+          usesScopedId = true;
+          row.id = buildScopedBookId({
+            rawId: row.libId || row.fileName || '',
+            sourceId,
+            archiveName: row.archiveName,
+            fileName: row.fileName,
+            ext: row.ext
+          });
+        } else if (knownOwner === undefined) {
+          legacyIdOwners.set(legacyId, rowSignature);
+          row.id = legacyId;
+        } else if (knownOwner !== rowSignature) {
+          legacyIdCollisions.add(legacyId);
+          usesScopedId = true;
+          row.id = buildScopedBookId({
+            rawId: row.libId || row.fileName || '',
+            sourceId,
+            archiveName: row.archiveName,
+            fileName: row.fileName,
+            ext: row.ext
+          });
+        } else {
+          row.id = legacyId;
+        }
+        if (usesScopedId) diagnostics.collisionScopedRows += 1;
+        else diagnostics.legacyRows += 1;
+        if (suppressedIds.has(row.id) || suppressedIds.has(legacyId)) {
+          diagnostics.suppressedRows += 1;
+          continue;
+        }
         row.sourceId = sourceId;
         insert.run(row);
+        if (!seenUniqueBookIds.has(row.id)) {
+          seenUniqueBookIds.add(row.id);
+          indexState.uniqueBooks += 1;
+        }
+        diagnostics.importedRows += 1;
         // Incremental: duplicate book IDs across .inp files may change authors/series/genres
         // — stale junction rows must be removed before re-linking.
         // Full reindex: junction tables were already cleared at start, skip 3 pointless
@@ -1862,6 +1995,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
     const rawUc = Number(entry.uncompressedSize);
     const uc = Number.isFinite(rawUc) ? rawUc : 0;
     if (uc > MAX_INP_ENTRY_BYTES) {
+      diagnosticsTotal.oversizedInpSkipped += 1;
       console.warn(
         `[index] INPX: пропуск ${entry.path}: несжатый размер ${uc} B > лимит ${MAX_INP_ENTRY_BYTES} B`
       );
@@ -1881,6 +2015,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
     try {
       buffer = await promiseWithTimeout(entry.buffer(), bufferMs, `INPX buffer ${archiveName}`);
     } catch (err) {
+      diagnosticsTotal.readErrors += 1;
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[index] INPX: чтение ${entry.path} (${archiveName}): ${msg}`);
       appendIndexDiaryLine(`INPX ОШИБКА чтения .inp: ${archiveName} — ${msg}`);
@@ -1913,6 +2048,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
 
     /** Обновлять подпись в UI чаще, чем раз в 120 чанков — иначе на одном толстом .inp кажется, что индексация «застыла» на середине. */
     const UI_LINE_PROGRESS_EVERY = 20;
+    const archiveDiagnostics = createIndexDiagnostics();
     let chunkSeq = 0;
     let lineCount = 0;
     let batch = [];
@@ -1928,7 +2064,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
       }
       const t0 = Date.now();
       try {
-        processChunk(batch, archiveName);
+        processChunk(batch, archiveName, archiveDiagnostics);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         appendIndexDiaryLine(`INPX ОШИБКА чанк ${nextChunk} ${archiveName}: ${msg}`);
@@ -1961,6 +2097,7 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
         }
       }
       if (line.length > MAX_INPX_LINE_CHARS) {
+        archiveDiagnostics.longLineSkipped += 1;
         if (!warnedLongLine) {
           console.warn(
             `[index] INPX: ${archiveName}: пропуск строк длиннее ${MAX_INPX_LINE_CHARS} симв.`
@@ -1983,8 +2120,11 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
       }
     }
     flush();
+    addIndexDiagnostics(diagnosticsTotal, archiveDiagnostics);
     indexState.currentArchive = `${archiveName} … готово ${lineCount} строк (${chunkSeq} чанков)`;
     console.log(`[index] INPX: ${archiveName} готово: ${lineCount} строк, чанков импорта ${chunkSeq}`);
+    console.log(`[index] INPX diagnostics ${archiveName}: ${JSON.stringify(archiveDiagnostics)}`);
+    appendIndexDiaryLine(`INPX диагностика ${archiveName}: ${JSON.stringify(archiveDiagnostics)}`);
     await yieldEventLoop();
     await checkIndexControlPoint();
 
@@ -2000,8 +2140,11 @@ export async function rebuildIndex(inpxPath, incremental = false, sourceId = nul
     archivesProcessed: entriesToProcess.length,
     skippedUnchanged: skippedCount,
     importedBooks: indexState.importedBooks,
-    incremental
+    incremental,
+    diagnostics: diagnosticsTotal
   });
+  console.log(`[index] INPX diagnostics total: ${JSON.stringify(diagnosticsTotal)}`);
+  appendIndexDiaryLine(`INPX диагностика итог: ${JSON.stringify(diagnosticsTotal)}`);
 
   if (!incremental) {
     for (const entry of inpEntries) {
@@ -2641,7 +2784,7 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
   return { total, items };
 }
 
-export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'books', sort = 'title', order = '', genre = '', letter = '', lang = '', format = '', year = 0 }) {
+export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'books', sort = 'title', order = '', genre = '', letter = '', lang = '', format = '', year = 0, nameOnly = false }) {
   const bookFields = new Set(['books', 'title', 'book-authors', 'book-series', 'genres', 'keywords']);
   const normalizedField = ['books', 'authors', 'series', 'title', 'book-authors', 'book-series', 'genres', 'keywords'].includes(field) ? field : 'books';
   if (!String(query || '').trim() && !String(genre || '').trim() && !String(letter || '').trim() && !lang && !format && !year) {
@@ -2654,7 +2797,9 @@ export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'bo
   }
 
   if (normalizedField === 'series') {
-    const result = listSeries({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', order, letter });
+    /* nameOnly прокидывается дальше — для OPDS (искал по сериям, не по авторам)
+       это критично для производительности на больших библиотеках. */
+    const result = listSeries({ page, pageSize, query, sort: sort === 'name' ? 'name' : 'count', order, letter, nameOnly });
     return { ...result, field: normalizedField };
   }
 
@@ -2747,7 +2892,13 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
   const langNorm = String(lang || '').trim().toLowerCase();
   const dateNorm = String(date || '').trim();
   const keywordsNorm = normalizeText(keywords || '');
-  const libRateNum = Math.max(0, Math.min(10, Number(libRate) || 0));
+  /*
+   * Шкала рейтинга — 0..5 (см. CSS-классы .cover-rating-1..5, локаль
+   * 'book.rating.invalid' и UX звёзд на обложке). Раньше клампилось до 10 —
+   * это позволяло сохранить «6/7/8» через прямой POST, и обложка пыталась
+   * нарисовать столько же звёздочек без CSS-класса.
+   */
+  const libRateNum = Math.max(0, Math.min(5, Math.round(Number(libRate) || 0)));
 
   const primaryAuthor = splitAuthorValues(authorsNorm)[0] || '';
   const titleSortVal = createSortKey(titleNorm);
@@ -2875,20 +3026,11 @@ export function getBookDuplicateCandidates(_bookId, _limit = 8) {
 }
 
 // ─── Duplicate detection ─────────────────────────────────────────
-let _stmtDupTotal = null;
 let _stmtDupGroups = null;
 export function getDuplicateGroups({ page = 1, pageSize = 50 } = {}) {
   const offset = (page - 1) * pageSize;
-  _stmtDupTotal ??= db.prepare(`
-    SELECT COUNT(*) AS count FROM (
-      SELECT 1 FROM active_books
-      WHERE title_sort IS NOT NULL AND title_sort != ''
-      GROUP BY title_sort, authors
-      HAVING COUNT(*) > 1
-    )
-  `);
-  const totalRow = _stmtDupTotal.get();
-  const total = totalRow?.count || 0;
+  /* Используем общую сводку — один проход вместо двух дорогих агрегатов на странице. */
+  const total = getDuplicatesSummary().totalGroups;
 
   _stmtDupGroups ??= db.prepare(`
     WITH dup_keys AS (
@@ -2897,7 +3039,7 @@ export function getDuplicateGroups({ page = 1, pageSize = 50 } = {}) {
       WHERE title_sort IS NOT NULL AND title_sort != ''
       GROUP BY title_sort, authors
       HAVING COUNT(*) > 1
-      ORDER BY title_sort ASC
+      ORDER BY title_sort ASC, authors ASC
       LIMIT ? OFFSET ?
     )
     SELECT b.id, b.title, b.authors, b.ext, b.lang, b.size, b.file_name, b.archive_name,
@@ -2938,34 +3080,56 @@ export function softDeleteBook(bookId) {
 export function autoCleanDuplicates() {
   const FORMAT_RANK = { epub: 1, fb2: 2, mobi: 3, azw3: 4, djvu: 5, pdf: 6, doc: 7, docx: 8, rtf: 9, txt: 10 };
   const maxRank = 99;
-  const BATCH = 5000;
+  /*
+   * Пагинация по ГРУППАМ через CTE (LIMIT ВНУТРИ CTE, не на внешнем SELECT) —
+   * это сохраняет корректность (группа целиком в одном батче, не режется по
+   * границе строк) и одновременно держит скорость: один запрос-джоин на батч,
+   * а не одна выборка ключей + N точечных лукапов на каждую группу.
+   *
+   * OFFSET не нужен: после soft-delete книги выпадают из HAVING COUNT(*) > 1,
+   * и следующий запрос с тем же LIMIT берёт оставшиеся группы естественно.
+   *
+   * GROUP_BATCH крупный, чтобы количество прогонов GROUP BY по active_books
+   * (это аггрегация по всей таблице) было минимальным — это самая дорогая
+   * операция всего цикла.
+   */
+  const GROUP_BATCH = 2000;
 
+  const batchStmt = db.prepare(`
+    WITH dup_keys AS (
+      SELECT title_sort, authors
+      FROM active_books
+      WHERE title_sort IS NOT NULL AND title_sort != ''
+      GROUP BY title_sort, authors
+      HAVING COUNT(*) > 1
+      ORDER BY title_sort ASC, authors ASC
+      LIMIT ?
+    )
+    SELECT b.id, b.ext, b.size, b.title_sort, b.authors
+    FROM active_books b
+    JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = b.authors
+    ORDER BY b.title_sort ASC, b.authors ASC, b.id ASC
+  `);
   const delStmt = db.prepare('UPDATE books SET deleted = 1 WHERE id = ? AND deleted = 0');
   const suppressStmt = db.prepare(`INSERT INTO suppressed_books(book_id, title, authors, reason) VALUES(?, ?, ?, 'auto_clean')
     ON CONFLICT(book_id) DO UPDATE SET reason = 'auto_clean', suppressed_at = CURRENT_TIMESTAMP`);
+
   let totalDeleted = 0;
   let groupsCleaned = 0;
+  let safety = 100_000; // страховка от теоретического бесконечного цикла
 
-  for (let offset = 0; ; offset += BATCH) {
-    /* Берём батч дубликатов — не загружаем всё в память сразу */
-    const rows = db.prepare(`
-      WITH dup_keys AS (
-        SELECT title_sort, authors
-        FROM active_books
-        WHERE title_sort IS NOT NULL AND title_sort != ''
-        GROUP BY title_sort, authors
-        HAVING COUNT(*) > 1
-      )
-      SELECT b.id, b.ext, b.size, b.title_sort, b.authors
-      FROM active_books b
-      JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = b.authors
-      ORDER BY b.title_sort ASC, b.authors ASC, b.id ASC
-      LIMIT ? OFFSET ?
-    `).all(BATCH, offset);
+  for (;;) {
+    if (--safety < 0) {
+      console.error('[autoCleanDuplicates] safety guard tripped — aborting');
+      break;
+    }
 
+    const rows = batchStmt.all(GROUP_BATCH);
     if (!rows.length) break;
 
-    // Group
+    /* Группируем подряд идущие строки одного (title_sort, authors).
+       Гарантия целостности группы: LIMIT стоит в CTE по уникальным ключам,
+       поэтому внешний JOIN всегда возвращает ВСЕ книги выбранных групп. */
     const groups = [];
     let cur = null;
     for (const r of rows) {
@@ -2977,8 +3141,10 @@ export function autoCleanDuplicates() {
       cur.items.push(r);
     }
 
+    let deletedThisBatch = 0;
     const doClean = db.transaction(() => {
       for (const g of groups) {
+        if (g.items.length < 2) continue;
         g.items.sort((a, b) => {
           const fa = FORMAT_RANK[(a.ext || '').toLowerCase()] || maxRank;
           const fb = FORMAT_RANK[(b.ext || '').toLowerCase()] || maxRank;
@@ -2991,6 +3157,7 @@ export function autoCleanDuplicates() {
           if (changes) {
             suppressStmt.run(item.id, item.title_sort || '', item.authors || '');
             totalDeleted += changes;
+            deletedThisBatch += changes;
           }
         }
         groupsCleaned++;
@@ -2998,7 +3165,10 @@ export function autoCleanDuplicates() {
     });
     doClean();
 
-    if (rows.length < BATCH) break;
+    /* Если за итерацию ничего не удалили (например, кто-то параллельно
+       поправил данные, или группа из 1 книги попала из-за гонки) — выходим,
+       иначе при тех же входных данных получим бесконечный цикл. */
+    if (!deletedThisBatch) break;
   }
 
   refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after autoCleanDuplicates:', err));
@@ -3007,27 +3177,13 @@ export function autoCleanDuplicates() {
 
 /** Preview: how many books would be deleted by auto-clean */
 export function previewAutoClean() {
-  const row = db.prepare(`
-    SELECT
-      COUNT(*) AS totalBooks,
-      (SELECT COUNT(*) FROM (
-        SELECT 1 FROM active_books
-        WHERE title_sort IS NOT NULL AND title_sort != ''
-        GROUP BY title_sort, authors
-        HAVING COUNT(*) > 1
-      )) AS totalGroups
-    FROM active_books b
-    WHERE EXISTS (
-      SELECT 1 FROM active_books b2
-      WHERE b2.title_sort = b.title_sort AND b2.authors = b.authors
-        AND b2.title_sort IS NOT NULL AND b2.title_sort != ''
-        AND b2.id != b.id
-    )
-  `).get();
-  const totalGroups = row?.totalGroups || 0;
-  const totalBooks = row?.totalBooks || 0;
-  // Will delete totalBooks - totalGroups (one kept per group)
-  return { totalGroups, totalBooks, willDelete: totalBooks - totalGroups };
+  /*
+   * Раньше использовалось коррелированное EXISTS по active_books на каждую строку,
+   * что давало O(N²) и подвешивало процессор на больших библиотеках.
+   * Заменено на один проход GROUP BY (через общий кеш сводки).
+   */
+  const { totalGroups, totalBooks } = getDuplicatesSummary();
+  return { totalGroups, totalBooks, willDelete: Math.max(0, totalBooks - totalGroups) };
 }
 
 let _stmtGetStats;
@@ -3150,7 +3306,17 @@ export function listAuthors({ page = 1, pageSize = 50, query = '', sort = 'name'
   return { total, items };
 }
 
-export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', letter = '' }) {
+/**
+ * Список серий с поиском по имени и/или автору.
+ * @param {Object} opts
+ * @param {boolean} [opts.nameOnly=false]
+ *   Когда true — отключает поиск серий через авторов (тяжёлый EXISTS-JOIN
+ *   с LIKE '% token%' по `authors.search_name`, на больших каталогах
+ *   разгоняет CPU до 100%+). Полезно для OPDS «поиск по сериям»,
+ *   где имя автора пользователь не вводит и не ожидает увидеть совпадения
+ *   через автора. Дефолт оставлен false для обратной совместимости с UI.
+ */
+export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', letter = '', nameOnly = false } = {}) {
   const offset = (page - 1) * pageSize;
   const parsed = parseSearchOperator(query);
   const needleKey = createSortKey(parsed.value || query);
@@ -3187,34 +3353,44 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name',
 
   const nameSearch = buildCatalogSearchSql('s.search_name', query);
 
+  /*
+   * Поиск серий ПО АВТОРАМ — это коррелированный EXISTS-JOIN через
+   * book_series → active_books → book_authors → authors с LIKE '% token%'.
+   * На большой библиотеке (Flibusta-сайз) это O(N×M×K) и легко съедает
+   * 100%+ CPU на одно «безобидное» поисковое слово. Если caller знает,
+   * что ему не нужны такие совпадения (например, OPDS «поиск по сериям»),
+   * передаёт nameOnly:true — и эта ветка целиком отключается.
+   */
   const authorTokens = needleTokens;
-  let authorWhere, authorWhereParams = [], authorRankSQL, authorRankParams = [];
-  const snExpr = `SUBSTR(COALESCE(a2.sort_name, ''), 1, INSTR(COALESCE(a2.sort_name, '') || ' ', ' ') - 1)`;
-  if (authorTokens.length === 1) {
-    authorWhere = `EXISTS (
-      SELECT 1 FROM book_series bs2
-      JOIN active_books b2 ON b2.id = bs2.book_id
-      JOIN book_authors ba2 ON ba2.book_id = b2.id
-      JOIN authors a2 ON a2.id = ba2.author_id
-      WHERE bs2.series_id = s.id AND ${snExpr} = ?
-    )`;
-    authorWhereParams.push(authorTokens[0]);
+  let authorWhere = null, authorWhereParams = [], authorRankSQL = null, authorRankParams = [];
+  if (!nameOnly) {
+    const snExpr = `SUBSTR(COALESCE(a2.sort_name, ''), 1, INSTR(COALESCE(a2.sort_name, '') || ' ', ' ') - 1)`;
+    if (authorTokens.length === 1) {
+      authorWhere = `EXISTS (
+        SELECT 1 FROM book_series bs2
+        JOIN active_books b2 ON b2.id = bs2.book_id
+        JOIN book_authors ba2 ON ba2.book_id = b2.id
+        JOIN authors a2 ON a2.id = ba2.author_id
+        WHERE bs2.series_id = s.id AND ${snExpr} = ?
+      )`;
+      authorWhereParams.push(authorTokens[0]);
 
-    authorRankSQL = `(SELECT MIN(CASE WHEN ${snExpr} = ? THEN 1 WHEN ${snExpr} LIKE ? THEN 2 ELSE 5 END) FROM book_series bs2 JOIN active_books b2 ON b2.id = bs2.book_id JOIN book_authors ba2 ON ba2.book_id = b2.id JOIN authors a2 ON a2.id = ba2.author_id WHERE bs2.series_id = s.id)`;
-    authorRankParams.push(authorTokens[0], `${authorTokens[0]}%`);
-  } else {
-    const aClauses = authorTokens.map(() => `(' ' || COALESCE(a2.search_name, '') || ' ') LIKE ?`);
-    authorWhere = `EXISTS (
-      SELECT 1 FROM book_series bs2
-      JOIN active_books b2 ON b2.id = bs2.book_id
-      JOIN book_authors ba2 ON ba2.book_id = b2.id
-      JOIN authors a2 ON a2.id = ba2.author_id
-      WHERE bs2.series_id = s.id AND ${aClauses.join(' AND ')}
-    )`;
-    for (const t of authorTokens) authorWhereParams.push(`% ${t}%`);
+      authorRankSQL = `(SELECT MIN(CASE WHEN ${snExpr} = ? THEN 1 WHEN ${snExpr} LIKE ? THEN 2 ELSE 5 END) FROM book_series bs2 JOIN active_books b2 ON b2.id = bs2.book_id JOIN book_authors ba2 ON ba2.book_id = b2.id JOIN authors a2 ON a2.id = ba2.author_id WHERE bs2.series_id = s.id)`;
+      authorRankParams.push(authorTokens[0], `${authorTokens[0]}%`);
+    } else {
+      const aClauses = authorTokens.map(() => `(' ' || COALESCE(a2.search_name, '') || ' ') LIKE ?`);
+      authorWhere = `EXISTS (
+        SELECT 1 FROM book_series bs2
+        JOIN active_books b2 ON b2.id = bs2.book_id
+        JOIN book_authors ba2 ON ba2.book_id = b2.id
+        JOIN authors a2 ON a2.id = ba2.author_id
+        WHERE bs2.series_id = s.id AND ${aClauses.join(' AND ')}
+      )`;
+      for (const tok of authorTokens) authorWhereParams.push(`% ${tok}%`);
 
-    authorRankSQL = `(SELECT MIN(CASE WHEN COALESCE(a2.sort_name, '') = ? THEN 1 WHEN COALESCE(a2.sort_name, '') = ? THEN 1 ELSE 5 END) FROM book_series bs2 JOIN active_books b2 ON b2.id = bs2.book_id JOIN book_authors ba2 ON ba2.book_id = b2.id JOIN authors a2 ON a2.id = ba2.author_id WHERE bs2.series_id = s.id)`;
-    authorRankParams.push(needleKey, [...authorTokens].reverse().join(' '));
+      authorRankSQL = `(SELECT MIN(CASE WHEN COALESCE(a2.sort_name, '') = ? THEN 1 WHEN COALESCE(a2.sort_name, '') = ? THEN 1 ELSE 5 END) FROM book_series bs2 JOIN active_books b2 ON b2.id = bs2.book_id JOIN book_authors ba2 ON ba2.book_id = b2.id JOIN authors a2 ON a2.id = ba2.author_id WHERE bs2.series_id = s.id)`;
+      authorRankParams.push(needleKey, [...authorTokens].reverse().join(' '));
+    }
   }
 
   const mainWhereParts = [];
@@ -3223,8 +3399,13 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name',
     mainWhereParts.push(nameSearch.where);
     mainWhereParams.push(...nameSearch.params);
   }
-  mainWhereParts.push(authorWhere);
-  mainWhereParams.push(...authorWhereParams);
+  if (authorWhere) {
+    mainWhereParts.push(authorWhere);
+    mainWhereParams.push(...authorWhereParams);
+  }
+  /* Если ни имя-поиск не построился, ни авторы (nameOnly + пустой токен-поиск)
+     не дали условий — возвращаем пусто, иначе WHERE будет пустой и вернёт всё. */
+  if (!mainWhereParts.length) return { total: 0, items: [] };
   const combinedWhere = mainWhereParts.map(p => `(${p})`).join(' OR ');
 
   const total = db.prepare(`
@@ -3244,11 +3425,18 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name',
   let rankSQL;
   const allRankParams = [];
   if (nameRankParts.length) {
-    rankSQL = `CASE ${nameRankParts.join(' ')} ELSE COALESCE(${authorRankSQL}, 20) END`;
-    allRankParams.push(...nameRankParams, ...authorRankParams);
-  } else {
+    if (authorRankSQL) {
+      rankSQL = `CASE ${nameRankParts.join(' ')} ELSE COALESCE(${authorRankSQL}, 20) END`;
+      allRankParams.push(...nameRankParams, ...authorRankParams);
+    } else {
+      rankSQL = `CASE ${nameRankParts.join(' ')} ELSE 20 END`;
+      allRankParams.push(...nameRankParams);
+    }
+  } else if (authorRankSQL) {
     rankSQL = authorRankSQL;
     allRankParams.push(...authorRankParams);
+  } else {
+    rankSQL = '0';
   }
 
   const orderBy = sort === 'name'

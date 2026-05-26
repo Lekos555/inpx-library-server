@@ -4,12 +4,13 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { brotliCompress, constants as zlibConstants } from 'node:zlib';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
 
 import { config } from './config.js';
-import { runWithLocale, t } from './i18n.js';
+import { runWithLocale, t, setDefaultLocale } from './i18n.js';
 import { ApiErrorCode, apiFail } from './api-errors.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerBrowseApiRoutes } from './routes/browse-api.js';
@@ -43,7 +44,7 @@ import { startScanScheduler } from './services/scheduler.js';
 import {
   STATS_CACHE_TTL_MS, HOME_SECTIONS_CACHE_TTL_MS
 } from './constants.js';
-import { db, getUserByUsername, hasAdminUser, initDb, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts } from './db.js';
+import { db, getUserByUsername, hasAdminUser, initDb, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts, countSuppressedBooks, getDbBreakdown } from './db.js';
 import {
   backfillCatalogSearchFields,
   getConfiguredInpxFile,
@@ -107,6 +108,12 @@ const operationsState = {
 let lastCpuSampleUsage = process.cpuUsage();
 let lastCpuSampleAtMs = Date.now();
 
+/**
+ * Замер CPU: возвращает два значения.
+ *   - `all`: % от общей мощности (нормирован на количество ядер). 100% = вся машина занята.
+ *   - `single`: % от одного ядра (клипуется на 100%). Полезнее для нашей single-threaded
+ *     архитектуры (Node + better-sqlite3 синхронно занимают одно ядро).
+ */
 function sampleProcessCpuPercent() {
   const nowMs = Date.now();
   const usage = process.cpuUsage();
@@ -114,11 +121,39 @@ function sampleProcessCpuPercent() {
   const deltaUser = usage.user - lastCpuSampleUsage.user;
   const deltaSystem = usage.system - lastCpuSampleUsage.system;
   const cpuCount = Math.max(1, Array.isArray(os.cpus()) ? os.cpus().length : 1);
-  const ratio = ((deltaUser + deltaSystem) / 1000) / (elapsedMs * cpuCount);
-  const percent = Math.max(0, Math.min(100, ratio * 100));
+  const totalMs = (deltaUser + deltaSystem) / 1000;
+  const ratioAll = totalMs / (elapsedMs * cpuCount);
+  const ratioSingle = totalMs / elapsedMs;
+  const percentAll = Math.max(0, Math.min(100, ratioAll * 100));
+  const percentSingle = Math.max(0, Math.min(100, ratioSingle * 100));
   lastCpuSampleUsage = usage;
   lastCpuSampleAtMs = nowMs;
-  return Number(percent.toFixed(1));
+  return {
+    all: Number(percentAll.toFixed(1)),
+    single: Number(percentSingle.toFixed(1))
+  };
+}
+
+/*
+ * Event-loop lag histogram — критически важная метрика для нашей синхронной архитектуры.
+ * better-sqlite3 + Express всё блокируют один поток; если loop встал на сотни мс,
+ * сервер «висит» для других запросов. Хистограмма раз сэмплируется на каждый
+ * snapshot, потом ресетится — окно совпадает с тиком поллера (~5 сек).
+ */
+const loopLagHist = monitorEventLoopDelay({ resolution: 20 });
+loopLagHist.enable();
+
+function sampleEventLoopLag() {
+  /* monitorEventLoopDelay возвращает наносекунды. Делим на 1e6 → миллисекунды. */
+  const p50 = loopLagHist.percentile(50) / 1e6;
+  const p99 = loopLagHist.percentile(99) / 1e6;
+  const max = loopLagHist.max / 1e6;
+  loopLagHist.reset();
+  return {
+    p50: Number.isFinite(p50) ? Number(p50.toFixed(1)) : 0,
+    p99: Number.isFinite(p99) ? Number(p99.toFixed(1)) : 0,
+    max: Number.isFinite(max) ? Number(max.toFixed(1)) : 0
+  };
 }
 
 function getDiskUsageForPath(targetPath) {
@@ -325,6 +360,30 @@ function getOperationsSnapshot() {
   const validation = getServiceValidation();
   const mem = process.memoryUsage();
   const disk = getDiskUsageForPath(config.dbPath);
+  /*
+   * Библиотечные счётчики для дашборда — через getCachedStats() (10-мин TTL).
+   * Это не «несвежие данные»: все мутирующие маршруты (softDeleteBook,
+   * autoCleanDuplicates, unsuppressBook, unsuppressAll, и т.п.) уже вызывают
+   * clearPageDataCache() сразу после изменений → следующий polling-цикл (5 сек)
+   * подхватит свежие значения. При этом избегаем 5 COUNT(*)-запросов на каждый
+   * тик опроса (раз в 5 секунд × N открытых дашбордов = заметная нагрузка
+   * на больших библиотеках).
+   */
+  let liveStats = null;
+  try {
+    liveStats = getCachedStats();
+  } catch (err) {
+    console.warn('[ops snapshot] getCachedStats failed:', err.message);
+  }
+  let suppressedCount = 0;
+  try { suppressedCount = countSuppressedBooks(); } catch (err) {
+    console.warn('[ops snapshot] countSuppressedBooks failed:', err.message);
+  }
+  let dbBreakdown = null;
+  try { dbBreakdown = getDbBreakdown(); } catch (err) {
+    console.warn('[ops snapshot] getDbBreakdown failed:', err.message);
+  }
+  const idx = getIndexStatus();
   return {
     ...operationsState,
     pid: process.pid,
@@ -352,9 +411,34 @@ function getOperationsSnapshot() {
     heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
     diskTotalMB: disk?.totalMB ?? null,
     diskFreeMB: disk?.freeMB ?? null,
-    cpuPercent: sampleProcessCpuPercent(),
+    /* CPU: оба значения. cpuPercent оставлен для обратной совместимости
+       (= cpuAll, % от общей мощности); cpuSingle — % от одного ядра. */
+    ...((() => { const cpu = sampleProcessCpuPercent(); return {
+      cpuPercent: cpu.all,
+      cpuAll: cpu.all,
+      cpuSingle: cpu.single
+    }; })()),
+    /* Event-loop lag (median / p99 / max в мс за последние ~5 сек): главный сигнал
+       что сервер «висит». Высокий p99 при низком CPU = синхронная блокировка SQLite. */
+    ...((() => { const lag = sampleEventLoopLag(); return {
+      loopLagP50Ms: lag.p50,
+      loopLagP99Ms: lag.p99,
+      loopLagMaxMs: lag.max
+    }; })()),
     appVersion: readPackageVersion(),
-    sources: getSources()
+    sources: getSources(),
+    /* Живые счётчики для верхней панели дашборда. */
+    totalBooks: Number(liveStats?.totalBooks) || 0,
+    totalAuthors: Number(liveStats?.totalAuthors) || 0,
+    totalSeries: Number(liveStats?.totalSeries) || 0,
+    suppressedCount,
+    /* Разбивка содержимого БД по категориям (стэковый бар на дашборде). */
+    dbBreakdown,
+    /* Сводка по последней (или текущей) индексации — переживает завершение
+       indexing-сессии и доступна на дашборде до следующего запуска. */
+    lastIndexImported: Math.max(0, Math.floor(Number(idx?.importedBooks) || 0)),
+    lastIndexUnique: Math.max(0, Math.floor(Number(idx?.uniqueBooks) || 0)),
+    lastIndexArchives: Number(idx?.totalArchives) || 0
   };
 }
 
@@ -912,6 +996,7 @@ async function bootstrap() {
   // Run DB optimize manually/offline; in-process optimize can block HTTP loop on large datasets.
   setSiteName(getSetting('site_name'));
   setAllowAnonymousDownload(getSetting('allow_anonymous_download') === '1');
+  setDefaultLocale(getSetting('default_locale'));
 
   /* Проверка путей источников при старте — предупреждение, если не найдены */
   const libRoot = getLibraryRoot();
@@ -1003,7 +1088,7 @@ async function bootstrap() {
     }
 
     // Start scan scheduler (if SCAN_INTERVAL_HOURS > 0)
-    startScanScheduler(() => startBackgroundIndexing(false, true));
+    startScanScheduler(({ full = false } = {}) => startBackgroundIndexing(full, !full));
   }, 100);
 
   setInterval(() => {

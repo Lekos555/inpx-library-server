@@ -70,6 +70,11 @@ async function cleanupStaleTempSessions() {
   try {
     const dir = config.conversionTempDir;
     if (!dir) return;
+    try {
+      await fs.promises.access(dir, fs.constants.F_OK);
+    } catch {
+      return;
+    }
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
     const now = Date.now();
     let removed = 0;
@@ -255,9 +260,16 @@ const CONVERTER_OUTPUT_MAX = 10 * 1024 * 1024; // 10 MB per stream — intention
 
 async function runConverter(args, bookInfo = {}) {
   await fs.promises.access(config.fb2cngPath, fs.constants.R_OK);
-  const fullArgs = config.fb2cngConfigPath
-    ? ['-c', config.fb2cngConfigPath, ...args]
-    : args;
+  let configPath = '';
+  if (config.fb2cngConfigPath) {
+    try {
+      await fs.promises.access(config.fb2cngConfigPath, fs.constants.R_OK);
+      configPath = config.fb2cngConfigPath;
+    } catch {
+      console.warn(`[conversion] fb2cng config missing at runtime: ${config.fb2cngConfigPath} — running without -c`);
+    }
+  }
+  const fullArgs = configPath ? ['-c', configPath, ...args] : args;
   await new Promise((resolve, reject) => {
     const child = spawn(config.fb2cngPath, fullArgs, {
       cwd: config.conversionTempDir,

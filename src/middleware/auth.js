@@ -6,9 +6,76 @@ import { getUserByUsername, getSetting } from '../db.js';
 import { verifyPassword } from '../auth.js';
 import { parseSession, csrfTokenForSession, verifyCsrfToken } from '../services/session.js';
 import { trackUser } from '../services/online-tracker.js';
+import { logSystemEvent } from '../services/system-events.js';
 import { CSRF_EXEMPT_PATHS, DUMMY_PASSWORD_HASH } from '../constants.js';
 import { t } from '../i18n.js';
 import { ApiErrorCode } from '../api-errors.js';
+
+/* ── OPDS auth helpers (общие для requireOpdsAuth, requireBrowseOrOpds, requireDownloadAuth) ──
+ * Сложилось так, что три функции дублировали почти одинаковую логику Basic Auth.
+ * Выношу её в helper, плюс добавляю диагностический лог: без него админ при 401
+ * видит только «Unauthorized» и не понимает, в чём дело (неверный логин? пароль?
+ * заблокирован?). Лог идёт в system_events → доступен в админке. */
+
+/**
+ * Попытка авторизовать OPDS-клиент по Basic Auth.
+ * Возвращает либо `{ ok: true, user }`, либо `{ ok: false, reason }` с одним из:
+ *   'no-credentials' | 'unknown-user' | 'no-password-hash' | 'blocked' | 'wrong-password'
+ * Никаких side-effects на response — это решает caller.
+ */
+function tryOpdsBasicAuth(req) {
+  const credentials = basicAuth(req);
+  if (!credentials) return { ok: false, reason: 'no-credentials' };
+  const basicUser = getUserByUsername(credentials.name);
+  if (!basicUser) {
+    /* Всё равно вычисляем хеш дамми-пароля чтобы не было timing-side-channel
+       («есть пользователь / нет»). Результат игнорируем. */
+    verifyPassword(credentials.pass, DUMMY_PASSWORD_HASH);
+    return { ok: false, reason: 'unknown-user', username: credentials.name };
+  }
+  if (!basicUser.passwordHash) {
+    return { ok: false, reason: 'no-password-hash', username: basicUser.username };
+  }
+  if (basicUser.blocked) {
+    return { ok: false, reason: 'blocked', username: basicUser.username };
+  }
+  const valid = verifyPassword(credentials.pass, basicUser.passwordHash);
+  if (!valid) {
+    return { ok: false, reason: 'wrong-password', username: basicUser.username };
+  }
+  return {
+    ok: true,
+    user: { username: basicUser.username, role: basicUser.role || 'user' }
+  };
+}
+
+/**
+ * Записать причину неудачной OPDS-авторизации в журнал событий
+ * (тихо: не на каждом запросе, а только когда реально пришли credentials —
+ * чтобы не флудить логи от клиентов, которые сначала шлют без Basic вообще).
+ */
+function logOpdsAuthFailure(req, result) {
+  if (!result || result.ok) return;
+  if (result.reason === 'no-credentials') return; // это нормальный «ping» от клиента до challenge
+  try {
+    logSystemEvent('warn', 'auth', 'OPDS basic-auth failed', {
+      reason: result.reason,
+      username: result.username || '',
+      ip: req.ip || req.socket?.remoteAddress || '',
+      path: req.originalUrl || req.path || ''
+    });
+  } catch { /* ignore */ }
+}
+
+/**
+ * Стандартный 401-ответ для OPDS-клиента с UTF-8-charset
+ * (RFC 7617 §2.1: клиент при наличии charset="UTF-8" обязан кодировать
+ * Basic-credentials в UTF-8 — это чинит логины с не-ASCII в пароле/логине). */
+function sendOpdsAuthChallenge(res) {
+  res.set('WWW-Authenticate', 'Basic realm="INPX Library OPDS", charset="UTF-8"');
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  return res.status(401).send(t('api.auth.unauthorized'));
+}
 
 const SESSION_USER_CACHE_TTL_MS = 20_000;
 const sessionUserCache = new Map();
@@ -147,18 +214,14 @@ export function requireBrowseOrOpds(req, res, next) {
   if (isAnonymousAllowed('allow_anonymous_browse')) return next();
   const isOpds = String(req.query?.opds || '') === '1';
   if (isOpds && isAnonymousAllowed('allow_anonymous_opds')) return next();
-  // OPDS clients with Basic Auth
   if (isOpds) {
-    const credentials = basicAuth(req);
-    if (credentials) {
-      const basicUser = getUserByUsername(credentials.name);
-      if (basicUser && !basicUser.blocked && verifyPassword(credentials.pass, basicUser.passwordHash || DUMMY_PASSWORD_HASH)) {
-        req.user = { username: basicUser.username, role: basicUser.role || 'user' };
-        return next();
-      }
+    const result = tryOpdsBasicAuth(req);
+    if (result.ok) {
+      req.user = result.user;
+      return next();
     }
-    res.set('WWW-Authenticate', 'Basic realm="INPX Library OPDS"');
-    return res.status(401).send(t('api.auth.unauthorized'));
+    logOpdsAuthFailure(req, result);
+    return sendOpdsAuthChallenge(res);
   }
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, code: ApiErrorCode.UNAUTHORIZED, error: t('api.auth.unauthorized') });
@@ -171,19 +234,14 @@ export function requireDownloadAuth(req, res, next) {
   if (isAnonymousAllowed('allow_anonymous_download')) return next();
   const isOpds = String(req.query?.opds || '') === '1';
   if (isOpds && isAnonymousAllowed('allow_anonymous_opds')) return next();
-  // OPDS clients with Basic Auth
   if (isOpds) {
-    const credentials = basicAuth(req);
-    if (credentials) {
-      const basicUser = getUserByUsername(credentials.name);
-      if (basicUser && !basicUser.blocked && verifyPassword(credentials.pass, basicUser.passwordHash || DUMMY_PASSWORD_HASH)) {
-        req.user = { username: basicUser.username, role: basicUser.role || 'user' };
-        return next();
-      }
+    const result = tryOpdsBasicAuth(req);
+    if (result.ok) {
+      req.user = result.user;
+      return next();
     }
-    // Return 401 with WWW-Authenticate so OPDS clients can prompt for credentials
-    res.set('WWW-Authenticate', 'Basic realm="INPX Library OPDS"');
-    return res.status(401).send(t('api.auth.unauthorized'));
+    logOpdsAuthFailure(req, result);
+    return sendOpdsAuthChallenge(res);
   }
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ ok: false, code: ApiErrorCode.UNAUTHORIZED, error: t('api.auth.unauthorized') });
@@ -192,23 +250,29 @@ export function requireDownloadAuth(req, res, next) {
 }
 
 export function requireOpdsAuth(req, res, next) {
-  const credentials = basicAuth(req);
-  const basicUser = credentials ? getUserByUsername(credentials.name) : null;
-  const basicValid = credentials ? verifyPassword(credentials.pass, basicUser?.passwordHash || DUMMY_PASSWORD_HASH) : false;
-  const sessionUser = getSessionUser(req);
-  const user = basicUser && basicValid && !basicUser.blocked
-    ? { username: basicUser.username, role: basicUser.role || 'user' }
-    : sessionUser;
+  /* Сначала пробуем Basic Auth — это «родной» путь для OPDS.
+     Если Basic-credentials пришли, но не подошли — НЕ падаем сразу:
+     админ мог быть залогинен через web-сессию, тогда cookie тоже валиден. */
+  const basicResult = tryOpdsBasicAuth(req);
+  let user = basicResult.ok ? basicResult.user : null;
 
   if (!user) {
-    if (isAnonymousAllowed('allow_anonymous_opds')) {
-      req.user = null;
-      return next();
-    }
-    res.set('WWW-Authenticate', 'Basic realm="INPX Library OPDS"');
-    return res.status(401).send(t('api.auth.unauthorized'));
+    const sessionUser = getSessionUser(req);
+    if (sessionUser) user = { username: sessionUser.username, role: sessionUser.role || 'user' };
   }
 
-  req.user = { username: user.username, role: user.role || 'user' };
-  next();
+  if (user) {
+    req.user = user;
+    return next();
+  }
+
+  if (isAnonymousAllowed('allow_anonymous_opds')) {
+    req.user = null;
+    return next();
+  }
+
+  /* Логируем причину провала только если клиент реально пытался передать credentials
+     (no-credentials означает первый запрос «на разведку» — не флудим этим лог). */
+  logOpdsAuthFailure(req, basicResult);
+  return sendOpdsAuthChallenge(res);
 }

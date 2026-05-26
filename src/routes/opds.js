@@ -99,13 +99,21 @@ export function registerOpdsRoutes(app, deps) {
 
     if (['series', 'title'].includes(type)) {
       const fieldMap = { series: 'series', title: 'title' };
-      let result = searchCatalog({ query: term, field: fieldMap[type], page, pageSize: limit, sort: type === 'title' ? 'recent' : 'count', genre });
+      /*
+       * Для OPDS-поиска по сериям пользователь вводит ИМЯ серии, не автора.
+       * Включаем nameOnly=true чтобы пропустить дорогостоящий EXISTS-JOIN
+       * через books×authors с LIKE по имени автора — на большой библиотеке
+       * это съедало 100%+ CPU на один запрос. type='title' использует
+       * другой путь (searchBooks через FTS), флаг там игнорируется.
+       */
+      const nameOnly = type === 'series';
+      let result = searchCatalog({ query: term, field: fieldMap[type], page, pageSize: limit, sort: type === 'title' ? 'recent' : 'count', genre, nameOnly });
 
       if (result.total === 0 && term) {
         try {
           const recodedTerm = iconv.encode(term, 'ISO-8859-1').toString();
           if (recodedTerm !== term) {
-            const retry = searchCatalog({ query: recodedTerm, field: fieldMap[type], page, pageSize: limit, sort: type === 'title' ? 'recent' : 'count', genre });
+            const retry = searchCatalog({ query: recodedTerm, field: fieldMap[type], page, pageSize: limit, sort: type === 'title' ? 'recent' : 'count', genre, nameOnly });
             if (retry.total > 0) { result = retry; term = recodedTerm; }
           }
         } catch {}

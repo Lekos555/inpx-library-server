@@ -1460,6 +1460,7 @@ async function pollAdminIndexControls() {
     const total = Number(status?.totalArchives || 0);
     const processed = Number(status?.processedArchives || 0);
     const imported = Math.max(0, Math.floor(Number(status?.importedBooks) || 0));
+    const unique = Math.max(0, Math.floor(Number(status?.uniqueBooks) || 0));
     const phaseDone = Number(status?.phaseDone || 0);
     const phaseTotal = Number(status?.phaseTotal || 0);
     const phaseLabel = String(status?.phaseLabel || '');
@@ -1477,7 +1478,7 @@ async function pollAdminIndexControls() {
       detail = phaseLabel ? `<span class="muted" style="margin-left:12px">${escapeHtml(phaseLabel)}</span>` : '';
     } else {
       percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
-      detail = `<span class="muted" style="margin-left:12px">${escapeHtml(uiTp('app.adminIndexFilesLine', { processed, total, imported }))}</span>`;
+      detail = `<span class="muted" style="margin-left:12px">${escapeHtml(uiTp('app.adminIndexFilesLine', { processed, total, imported, unique }))}</span>`;
     }
     const paused = Boolean(status?.pauseRequested || status?.paused);
     if (textNode) {
@@ -1893,7 +1894,7 @@ async function pollOperationsDashboard() {
   }
   const SPARK_HISTORY_POINTS = 12;
   const cpuHistory = [];
-  const ramHistory = [];
+  const memHistory = [];
   const pushSparkHistory = (arr, value) => {
     if (!Number.isFinite(value)) return;
     arr.push(Math.max(0, Math.min(100, Number(value))));
@@ -1902,21 +1903,53 @@ async function pollOperationsDashboard() {
   const renderSparkline = (field, values) => {
     const svg = document.querySelector(`[data-operations-field="${field}"]`);
     if (!svg) return;
+    /* SVG viewBox у больших спарклайнов — 100×48, у маленьких — 100×24.
+       Берём текущий, чтобы корректно ложиться в оба варианта. */
+    const vbAttr = svg.getAttribute('viewBox') || '0 0 100 48';
+    const vb = vbAttr.split(/\s+/).map(Number);
+    const W = vb[2] || 100;
+    const H = vb[3] || 48;
+    /* Тонкая сетка на 25 / 50 / 75 % — даёт визуальную шкалу. Рисуем всегда,
+       даже когда истории ещё нет — чтобы график не «прыгал» при появлении данных. */
+    const gridY = [25, 50, 75].map((p) => {
+      const y = (H - (p / 100) * H).toFixed(2);
+      const cls = p === 50 ? 'spark-grid spark-grid-mid' : 'spark-grid';
+      return `<line class="${cls}" x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
+    }).join('');
     if (!values || values.length < 2) {
-      svg.innerHTML = '';
+      svg.innerHTML = gridY;
       return;
     }
-    const maxX = 100;
-    const maxY = 24;
-    const stepX = maxX / (values.length - 1);
+    const stepX = W / (values.length - 1);
     const points = values.map((v, i) => {
       const x = i * stepX;
-      const y = maxY - (v / 100) * maxY;
+      const y = H - (v / 100) * H;
       return `${x.toFixed(2)} ${y.toFixed(2)}`;
     });
     const linePath = `M ${points.join(' L ')}`;
-    const fillPath = `${linePath} L ${maxX} ${maxY} L 0 ${maxY} Z`;
-    svg.innerHTML = `<path class="spark-fill" d="${fillPath}"></path><path class="spark-line" d="${linePath}"></path>`;
+    const fillPath = `${linePath} L ${W.toFixed(2)} ${H} L 0 ${H} Z`;
+    /* Маркер текущего значения внутри SVG не рисуем: viewBox идёт с
+       preserveAspectRatio="none", и любая <circle> превращается в овал,
+       а на правом краю ещё и обрезается границей. «Сейчас X%» под графиком
+       и так передаёт текущее значение — отдельный визуальный маркер избыточен. */
+    svg.innerHTML = `${gridY}<path class="spark-fill" d="${fillPath}"></path><path class="spark-line" d="${linePath}"></path>`;
+  };
+  /* Под графиком: «сейчас X% · min Y% · max Z%» из истории. */
+  const renderSparkStats = (field, values) => {
+    const el = document.querySelector(`[data-operations-field="${field}"]`);
+    if (!el) return;
+    if (!values || !values.length) { el.innerHTML = ''; return; }
+    const now = values[values.length - 1];
+    let min = values[0], max = values[0];
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] < min) min = values[i];
+      if (values[i] > max) max = values[i];
+    }
+    const fmt = (n) => `${Number(n).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 0 })}%`;
+    el.innerHTML =
+      `<span class="spark-stat-now">${escapeHtml(uiT('admin.monitor.sparkNow'))} ${escapeHtml(fmt(now))}</span>` +
+      `<span>${escapeHtml(uiT('admin.monitor.sparkMin'))} ${escapeHtml(fmt(min))}</span>` +
+      `<span>${escapeHtml(uiT('admin.monitor.sparkMax'))} ${escapeHtml(fmt(max))}</span>`;
   };
 
   const refresh = async () => {
@@ -1940,11 +1973,23 @@ async function pollOperationsDashboard() {
       };
       const loc = getUiLocale() === 'en' ? 'en-US' : 'ru-RU';
       const mb = (Number(operations.cacheApproxBytes) || 0) / 1024 / 1024;
-      const cpu = Number(operations.cpuPercent);
+      /* CPU: оба значения (% от всех ядер / % от одного ядра). */
+      const cpuAll = Number(operations.cpuAll ?? operations.cpuPercent);
+      const cpuSingle = Number(operations.cpuSingle);
+      /* «Память приложения» = RSS (как в htop / диспетчере задач), а не V8 heap.
+         Heap показывает только JS-объекты (~5% от реального потребления у нас),
+         основная масса сидит в нативной памяти SQLite page cache. */
       const rssMb = Number(operations.memoryMB);
       const systemMb = Number(operations.systemMemoryMB);
+      const memPct = Number.isFinite(rssMb) && Number.isFinite(systemMb) && systemMb > 0
+        ? Math.max(0, Math.min(100, (rssMb / systemMb) * 100))
+        : 0;
       const diskTotalMb = Number(operations.diskTotalMB);
       const diskFreeMb = Number(operations.diskFreeMB);
+      /* «База данных»: размер файла + цветной стэковый бар разбивки по категориям.
+         Бар — это структура (что внутри), а не «процент диска» (всегда был ~0). */
+      const dbBytes = Number(operations.dbSizeBytes);
+      const dbMb = Number.isFinite(dbBytes) && dbBytes > 0 ? dbBytes / 1024 / 1024 : NaN;
       const diskUsedMb = Number.isFinite(diskTotalMb) && Number.isFinite(diskFreeMb)
         ? Math.max(0, diskTotalMb - diskFreeMb)
         : NaN;
@@ -1959,22 +2004,46 @@ async function pollOperationsDashboard() {
         : upHrs
           ? `${upHrs}h ${upMin}m`
           : `${upMin}m`;
+      /* Живые библиотечные счётчики наверху дашборда (книги/авторы/серии/скрытые/последняя индексация).
+         Сервер кладёт их в operations.{totalBooks,totalAuthors,totalSeries,suppressedCount,lastIndexImported,lastIndexUnique} —
+         без этого панель показывала бы значения, замороженные на момент server-side рендера. */
+      const lastImported = Math.max(0, Math.floor(Number(operations.lastIndexImported) || 0));
+      const lastUnique = Math.max(0, Math.floor(Number(operations.lastIndexUnique) || 0));
+      const lastIndexText = (lastImported > 0 || lastUnique > 0)
+        ? uiTp('admin.statsLastIndex', { imported: lastImported.toLocaleString(loc), unique: lastUnique.toLocaleString(loc) })
+        : uiT('admin.statsLastIndexEmpty');
       const operationsFields = {
+        statsBooks: uiCountLabel('book', Number(operations.totalBooks) || 0),
+        statsAuthors: uiCountLabel('author', Number(operations.totalAuthors) || 0),
+        statsSeries: uiCountLabel('series', Number(operations.totalSeries) || 0),
+        statsSuppressed: uiTp('admin.statsSuppressed', { n: (Number(operations.suppressedCount) || 0).toLocaleString(loc) }),
+        statsLastIndex: lastIndexText,
         appVersion: 'v' + (operations.appVersion || '?'),
         lastRepairAt: `${uiT('app.lastRepair')} ${operations.lastRepairAt || uiT('common.dash')}`,
         lastRepairError: operations.lastRepairError || '',
         cacheCountInline: `${uiCountLabel('record', operations.cacheCount)} · ${mb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('app.unitMb')}`,
-        monitorCpu: `${uiT('admin.monitor.cpu')}: ${Number.isFinite(cpu) ? cpu.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}%`,
-        monitorRam: `${uiT('admin.monitor.ram')}: ${Number.isFinite(rssMb) ? rssMb.toLocaleString(loc) : uiT('common.dash')} ${uiT('app.unitMb')}`,
-        monitorDisk: `${uiT('admin.monitor.disk')}: ${Number.isFinite(diskFreeGb) && Number.isFinite(diskTotalGb)
-          ? uiTp('admin.monitor.diskFreeOf', {
-            free: diskFreeGb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
-            total: diskTotalGb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
-            unit: uiT('app.unitGb')
-          })
-          : uiT('common.dash')}`,
+        /* CPU: оба значения. Полоска ниже базируется на cpuSingle (более показательно для нас). */
+        monitorCpu: `${Number.isFinite(cpuAll) ? cpuAll.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}% / ${Number.isFinite(cpuSingle) ? cpuSingle.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}% ${uiT('admin.monitor.cpuSingleSuffix')}`,
+        /* RSS как для тайла «Память приложения». Авто-единицы + «из X ГБ». */
+        monitorMem: (() => {
+          if (!Number.isFinite(rssMb)) return uiT('common.dash');
+          const cur = rssMb >= 1024
+            ? `${(rssMb / 1024).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${uiT('common.unitGB') || uiT('app.unitGb')}`
+            : `${rssMb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${uiT('common.unitMB')}`;
+          if (!Number.isFinite(systemMb) || systemMb <= 0) return cur;
+          const totalStr = systemMb >= 1024
+            ? `${(systemMb / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('common.unitGB') || uiT('app.unitGb')}`
+            : `${systemMb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${uiT('common.unitMB')}`;
+          return `${cur} ${uiTp('admin.monitor.memOfTotal', { total: totalStr })}`;
+        })(),
+        /* «База данных»: размер файла. При >1 ГБ показываем в ГБ. */
+        monitorDb: Number.isFinite(dbMb)
+          ? (dbMb >= 1024
+            ? `${(dbMb / 1024).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${uiT('common.unitGB') || uiT('app.unitGb')}`
+            : `${dbMb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('common.unitMB')}`)
+          : uiT('common.dash'),
+        /* monitorDisk теперь обновляется отдельным блоком ниже (Used/Free/Total). */
         monitorUptime: `${uiT('admin.monitor.uptime')}: ${upText}`,
-        monitorDb: `${uiT('admin.monitor.db')}: ${operations.dbSizeBytes ? ((Number(operations.dbSizeBytes) / 1024 / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })) : uiT('common.dash')} ${uiT('app.unitMb')}`,
         monitorUsers: `${uiT('admin.monitor.users')}: ${uiTp('admin.monitor.usersFmt', {
           total: (Number(operations.totalUsers) || 0).toLocaleString(loc),
           online: (Number(operations.onlineUsers) || 0).toLocaleString(loc)
@@ -1993,16 +2062,58 @@ async function pollOperationsDashboard() {
       }
 
       const monitorBars = {
-        monitorCpuBar: Number.isFinite(cpu) ? Math.max(0, Math.min(100, cpu)) : 0,
-        monitorRamBar: Number.isFinite(rssMb) && Number.isFinite(systemMb) && systemMb > 0
-          ? Math.max(0, Math.min(100, (rssMb / systemMb) * 100))
-          : 0,
+        /* CPU-полоска опирается на cpuSingle: 1 ядро = реальный лимит для нашей синхронной нагрузки. */
+        monitorCpuBar: Number.isFinite(cpuSingle) ? Math.max(0, Math.min(100, cpuSingle)) : 0,
+        monitorMemBar: memPct,
         monitorDiskBar: Number.isFinite(diskUsedMb) && Number.isFinite(diskTotalMb) && diskTotalMb > 0
           ? Math.max(0, Math.min(100, (diskUsedMb / diskTotalMb) * 100))
-          : 0,
-        monitorDbBar: operations.dbSizeBytes
-          ? Math.max(0, Math.min(100, (Number(operations.dbSizeBytes) / 1024 / 1024 / 2048) * 100))
           : 0
+      };
+
+      /* Перестраиваем разбивку БД (стэковый бар + легенда) если данные пришли. */
+      const dbBreakdown = operations.dbBreakdown;
+      if (dbBreakdown && Array.isArray(dbBreakdown.segments)) {
+        const fmtSize = (bytes) => {
+          const n = Number(bytes) || 0;
+          if (n >= 1024 * 1024 * 1024) return `${(n / (1024*1024*1024)).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${uiT('common.unitGB') || uiT('app.unitGb')}`;
+          if (n >= 1024 * 1024) return `${(n / (1024*1024)).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('common.unitMB')}`;
+          if (n >= 1024) return `${(n / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('common.unitKB') || 'KB'}`;
+          return `${n} B`;
+        };
+        const stackEl = document.querySelector('[data-operations-field="monitorDbStack"]');
+        if (stackEl) {
+          stackEl.innerHTML = dbBreakdown.segments.map((s) => {
+            const label = uiT('admin.monitor.dbSeg.' + s.key) || s.key;
+            const size = fmtSize(s.bytes);
+            return `<span class="db-seg db-seg-${escapeHtml(s.key)}" style="width:${Number(s.pct).toFixed(2)}%" title="${escapeHtml(label)}: ${escapeHtml(size)}"></span>`;
+          }).join('');
+        }
+        const legendEl = document.querySelector('[data-operations-field="monitorDbLegend"]');
+        if (legendEl) {
+          legendEl.innerHTML = dbBreakdown.segments.map((s) => {
+            const label = uiT('admin.monitor.dbSeg.' + s.key) || s.key;
+            const size = fmtSize(s.bytes);
+            return `<span class="db-legend-item"><i class="db-seg-dot db-seg-${escapeHtml(s.key)}"></i><span class="db-legend-label">${escapeHtml(label)}</span><span class="db-legend-size muted">${escapeHtml(size)}</span></span>`;
+          }).join('');
+        }
+      }
+      /* Тот же градиент severity, что и на сервере. Используется и для полосок
+         (линейная заливка), и для donut-индикатора диска (solid цвет stroke). */
+      const monitorSeverityColor = (pct) => {
+        const p = Math.max(0, Math.min(100, Number(pct) || 0));
+        const c0 = { r: 63, g: 185, b: 94 };
+        const c1 = { r: 226, g: 187, b: 79 };
+        const c2 = { r: 217, g: 80, b: 80 };
+        const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+        let out;
+        if (p <= 70) {
+          const t = p / 70;
+          out = { r: lerp(c0.r, c1.r, t), g: lerp(c0.g, c1.g, t), b: lerp(c0.b, c1.b, t) };
+        } else {
+          const t = (p - 70) / 30;
+          out = { r: lerp(c1.r, c2.r, t), g: lerp(c1.g, c2.g, t), b: lerp(c1.b, c2.b, t) };
+        }
+        return `rgb(${out.r}, ${out.g}, ${out.b})`;
       };
       const monitorBarGradient = (pct) => {
         const p = Math.max(0, Math.min(100, Number(pct) || 0));
@@ -2027,9 +2138,34 @@ async function pollOperationsDashboard() {
         bar.style.background = monitorBarGradient(pct);
       }
       pushSparkHistory(cpuHistory, monitorBars.monitorCpuBar);
-      pushSparkHistory(ramHistory, monitorBars.monitorRamBar);
+      pushSparkHistory(memHistory, monitorBars.monitorMemBar);
       renderSparkline('monitorCpuSpark', cpuHistory);
-      renderSparkline('monitorRamSpark', ramHistory);
+      renderSparkline('monitorMemSpark', memHistory);
+      renderSparkStats('monitorCpuStats', cpuHistory);
+      renderSparkStats('monitorMemStats', memHistory);
+
+      /* Диск: процент справа, толстая полоса с градиентом + три статистики снизу.
+         monitorDiskBar — уже занятая в monitorBars-цикле, она апдейтит .disk-bar-fill
+         (width + background) автоматически по полю data-operations-field. Здесь
+         только цифра процента и три текстовые статистики. */
+      const diskPctVal = monitorBars.monitorDiskBar;
+      const diskPctEl = document.querySelector('[data-operations-field="monitorDiskPct"]');
+      if (diskPctEl) diskPctEl.textContent = `${diskPctVal.toFixed(0)}%`;
+      const fmtDisk = (mb) => {
+        if (!Number.isFinite(mb)) return uiT('common.dash');
+        if (mb >= 1024) return `${(mb / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('common.unitGB') || uiT('app.unitGb')}`;
+        return `${mb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${uiT('common.unitMB')}`;
+      };
+      const diskStats = [
+        { sel: 'monitorDiskUsed',  label: uiT('admin.monitor.diskUsedLabel'),  value: fmtDisk(diskUsedMb) },
+        { sel: 'monitorDiskFree',  label: uiT('admin.monitor.diskFreeLabel'),  value: fmtDisk(diskFreeMb) },
+        { sel: 'monitorDiskTotal', label: uiT('admin.monitor.diskTotalLabel'), value: fmtDisk(diskTotalMb) }
+      ];
+      for (const s of diskStats) {
+        const el = document.querySelector(`[data-operations-field="${s.sel}"]`);
+        if (!el) continue;
+        el.innerHTML = `<span class="muted">${escapeHtml(s.label)}</span><strong>${escapeHtml(s.value)}</strong>`;
+      }
 
       const operationButtons = [...document.querySelectorAll('[data-operation-action]')];
       for (const button of operationButtons) {
@@ -2545,7 +2681,8 @@ function renderCardHtml(book, { batchSelect = false, seriesContext = null } = {}
   const batchCb = batchSelect
     ? `<label class="batch-select-hit" title="${escapeHtml(uiT('batch.selectTitle'))}"><input type="checkbox" class="batch-select-cb" id="batch-select-${safeDomIdPart(book.id)}" name="batch-select-${safeDomIdPart(book.id)}" data-batch-book-id="${id}" aria-label="${escapeHtml(uiT('batch.selectAria'))}"></label>`
     : '';
-  const coverRating = book.libRate ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>` : '';
+  const _libRateClamped = Math.max(0, Math.min(5, Math.floor(Number(book.libRate) || 0)));
+  const coverRating = _libRateClamped ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${_libRateClamped}">${Array.from({ length: _libRateClamped }, () => '<span>★</span>').join('')}</span></span>` : '';
   return `<article class="card" data-book-id="${id}">
     ${batchCb}
     <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
@@ -4278,6 +4415,7 @@ function attachSourcesReindex() {
         const stillBusy = Boolean(status?.active) || phase === 'maintenance';
         if (stillBusy) {
           const imported = Math.max(0, Math.floor(Number(status.importedBooks) || 0));
+          const unique = Math.max(0, Math.floor(Number(status.uniqueBooks) || 0));
           const phaseDone = Number(status.phaseDone || 0);
           const phaseTotal = Number(status.phaseTotal || 0);
           const phaseLabel = String(status.phaseLabel || '');
@@ -4296,7 +4434,7 @@ function attachSourcesReindex() {
             detail = phaseLabel ? `<span class="muted" style="margin-left:12px">${escapeHtml(phaseLabel)}</span>` : '';
           } else {
             percent = status.totalArchives ? Math.min(100, Math.round((status.processedArchives / status.totalArchives) * 100)) : 0;
-            detail = `<span class="muted" style="margin-left:12px">${escapeHtml(uiTp('app.adminIndexFilesLine', { processed: status.processedArchives || 0, total: status.totalArchives || 0, imported }))}</span>`;
+            detail = `<span class="muted" style="margin-left:12px">${escapeHtml(uiTp('app.adminIndexFilesLine', { processed: status.processedArchives || 0, total: status.totalArchives || 0, imported, unique }))}</span>`;
           }
           const showEta = !phase || phase === 'archives';
           const archiveLabel = status.currentArchive ? escapeHtml(status.currentArchive) : '';
@@ -4669,6 +4807,18 @@ attachCoverErrorFallback(document);
 loadBookPageReview();
 attachBookmarkActions();
 attachReadBookActions();
+
+/* Кнопка «Отмена» в редакторе метаданных книги: откатывает поля формы
+   к исходным значениям (form.reset()) и закрывает <details>. */
+document.querySelectorAll('[data-book-edit-cancel]').forEach((btn) => {
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    const form = btn.closest('form');
+    if (form && typeof form.reset === 'function') form.reset();
+    const details = btn.closest('details');
+    if (details) details.open = false;
+  });
+});
 attachCoverLongPress();
 attachSeriesLongPress();
 attachMarkSeriesReadActions();
@@ -4722,6 +4872,13 @@ function attachDirtyFormTracking() {
     };
     form.addEventListener('input', check);
     form.addEventListener('change', check);
+    /* При сабмите снимаем «грязный» флаг: иначе beforeunload, который стреляет
+       перед уходом на POST/redirect, увидит .is-dirty и покажет «Покинуть страницу?».
+       Если сабмит провалится — сервер отдаст redirect с flash, страница перерендерится,
+       initial пересчитается заново. */
+    form.addEventListener('submit', () => {
+      form.classList.remove('is-dirty');
+    });
   });
   window.addEventListener('beforeunload', (e) => {
     if (document.querySelector('form.is-dirty')) {
@@ -4776,6 +4933,9 @@ function attachDirtyFormTracking() {
         triggerBtn.innerHTML = prevHtml;
       }
     }
+    /* После любой мутации (удаление / автоочистка / восстановление) данные устарели —
+       сбрасываем sessionStorage-кеш, чтобы reload-запрос точно перетёр результаты. */
+    invalidateDupCache();
     loadDuplicates(currentPage);
   }
 
@@ -4905,8 +5065,83 @@ function attachDirtyFormTracking() {
 
   var resultsEl = document.getElementById('dup-results');
 
+  /* Кеш результатов в sessionStorage: при возврате на страницу пользователь
+     видит прошлый список МГНОВЕННО, а свежий запрос идёт фоном и заменяет
+     UI когда придёт. Кеш живёт пока открыта вкладка; на действиях
+     удаления/автоочистки чистится принудительно (см. dupAction → invalidateCache). */
+  var DUP_CACHE_KEY_PREFIX = 'inpx-dup-cache-v1:';
+  var DUP_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // не показываем кеш старше 30 минут
+  function dupCacheKey(page) { return DUP_CACHE_KEY_PREFIX + 'page-' + page; }
+  function readDupCache(page) {
+    try {
+      var raw = sessionStorage.getItem(dupCacheKey(page));
+      if (!raw) return null;
+      var obj = JSON.parse(raw);
+      if (!obj || !obj.ts) return null;
+      if (Date.now() - obj.ts > DUP_CACHE_MAX_AGE_MS) return null;
+      return obj;
+    } catch (e) { return null; }
+  }
+  function writeDupCache(page, data, sdata) {
+    try {
+      sessionStorage.setItem(dupCacheKey(page), JSON.stringify({ ts: Date.now(), data: data, sdata: sdata }));
+    } catch (e) { /* квота переполнилась или storage недоступен — игнорируем */ }
+  }
+  function invalidateDupCache() {
+    try {
+      var keys = [];
+      for (var i = 0; i < sessionStorage.length; i++) {
+        var k = sessionStorage.key(i);
+        if (k && k.indexOf(DUP_CACHE_KEY_PREFIX) === 0) keys.push(k);
+      }
+      keys.forEach(function(k) { sessionStorage.removeItem(k); });
+    } catch (e) {}
+  }
+
+  function renderDupResults(data, sdata, isStale) {
+    var staleBadge = isStale
+      ? '<div class="muted" style="font-size:.85em;margin:0 0 8px 0;display:flex;align-items:center;gap:8px"><span class="btn-spinner" style="width:12px;height:12px"></span>' + escapeHtml(uiT('admin.duplicates.refreshing')) + '</div>'
+      : '';
+    var html = staleBadge
+      + renderAutoCleanPanel(data.preview)
+      + '<div class="admin-card">'
+      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.cardTitle')) + '</div>'
+      + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.cardSubtitle')) + '</div>'
+      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.totalGroups', { n: data.total })) + '</div>'
+      + renderGroups(data.groups)
+      + renderPagination(data.total, data.pageSize, data.page)
+      + '</div>'
+      + renderSuppressedSection(sdata && sdata.ok ? sdata : { total: 0, rows: [] });
+    resultsEl.innerHTML = html;
+    wireActions();
+  }
+
+  function showDupProgress() {
+    /* Поиск дубликатов — это один большой SQL GROUP BY, реального прогресса от сервера нет;
+       показываем неопределённую полоску прогресса (как для фаз индексации без измерения). */
+    resultsEl.innerHTML =
+      '<div class="admin-card" style="padding:24px;">'
+        + '<div style="font-size:1.05em;font-weight:500;margin-bottom:6px;">' + escapeHtml(uiT('admin.duplicates.searching')) + '</div>'
+        + '<div class="muted" style="font-size:.9em;margin-bottom:12px;">' + escapeHtml(uiT('admin.duplicates.searchingHint')) + '</div>'
+        + '<div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden">'
+        + '<div class="progress-indeterminate" style="height:100%;width:100%;background:var(--accent);"></div>'
+        + '</div>'
+      + '</div>';
+  }
+
   function loadDuplicates(page) {
-    resultsEl.innerHTML = '<div class="admin-card" style="text-align:center;padding:48px 24px;"><div class="spinner" style="margin:0 auto 16px;"></div><div style="font-size:1.05em;font-weight:500;">' + escapeHtml(uiT('admin.duplicates.searching')) + '</div><div class="muted" style="margin-top:6px;font-size:.9em;">' + escapeHtml(uiT('admin.duplicates.searchingHint')) + '</div></div>';
+    /* Шаг 1: если есть кеш — рендерим прошлый результат МГНОВЕННО.
+       Иначе показываем полоску прогресса. */
+    var cached = readDupCache(page);
+    var shownFromCache = false;
+    if (cached && cached.data && cached.data.ok) {
+      renderDupResults(cached.data, cached.sdata, true);
+      shownFromCache = true;
+    } else {
+      showDupProgress();
+    }
+
+    /* Шаг 2: всегда тянем свежие данные фоном и заменяем UI когда придут. */
     Promise.all([
       fetch('/api/admin/duplicates?page=' + page).then(function(r) { return r.json(); }),
       fetch('/api/admin/suppressed').then(function(r) { return r.json(); })
@@ -4914,35 +5149,119 @@ function attachDirtyFormTracking() {
       .then(function(results) {
         var data = results[0];
         var sdata = results[1];
-        if (!data.ok) {
-          resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error loading duplicates</p></div>';
+        if (!data || !data.ok) {
+          if (!shownFromCache) {
+            resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error loading duplicates</p></div>';
+          }
           return;
         }
-        var html = renderAutoCleanPanel(data.preview)
-          + '<div class="admin-card">'
-          + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.cardTitle')) + '</div>'
-          + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.cardSubtitle')) + '</div>'
-          + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.totalGroups', { n: data.total })) + '</div>'
-          + renderGroups(data.groups)
-          + renderPagination(data.total, data.pageSize, data.page)
-          + '</div>'
-          + renderSuppressedSection(sdata.ok ? sdata : { total: 0, rows: [] });
-        resultsEl.innerHTML = html;
-        wireActions();
+        renderDupResults(data, sdata, false);
+        writeDupCache(page, data, sdata);
       })
       .catch(function(err) {
-        resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error: ' + escapeHtml(String(err)) + '</p></div>';
+        if (!shownFromCache) {
+          resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error: ' + escapeHtml(String(err)) + '</p></div>';
+        }
+        /* Если кеш уже отрисован — оставляем его, не ломаем UI ошибкой. */
       });
   }
 
-  var startBtn = document.getElementById('dup-start-btn');
-  if (startBtn) {
-    startBtn.addEventListener('click', function() {
-      document.getElementById('dup-start-container').style.display = 'none';
-      resultsEl.style.display = '';
-      loadDuplicates(1);
+  /* Автоматический запуск при заходе: либо мгновенный рендер из кеша,
+     либо полоска прогресса + фоновый запрос. */
+  loadDuplicates(currentPage);
+})();
+
+/* ── Форма расписания сканирования: переключение видимости полей по выбранному режиму
+   и периодический поллинг /api/admin/scan-schedule, чтобы чип «Следующий запуск»
+   и история запусков были живыми без перезагрузки страницы. ── */
+(function initScanScheduleForm() {
+  const form = document.querySelector('[data-scan-schedule-form]');
+  if (!form) return;
+
+  const modeSelect = form.querySelector('[data-scan-schedule-mode]');
+  const sections = form.querySelectorAll('[data-scan-schedule-when]');
+  function applyMode() {
+    const mode = modeSelect ? modeSelect.value : 'off';
+    sections.forEach(function(node) {
+      const when = node.getAttribute('data-scan-schedule-when');
+      if (when === mode) node.removeAttribute('hidden');
+      else node.setAttribute('hidden', '');
     });
   }
+  if (modeSelect) {
+    modeSelect.addEventListener('change', applyMode);
+    applyMode();
+  }
+
+  const nextRunEl = form.querySelector('[data-scan-schedule-next]');
+  const logBody = form.querySelector('[data-scan-schedule-log]');
+  /* fmtDateTime: используем браузерный toLocaleString — серверный formatLocaleDateTimeShort
+     недоступен в клиенте, но локаль уже корректно определяется через getUiLocale(). */
+  function fmtDateTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    const loc = getUiLocale() === 'en' ? 'en-US' : 'ru-RU';
+    try {
+      return d.toLocaleString(loc, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      return d.toLocaleString();
+    }
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch('/api/admin/scan-schedule', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.ok) return;
+
+      const mode = data.schedule && data.schedule.mode;
+      if (nextRunEl) {
+        let line;
+        if (!mode || mode === 'off' || !data.nextRunAt) {
+          line = uiT('admin.schedule.nextRunNone');
+        } else {
+          line = uiTp('admin.schedule.nextRun', { when: fmtDateTime(data.nextRunAt) });
+        }
+        nextRunEl.textContent = line;
+        nextRunEl.setAttribute('data-next-run-at', data.nextRunAt || '');
+      }
+
+      if (logBody && Array.isArray(data.log)) {
+        if (!data.log.length) {
+          logBody.innerHTML = '<tr><td colspan="3" class="muted" style="text-align:center;padding:8px">'
+            + escapeHtml(uiT('admin.schedule.logEmpty')) + '</td></tr>';
+        } else {
+          logBody.innerHTML = data.log.map(function(row) {
+            const kind = row.full ? uiT('admin.schedule.kindFull') : uiT('admin.schedule.kindIncremental');
+            let status;
+            if (row.status === 'error') {
+              status = escapeHtml(uiT('admin.schedule.statusError')) + ': ' + escapeHtml(row.message || '');
+            } else if (row.status === 'ok') {
+              status = escapeHtml(uiT('admin.schedule.statusOk'));
+            } else {
+              status = escapeHtml(uiT('admin.schedule.statusStarted'));
+            }
+            return '<tr>'
+              + '<td>' + escapeHtml(fmtDateTime(row.ranAt)) + '</td>'
+              + '<td><span class="admin-chip" style="font-size:.85em">' + escapeHtml(kind) + '</span></td>'
+              + '<td>' + status + '</td>'
+              + '</tr>';
+          }).join('');
+        }
+      }
+    } catch (e) {
+      /* network hiccups — silent; следующая итерация попробует снова */
+    }
+  }
+
+  /* Опрос каждые 30 секунд: «Следующий запуск» обычно меняется на минутах,
+     чаще — лишний шум. */
+  setInterval(refresh, 30_000);
+  /* Первый отложенный refresh — чтобы подтянуть свежее значение nextRunAt
+     после перезагрузки страницы (а вдруг таймер сработал между рендером и DOM). */
+  setTimeout(refresh, 1500);
 })();
 
 // PWA: Service Worker registered by pageShell with versioned URL

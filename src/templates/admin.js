@@ -10,7 +10,25 @@ import {
 } from './shared.js';
 import { getGenreGroups } from '../genre-map.js';
 
-export function renderOperations({ user, stats = {}, indexStatus = {}, operations = {}, siteName = '', homeSubtitle = '', csrfToken = '' }) {
+export function renderOperations({ user, stats = {}, indexStatus = {}, operations = {}, siteName = '', homeSubtitle = '', defaultLocale = 'auto', csrfToken = '' }) {
+  /* Сплошной цвет по тому же градиенту (для одиночных элементов — donut, иконки и т.п.).
+     0-70% → зелёный → жёлтый; 70-100% → жёлтый → красный. */
+  const monitorSeverityColor = (value) => {
+    const pct = Math.max(0, Math.min(100, Number(value) || 0));
+    const c0 = { r: 63, g: 185, b: 94 };
+    const c1 = { r: 226, g: 187, b: 79 };
+    const c2 = { r: 217, g: 80, b: 80 };
+    const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+    let out;
+    if (pct <= 70) {
+      const t = pct / 70;
+      out = { r: lerp(c0.r, c1.r, t), g: lerp(c0.g, c1.g, t), b: lerp(c0.b, c1.b, t) };
+    } else {
+      const t = (pct - 70) / 30;
+      out = { r: lerp(c1.r, c2.r, t), g: lerp(c1.g, c2.g, t), b: lerp(c1.b, c2.b, t) };
+    }
+    return `rgb(${out.r}, ${out.g}, ${out.b})`;
+  };
   const monitorBarGradient = (value) => {
     const pct = Math.max(0, Math.min(100, Number(value) || 0));
     const c0 = { r: 63, g: 185, b: 94 };   // green
@@ -45,13 +63,46 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
   const uptimeStr = days ? `${days}${dU} ${hrs}${hU} ${mins}${mU}` : hrs ? `${hrs}${hU} ${mins}${mU}` : `${mins}${mU}`;
   const dbSizeMB = operations.dbSizeBytes ? (operations.dbSizeBytes / 1024 / 1024).toFixed(1) : t('common.dash');
   const loc = getLocale() === 'en' ? 'en-US' : 'ru-RU';
-  const cpuPct = Number(operations.cpuPercent);
-  const cpuStr = Number.isFinite(cpuPct) ? cpuPct.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : t('common.dash');
-  const systemMemMb = Number(operations.systemMemoryMB);
+  /* CPU: показываем оба значения — % от всех ядер (полоска) и % от одного ядра (правее).
+     Полезно именно нам: better-sqlite3+Express однопоточные, занятость 1 ядра = реальный лимит. */
+  const cpuAllPct = Number(operations.cpuAll ?? operations.cpuPercent);
+  const cpuSinglePct = Number(operations.cpuSingle);
+  const fmtPct = (n) => Number.isFinite(n) ? n.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : t('common.dash');
+  const cpuStr = `${fmtPct(cpuAllPct)}% / ${fmtPct(cpuSinglePct)}% ${escapeHtml(t('admin.monitor.cpuSingleSuffix'))}`;
+  /* «Память приложения»: RSS (Resident Set Size) — то, что показывает ОС в htop.
+     Раньше я показывал V8 heap, но это лишь ~5% от реальной памяти процесса —
+     SQLite page cache живёт в нативной C++-памяти и в heap не видна. Админу нужна
+     цифра, совпадающая с тем, что он видит в системных мониторах. Полоска —
+     доля памяти всего хоста: на 4 ГБ NAS 600 МБ даст осязаемые ~15%. */
   const rssMemMb = Number(operations.memoryMB);
-  const ramPct = Number.isFinite(systemMemMb) && systemMemMb > 0 && Number.isFinite(rssMemMb)
+  const systemMemMb = Number(operations.systemMemoryMB);
+  const memPct = Number.isFinite(rssMemMb) && Number.isFinite(systemMemMb) && systemMemMb > 0
     ? Math.max(0, Math.min(100, (rssMemMb / systemMemMb) * 100))
     : 0;
+  /* Тот же auto-unit как в БД: МБ при <1 ГБ, иначе ГБ. */
+  const fmtMemMb = (mb, totalMb) => {
+    if (!Number.isFinite(mb)) return t('common.dash');
+    const cur = mb >= 1024
+      ? `${(mb / 1024).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${t('common.unitGB')}`
+      : `${mb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${t('common.unitMB')}`;
+    if (!Number.isFinite(totalMb) || totalMb <= 0) return cur;
+    const totalStr = totalMb >= 1024
+      ? `${(totalMb / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${t('common.unitGB')}`
+      : `${totalMb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${t('common.unitMB')}`;
+    return `${cur} ${escapeHtml(tp('admin.monitor.memOfTotal', { total: totalStr }))}`;
+  };
+  const memStr = fmtMemMb(rssMemMb, systemMemMb);
+  /* Event-loop lag — главный индикатор «висит/не висит» сервер.
+     Полоска нормализована к 200мс (всё что выше 200мс — это уже плохо). */
+  const loopP50 = Number(operations.loopLagP50Ms);
+  const loopP99 = Number(operations.loopLagP99Ms);
+  const loopPct = Number.isFinite(loopP99)
+    ? Math.max(0, Math.min(100, (loopP99 / 200) * 100))
+    : 0;
+  const loopStr = Number.isFinite(loopP50) && Number.isFinite(loopP99)
+    ? `p50 ${loopP50.toLocaleString(loc, { maximumFractionDigits: 1 })} · p99 ${loopP99.toLocaleString(loc, { maximumFractionDigits: 1 })} ${escapeHtml(t('common.unitMs'))}`
+    : t('common.dash');
+
   const diskTotal = Number(operations.diskTotalMB);
   const diskFree = Number(operations.diskFreeMB);
   const diskUsed = Number.isFinite(diskTotal) && Number.isFinite(diskFree)
@@ -62,10 +113,6 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
   const diskPct = Number.isFinite(diskUsed) && Number.isFinite(diskTotal) && diskTotal > 0
     ? Math.max(0, Math.min(100, (diskUsed / diskTotal) * 100))
     : 0;
-  const dbMbNum = Number(dbSizeMB);
-  const dbPct = Number.isFinite(dbMbNum)
-    ? Math.max(0, Math.min(100, (dbMbNum / 2048) * 100))
-    : 0;
   const diskStr = Number.isFinite(diskFreeGb) && Number.isFinite(diskTotalGb)
     ? escapeHtml(tp('admin.monitor.diskFreeOf', {
       free: diskFreeGb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
@@ -73,6 +120,42 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
       unit: t('common.unitGB')
     }))
     : t('common.dash');
+  /* Раздельные значения для статистики под полосой (used / free / total).
+     Авто-единица: при ≥1 ГБ — ГБ, иначе МБ. */
+  const fmtDiskMb = (mb) => {
+    if (!Number.isFinite(mb)) return t('common.dash');
+    if (mb >= 1024) return `${(mb / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${t('common.unitGB')}`;
+    return `${mb.toLocaleString(loc, { maximumFractionDigits: 0 })} ${t('common.unitMB')}`;
+  };
+  const diskUsedStr = fmtDiskMb(diskUsed);
+  const diskFreeStr = fmtDiskMb(diskFree);
+  const diskTotalStr = fmtDiskMb(diskTotal);
+  /* «База данных»: цветной сегментированный бар по категориям содержимого
+     (Книги / Каталоги / Кеш обложек / Сайдкары / Активность / Прочее).
+     dbSize/diskTotal-полоска всегда болталась у нуля — не информативно.
+     Здесь сразу видно «что весит больше всего» — обычно либо книги+FTS,
+     либо кеш обложек, а каталоги и активность остаются тонкой полоской. */
+  const dbMbNum = Number(dbSizeMB);
+  const dbStr = Number.isFinite(dbMbNum)
+    ? (dbMbNum >= 1024
+      ? `${(dbMbNum / 1024).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${escapeHtml(t('common.unitGB'))}`
+      : `${dbMbNum.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${escapeHtml(t('common.unitMB'))}`)
+    : t('common.dash');
+  const dbBreakdown = operations.dbBreakdown || { supported: false, segments: [], total: 0 };
+  /* Подготовка читаемого формата размера сегмента для tooltip и легенды. */
+  const fmtBytes = (bytes) => {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024 * 1024) return `${(n / (1024*1024*1024)).toLocaleString(loc, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${t('common.unitGB')}`;
+    if (n >= 1024 * 1024) return `${(n / (1024*1024)).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${t('common.unitMB')}`;
+    if (n >= 1024) return `${(n / 1024).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${t('common.unitKB') || 'KB'}`;
+    return `${n} B`;
+  };
+  const dbSegmentsHtml = dbBreakdown.segments && dbBreakdown.segments.length
+    ? dbBreakdown.segments.map((s) => `<span class="db-seg db-seg-${escapeHtml(s.key)}" style="width:${s.pct.toFixed(2)}%" title="${escapeHtml(t('admin.monitor.dbSeg.' + s.key) || s.key)}: ${escapeHtml(fmtBytes(s.bytes))}"></span>`).join('')
+    : '';
+  const dbLegendHtml = dbBreakdown.segments && dbBreakdown.segments.length
+    ? dbBreakdown.segments.map((s) => `<span class="db-legend-item"><i class="db-seg-dot db-seg-${escapeHtml(s.key)}"></i><span class="db-legend-label">${escapeHtml(t('admin.monitor.dbSeg.' + s.key) || s.key)}</span><span class="db-legend-size muted">${escapeHtml(fmtBytes(s.bytes))}</span></span>`).join('')
+    : '';
   const cacheMB =
     operations.cacheApproxBytes != null
       ? (operations.cacheApproxBytes / 1024 / 1024).toLocaleString(loc, {
@@ -82,16 +165,28 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
       : t('common.dash');
   const srcCount = (operations.sources || []).length;
   const sourcesLine = srcCount ? countLabel('source', srcCount) : t('admin.sourcesNone');
+  /* Сводка по последней (или текущей) индексации для чипа в верхней панели:
+     показываем только если есть что показать (после первой индексации). */
+  const lastImported = Number(operations.lastIndexImported) || 0;
+  const lastUnique = Number(operations.lastIndexUnique) || 0;
+  const lastIndexSummary = (lastImported > 0 || lastUnique > 0)
+    ? tp('admin.statsLastIndex', {
+        imported: lastImported.toLocaleString(loc),
+        unique: lastUnique.toLocaleString(loc)
+      })
+    : t('admin.statsLastIndexEmpty');
   const content = `
     <div data-operations-dashboard>
 
       <div class="admin-status-bar">
-        <span class="admin-chip"><strong>${countLabel('book', stats.totalBooks)}</strong></span>
-        <span class="admin-chip"><strong>${countLabel('author', stats.totalAuthors)}</strong></span>
-        <span class="admin-chip"><strong>${countLabel('series', stats.totalSeries)}</strong></span>
-        <span class="admin-chip"><strong>${countLabel('archive', indexStatus.totalArchives)}</strong></span>
+        <span class="admin-chip"><strong data-operations-field="statsBooks">${escapeHtml(countLabel('book', Number(operations.totalBooks ?? stats.totalBooks) || 0))}</strong></span>
+        <span class="admin-chip"><strong data-operations-field="statsAuthors">${escapeHtml(countLabel('author', Number(operations.totalAuthors ?? stats.totalAuthors) || 0))}</strong></span>
+        <span class="admin-chip"><strong data-operations-field="statsSeries">${escapeHtml(countLabel('series', Number(operations.totalSeries ?? stats.totalSeries) || 0))}</strong></span>
+        <span class="admin-chip" title="${escapeHtml(t('admin.duplicates.suppressedTitle'))}"><strong data-operations-field="statsSuppressed">${escapeHtml(tp('admin.statsSuppressed', { n: (Number(operations.suppressedCount) || 0).toLocaleString(loc) }))}</strong></span>
         <span class="admin-sep"></span>
         <span class="admin-chip" data-index-field="active">${indexStatus.active ? escapeHtml(t('admin.indexUpdating')) : escapeHtml(t('admin.indexReady'))}</span>
+        <span class="admin-chip" title="${escapeHtml(t('admin.statsLastIndexTitle'))}"><span data-operations-field="statsLastIndex">${escapeHtml(lastIndexSummary)}</span></span>
+        <span class="admin-sep"></span>
         <span class="admin-chip">${escapeHtml(tp('admin.uptime', { s: uptimeStr }))}</span>
         <span class="admin-chip">${escapeHtml(tp('admin.ram', { mb: operations.memoryMB || t('common.dash') }))}</span>
         <span class="admin-chip">${escapeHtml(tp('admin.db', { mb: dbSizeMB }))}</span>
@@ -109,6 +204,15 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
             <label for="admin-home-subtitle">${escapeHtml(t('admin.homeSubtitle'))}</label>
             <input id="admin-home-subtitle" name="homeSubtitle" value="${escapeHtml(homeSubtitle)}" placeholder="${escapeHtml(t('home.subtitle'))}" autocomplete="off">
             <span class="admin-field-hint">${escapeHtml(t('admin.homeSubtitleHint'))}</span>
+          </div>
+          <div class="admin-field-group" style="margin-top:12px">
+            <label for="admin-default-locale">${escapeHtml(t('admin.defaultLocale'))}</label>
+            <select id="admin-default-locale" name="defaultLocale" style="max-width:280px">
+              <option value="auto" ${defaultLocale === 'auto' || (defaultLocale !== 'ru' && defaultLocale !== 'en') ? 'selected' : ''}>${escapeHtml(t('admin.defaultLocaleAuto'))}</option>
+              <option value="ru" ${defaultLocale === 'ru' ? 'selected' : ''}>${escapeHtml(t('admin.defaultLocaleRu'))}</option>
+              <option value="en" ${defaultLocale === 'en' ? 'selected' : ''}>${escapeHtml(t('admin.defaultLocaleEn'))}</option>
+            </select>
+            <span class="admin-field-hint">${escapeHtml(t('admin.defaultLocaleHint'))}</span>
           </div>
           <div class="admin-actions-row">
             <button type="submit">${escapeHtml(t('admin.save'))}</button>
@@ -130,35 +234,67 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
             <strong>${escapeHtml(t('admin.monitor.title'))}</strong>
             <span class="muted">${escapeHtml(t('admin.monitor.hint'))}</span>
             <div class="monitor-grid">
-              <div class="monitor-item" data-monitor-key="cpu">
+              <div class="monitor-item monitor-item--graph" data-monitor-key="cpu" title="${escapeHtml(t('admin.monitor.cpuHint'))}">
                 <div class="monitor-item-top">
                   <span class="monitor-label">${escapeHtml(t('admin.monitor.cpu'))}</span>
-                  <span class="monitor-value" data-operations-field="monitorCpu">${cpuStr}%</span>
+                  <span class="monitor-value" data-operations-field="monitorCpu">${cpuStr}</span>
                 </div>
-                <div class="monitor-meter"><span data-operations-field="monitorCpuBar" style="width:${cpuPct}%;background:${monitorBarGradient(cpuPct)}"></span></div>
-                <svg class="monitor-spark" viewBox="0 0 100 24" preserveAspectRatio="none" data-operations-field="monitorCpuSpark" aria-hidden="true"></svg>
+                <div class="monitor-meter"><span data-operations-field="monitorCpuBar" style="width:${Number.isFinite(cpuSinglePct) ? cpuSinglePct : 0}%;background:${monitorBarGradient(Number.isFinite(cpuSinglePct) ? cpuSinglePct : 0)}"></span></div>
+                <svg class="monitor-spark monitor-spark--lg" viewBox="0 0 100 48" preserveAspectRatio="none" data-operations-field="monitorCpuSpark" aria-hidden="true">
+                  <line class="spark-grid" x1="0" y1="12" x2="100" y2="12"/>
+                  <line class="spark-grid spark-grid-mid" x1="0" y1="24" x2="100" y2="24"/>
+                  <line class="spark-grid" x1="0" y1="36" x2="100" y2="36"/>
+                </svg>
+                <div class="spark-stats" data-operations-field="monitorCpuStats"></div>
               </div>
-              <div class="monitor-item" data-monitor-key="ram">
+              <div class="monitor-item monitor-item--graph" data-monitor-key="mem" title="${escapeHtml(t('admin.monitor.memHint'))}">
                 <div class="monitor-item-top">
-                  <span class="monitor-label">${escapeHtml(t('admin.monitor.ram'))}</span>
-                  <span class="monitor-value" data-operations-field="monitorRam">${escapeHtml(String(operations.memoryMB || t('common.dash')))} ${escapeHtml(t('common.unitMB'))}</span>
+                  <span class="monitor-label">${escapeHtml(t('admin.monitor.mem'))}</span>
+                  <span class="monitor-value" data-operations-field="monitorMem">${memStr}</span>
                 </div>
-                <div class="monitor-meter"><span data-operations-field="monitorRamBar" style="width:${ramPct.toFixed(1)}%;background:${monitorBarGradient(ramPct)}"></span></div>
-                <svg class="monitor-spark" viewBox="0 0 100 24" preserveAspectRatio="none" data-operations-field="monitorRamSpark" aria-hidden="true"></svg>
+                <div class="monitor-meter"><span data-operations-field="monitorMemBar" style="width:${memPct.toFixed(1)}%;background:${monitorBarGradient(memPct)}"></span></div>
+                <svg class="monitor-spark monitor-spark--lg" viewBox="0 0 100 48" preserveAspectRatio="none" data-operations-field="monitorMemSpark" aria-hidden="true">
+                  <line class="spark-grid" x1="0" y1="12" x2="100" y2="12"/>
+                  <line class="spark-grid spark-grid-mid" x1="0" y1="24" x2="100" y2="24"/>
+                  <line class="spark-grid" x1="0" y1="36" x2="100" y2="36"/>
+                </svg>
+                <div class="spark-stats" data-operations-field="monitorMemStats"></div>
               </div>
-              <div class="monitor-item" data-monitor-key="disk">
+              <div class="monitor-item" data-monitor-key="db" title="${escapeHtml(t('admin.monitor.dbHint'))}">
+                <div class="monitor-item-top">
+                  <span class="monitor-label">${escapeHtml(t('admin.monitor.dbTile'))}</span>
+                  <span class="monitor-value" data-operations-field="monitorDb">${dbStr}</span>
+                </div>
+                <div class="db-stacked-bar" data-operations-field="monitorDbStack">${dbSegmentsHtml}</div>
+                <div class="db-legend" data-operations-field="monitorDbLegend">${dbLegendHtml}</div>
+                <small class="monitor-hint">${escapeHtml(t('admin.monitor.dbHint'))}</small>
+              </div>
+              <div class="monitor-item monitor-item--disk" data-monitor-key="disk" title="${escapeHtml(t('admin.monitor.diskHint'))}">
                 <div class="monitor-item-top">
                   <span class="monitor-label">${escapeHtml(t('admin.monitor.disk'))}</span>
-                  <span class="monitor-value" data-operations-field="monitorDisk">${diskStr}</span>
+                  <span class="monitor-value" data-operations-field="monitorDiskPct">${diskPct.toFixed(0)}%</span>
                 </div>
-                <div class="monitor-meter"><span data-operations-field="monitorDiskBar" style="width:${diskPct.toFixed(1)}%;background:${monitorBarGradient(diskPct)}"></span></div>
-              </div>
-              <div class="monitor-item" data-monitor-key="db">
-                <div class="monitor-item-top">
-                  <span class="monitor-label">${escapeHtml(t('admin.monitor.db'))}</span>
-                  <span class="monitor-value" data-operations-field="monitorDb">${escapeHtml(dbSizeMB)} ${escapeHtml(t('common.unitMB'))}</span>
+                <div class="disk-bar-track" data-disk-thresholds aria-hidden="true">
+                  <span class="disk-bar-fill"
+                        data-operations-field="monitorDiskBar"
+                        style="width:${diskPct.toFixed(1)}%;background:${monitorBarGradient(diskPct)}"></span>
+                  <span class="disk-bar-tick disk-bar-tick--warn" style="left:75%"></span>
+                  <span class="disk-bar-tick disk-bar-tick--alert" style="left:90%"></span>
                 </div>
-                <div class="monitor-meter"><span data-operations-field="monitorDbBar" style="width:${dbPct.toFixed(1)}%;background:${monitorBarGradient(dbPct)}"></span></div>
+                <div class="disk-bar-stats">
+                  <span class="disk-bar-stat" data-operations-field="monitorDiskUsed">
+                    <span class="muted">${escapeHtml(t('admin.monitor.diskUsedLabel'))}</span>
+                    <strong>${escapeHtml(diskUsedStr)}</strong>
+                  </span>
+                  <span class="disk-bar-stat" data-operations-field="monitorDiskFree">
+                    <span class="muted">${escapeHtml(t('admin.monitor.diskFreeLabel'))}</span>
+                    <strong>${escapeHtml(diskFreeStr)}</strong>
+                  </span>
+                  <span class="disk-bar-stat" data-operations-field="monitorDiskTotal">
+                    <span class="muted">${escapeHtml(t('admin.monitor.diskTotalLabel'))}</span>
+                    <strong>${escapeHtml(diskTotalStr)}</strong>
+                  </span>
+                </div>
               </div>
             </div>
             <div class="monitor-foot">
@@ -686,20 +822,137 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
 }
 
 export function renderAdminDuplicates({ user, stats, indexStatus, flash = '', csrfToken = '' }) {
+  /* Поиск дубликатов запускается автоматически при заходе на страницу —
+     отдельной кнопки нет. Прогресс-полоска и список рисуются клиентским JS
+     (см. initDuplicatesPage в public/app.js). */
   const content = `
     ${flash ? renderAlert('success', flash) : ''}
     <div data-duplicates-page data-page="1">
-      <div id="dup-start-container" class="admin-card" style="text-align:center;padding:48px 24px;">
-        <p style="margin-bottom:1rem;color:var(--muted);">${escapeHtml(t('admin.duplicates.description'))}</p>
-        <button class="btn" id="dup-start-btn">${escapeHtml(t('admin.duplicates.startSearch'))}</button>
-      </div>
-      <div id="dup-results" style="display:none;"></div>
+      <div id="dup-results"></div>
     </div>
   `;
   return pageShell({ title: t('admin.nav.duplicates'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('admin.nav.duplicates') }], mode: 'admin', currentPath: '/admin/duplicates', csrfToken });
 }
 
-export function renderAdminSources({ user, stats, indexStatus, sources = [], flash = '', csrfToken = '', scanIntervalHours = 0, coverWidth = 220, coverHeight = 320, coverQuality = 86 }) {
+/* ── Форма расписания сканирования (Off / Каждые N часов / Ежедневно / По дням недели) ── */
+function renderScanScheduleForm({ csrfToken, scanSchedule, scanScheduleNextRunAt, scanScheduleLog = [], scanIntervalHours = 0 }) {
+  const cfg = scanSchedule || { mode: scanIntervalHours > 0 ? 'interval' : 'off', hours: scanIntervalHours, time: '03:00', dow: [], full: false };
+  const mode = cfg.mode || 'off';
+  const hours = Number(cfg.hours) || (scanIntervalHours || 24);
+  const time = cfg.time || '03:00';
+  const dowSet = new Set((cfg.dow || []).map(Number));
+  const full = Boolean(cfg.full);
+
+  const dowLabels = [
+    t('admin.schedule.dow.sun'), t('admin.schedule.dow.mon'), t('admin.schedule.dow.tue'),
+    t('admin.schedule.dow.wed'), t('admin.schedule.dow.thu'), t('admin.schedule.dow.fri'),
+    t('admin.schedule.dow.sat')
+  ];
+
+  const dowCheckboxes = [1, 2, 3, 4, 5, 6, 0].map((d) => `
+    <label class="admin-dow-chip">
+      <input type="checkbox" name="dow" value="${d}" ${dowSet.has(d) ? 'checked' : ''}>
+      <span>${escapeHtml(dowLabels[d])}</span>
+    </label>
+  `).join('');
+
+  const renderLogRows = (log) => {
+    if (!log || !log.length) {
+      return `<tr><td colspan="3" class="muted" style="text-align:center;padding:8px">${escapeHtml(t('admin.schedule.logEmpty'))}</td></tr>`;
+    }
+    return log.map((row) => {
+      const when = formatLocaleDateTimeShort(row.ranAt);
+      const kind = row.full ? t('admin.schedule.kindFull') : t('admin.schedule.kindIncremental');
+      const statusText = row.status === 'error'
+        ? `${t('admin.schedule.statusError')}: ${escapeHtml(row.message || '')}`
+        : (row.status === 'ok' ? t('admin.schedule.statusOk') : t('admin.schedule.statusStarted'));
+      return `<tr>
+        <td>${escapeHtml(when)}</td>
+        <td><span class="admin-chip" style="font-size:.85em">${escapeHtml(kind)}</span></td>
+        <td>${statusText}</td>
+      </tr>`;
+    }).join('');
+  };
+
+  return `
+    <form action="/admin/settings/scan-schedule" method="post" data-track-dirty data-scan-schedule-form>
+      ${csrfHiddenField(csrfToken)}
+      <div class="admin-action-item">
+        <div class="admin-action-item-info">
+          <strong>${escapeHtml(t('admin.schedule.title'))}</strong>
+          <span class="muted">${escapeHtml(t('admin.schedule.hint'))}</span>
+
+          <div class="scan-schedule-fields">
+            <div class="admin-field-group">
+              <label for="scan-schedule-mode">${escapeHtml(t('admin.schedule.modeLabel'))}</label>
+              <select id="scan-schedule-mode" name="mode" data-scan-schedule-mode>
+                <option value="off"      ${mode === 'off'      ? 'selected' : ''}>${escapeHtml(t('admin.schedule.modeOff'))}</option>
+                <option value="interval" ${mode === 'interval' ? 'selected' : ''}>${escapeHtml(t('admin.schedule.modeInterval'))}</option>
+                <option value="daily"    ${mode === 'daily'    ? 'selected' : ''}>${escapeHtml(t('admin.schedule.modeDaily'))}</option>
+                <option value="weekly"   ${mode === 'weekly'   ? 'selected' : ''}>${escapeHtml(t('admin.schedule.modeWeekly'))}</option>
+              </select>
+            </div>
+
+            <div class="admin-field-group" data-scan-schedule-when="interval" ${mode === 'interval' ? '' : 'hidden'}>
+              <label for="scan-schedule-hours">${escapeHtml(t('admin.schedule.hoursLabel'))}</label>
+              <div class="admin-inline-row">
+                <input id="scan-schedule-hours" type="number" name="hours" value="${hours}" min="1" max="8760" class="admin-input-sm">
+                <span class="muted">${escapeHtml(t('admin.settings.scanHours'))}</span>
+              </div>
+            </div>
+
+            <div class="admin-field-group" data-scan-schedule-when="daily" ${mode === 'daily' ? '' : 'hidden'}>
+              <label for="scan-schedule-time-daily">${escapeHtml(t('admin.schedule.timeLabel'))}</label>
+              <input id="scan-schedule-time-daily" type="time" name="time" value="${escapeHtml(time)}" class="admin-input-sm" data-scan-schedule-time>
+            </div>
+
+            <div class="admin-field-group" data-scan-schedule-when="weekly" ${mode === 'weekly' ? '' : 'hidden'}>
+              <label for="scan-schedule-time-weekly">${escapeHtml(t('admin.schedule.timeLabel'))}</label>
+              <input id="scan-schedule-time-weekly" type="time" name="time" value="${escapeHtml(time)}" class="admin-input-sm" data-scan-schedule-time>
+              <div class="admin-dow-row" style="margin-top:6px">${dowCheckboxes}</div>
+              <span class="admin-field-hint">${escapeHtml(t('admin.schedule.weeklyHint'))}</span>
+            </div>
+
+            <div class="admin-field-group">
+              <label for="scan-schedule-full">${escapeHtml(t('admin.schedule.kindLabel'))}</label>
+              <select id="scan-schedule-full" name="full">
+                <option value="0" ${full ? '' : 'selected'}>${escapeHtml(t('admin.schedule.kindIncremental'))}</option>
+                <option value="1" ${full ? 'selected' : ''}>${escapeHtml(t('admin.schedule.kindFull'))}</option>
+              </select>
+              <span class="admin-field-hint">${escapeHtml(t('admin.schedule.kindHint'))}</span>
+            </div>
+          </div>
+
+          <div class="scan-schedule-next" data-scan-schedule-next data-next-run-at="${escapeHtml(scanScheduleNextRunAt || '')}">
+            ${escapeHtml(formatNextRunLine(mode, scanScheduleNextRunAt))}
+          </div>
+
+          <details class="scan-schedule-log-wrap">
+            <summary class="muted">${escapeHtml(t('admin.schedule.logTitle'))}</summary>
+            <table class="admin-table">
+              <thead><tr>
+                <th>${escapeHtml(t('admin.schedule.logWhen'))}</th>
+                <th>${escapeHtml(t('admin.schedule.logKind'))}</th>
+                <th>${escapeHtml(t('admin.schedule.logStatus'))}</th>
+              </tr></thead>
+              <tbody data-scan-schedule-log>${renderLogRows(scanScheduleLog)}</tbody>
+            </table>
+          </details>
+        </div>
+        <div class="admin-actions-row">
+          <button type="submit">${escapeHtml(t('admin.save'))}</button>
+        </div>
+      </div>
+    </form>
+  `;
+}
+
+function formatNextRunLine(mode, nextRunAtIso) {
+  if (mode === 'off' || !nextRunAtIso) return t('admin.schedule.nextRunNone');
+  return tp('admin.schedule.nextRun', { when: formatLocaleDateTimeShort(nextRunAtIso) });
+}
+
+export function renderAdminSources({ user, stats, indexStatus, sources = [], flash = '', csrfToken = '', scanIntervalHours = 0, scanSchedule = null, scanScheduleNextRunAt = null, scanScheduleLog = [], coverWidth = 220, coverHeight = 320, coverQuality = 86 }) {
   const typeBadge = (stype) => stype === 'inpx'
     ? '<span class="admin-chip admin-compact-btn">INPX</span>'
     : `<span class="admin-chip admin-compact-btn">${escapeHtml(t('admin.sources.typeFolder'))}</span>`;
@@ -796,40 +1049,15 @@ export function renderAdminSources({ user, stats, indexStatus, sources = [], fla
         </div>
       </form>
       <hr class="admin-divider">
-      <form action="/admin/settings/scan-interval" method="post" data-track-dirty>
-        ${csrfHiddenField(csrfToken)}
-        <div class="admin-action-item">
-          <div class="admin-action-item-info">
-            <strong>${escapeHtml(t('admin.settings.scanTitle'))}</strong>
-            <span class="muted">${escapeHtml(t('admin.settings.scanHint'))}</span>
-          </div>
-          <div class="admin-inline-row">
-            <input type="number" name="hours" value="${scanIntervalHours}" min="0" max="8760" class="admin-input-sm">
-            <span class="muted">${escapeHtml(t('admin.settings.scanHours'))}</span>
-            <button type="submit">${escapeHtml(t('admin.save'))}</button>
-          </div>
-        </div>
-      </form>
-      <hr class="admin-divider">
-      <form action="/admin/settings/covers" method="post" data-track-dirty>
-        ${csrfHiddenField(csrfToken)}
-        <div class="admin-action-item">
-          <div class="admin-action-item-info">
-            <strong>${escapeHtml(t('admin.settings.coversTitle'))}</strong>
-            <span class="muted">${escapeHtml(t('admin.settings.coversHint'))}</span>
-          </div>
-          <div class="admin-inline-row">
-            <input type="number" name="width" value="${coverWidth}" min="32" max="1200" class="admin-input-sm" placeholder="W">
-            <span class="muted">\u00d7</span>
-            <input type="number" name="height" value="${coverHeight}" min="32" max="1600" class="admin-input-sm" placeholder="H">
-            <span class="muted">q</span>
-            <input type="number" name="quality" value="${coverQuality}" min="1" max="100" class="admin-input-xs">
-            <button type="submit">${escapeHtml(t('admin.save'))}</button>
-          </div>
-        </div>
-      </form>
+      ${renderScanScheduleForm({ csrfToken, scanSchedule, scanScheduleNextRunAt, scanScheduleLog, scanIntervalHours })}
     </div>
   `;
+  /* Блок «Обложки» (ширина/высота/качество WebP-миниатюр) убран из UI:
+     на практике значения по умолчанию (220×320, q=86) подходят 99% случаев,
+     а сама панель источников выглядит чище. Маршрут /admin/settings/covers
+     и переменные окружения COVER_MAX_WIDTH/HEIGHT/COVER_QUALITY оставлены
+     рабочими — если кому-то понадобится тонкая настройка, она доступна
+     через env или прямой POST. */
   return pageShell({ title: t('admin.sources.title'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('admin.sources.title') }], mode: 'admin', currentPath: '/admin/sources', csrfToken });
 }
 

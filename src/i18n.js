@@ -11,12 +11,30 @@ function loadBundle(lang) {
   return cache[lang];
 }
 
-/** Определить язык UI: cookie lang, затем Accept-Language. */
+/* «Язык по умолчанию» для гостей без явного Accept-Language / cookie.
+   Возможные значения: 'ru' | 'en' | 'auto'. 'auto' = старое поведение
+   («fallback en»). Кешируется в памяти, обновляется через setDefaultLocale.
+   Это критично для OPDS-клиентов вроде KOReader, которые не присылают
+   Accept-Language — без этой настройки они всегда получали английский. */
+let _defaultLocale = 'auto';
+export function setDefaultLocale(value) {
+  const v = String(value || '').toLowerCase().trim();
+  _defaultLocale = (v === 'ru' || v === 'en') ? v : 'auto';
+}
+export function getDefaultLocale() {
+  return _defaultLocale;
+}
+
+/** Определить язык UI: cookie lang → Accept-Language → default_locale → 'en'. */
 export function resolveLocale(req) {
   const c = req?.cookies?.lang;
   if (c === 'en' || c === 'ru') return c;
   const al = String(req?.get?.('Accept-Language') || '');
   if (/^\s*ru\b/i.test(al) || /,\s*ru\b/i.test(al)) return 'ru';
+  if (/^\s*en\b/i.test(al) || /,\s*en\b/i.test(al)) return 'en';
+  /* Ни cookie, ни Accept-Language ничего конкретного не сказали —
+     используем серверную настройку (если 'auto' — оставляем 'en'). */
+  if (_defaultLocale === 'ru' || _defaultLocale === 'en') return _defaultLocale;
   return 'en';
 }
 

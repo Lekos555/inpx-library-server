@@ -972,6 +972,18 @@ WHERE rp.progress >= 99
       suppressed_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
+    /* Лог запусков планировщика сканирования. Храним последние ~50 записей,
+       обрезаем при вставке. Используется чисто для отображения админу. */
+    CREATE TABLE IF NOT EXISTS scan_schedule_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ran_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      mode TEXT NOT NULL DEFAULT '',
+      full INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'started',
+      message TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_scan_schedule_log_ran ON scan_schedule_log(ran_at DESC);
+
     CREATE TABLE IF NOT EXISTS excluded_filters (
       type TEXT NOT NULL,
       value TEXT NOT NULL,
@@ -2205,6 +2217,144 @@ export function getSuppressedBooks({ page = 1, pageSize = 50 } = {}) {
   const total = db.prepare('SELECT COUNT(*) AS count FROM suppressed_books').get()?.count || 0;
   const rows = db.prepare('SELECT * FROM suppressed_books ORDER BY suppressed_at DESC LIMIT ? OFFSET ?').all(pageSize, offset);
   return { total, rows };
+}
+
+let _stmtCountSuppressed;
+/** Дешёвый счётчик скрытых книг — для дашборда. Готовится один раз, кешируется. */
+export function countSuppressedBooks() {
+  _stmtCountSuppressed ??= db.prepare('SELECT COUNT(*) AS count FROM suppressed_books');
+  return _stmtCountSuppressed.get()?.count || 0;
+}
+
+/* ── Database size breakdown ───────────────────────────────────────
+ * Группировка размеров таблиц/индексов по категориям для визуального
+ * стэкового бара «что внутри БД». Использует виртуальную таблицу
+ * dbstat (включена в better-sqlite3 по умолчанию). Кеш на 60 секунд —
+ * dbstat сканирует структуру BTree, тяжеловато гонять каждые 5 сек.
+ */
+
+/* Маппинг: точные имена таблиц → категория. Индексы (idx_*) разносятся
+   по префиксам ниже. Шадоу-таблицы FTS (books_fts_*) попадают в 'books'. */
+const DB_TABLE_TO_CATEGORY = {
+  books: 'books', books_fts: 'books', books_fts_data: 'books', books_fts_idx: 'books',
+  books_fts_docsize: 'books', books_fts_config: 'books',
+  library_dedup_projection: 'books', meta: 'books', excluded_filters: 'books',
+  suppressed_books: 'books', sources: 'books', settings: 'books',
+  authors: 'catalogs', series_catalog: 'catalogs', genres_catalog: 'catalogs',
+  book_authors: 'catalogs', book_series: 'catalogs', book_genres: 'catalogs',
+  book_details_cache: 'covers',
+  book_reviews: 'sidecar', flibusta_author_shard: 'sidecar', flibusta_author_portrait: 'sidecar',
+  users: 'activity', oauth_users: 'activity',
+  bookmarks: 'activity', read_books: 'activity', book_ratings: 'activity',
+  reading_history: 'activity', reading_positions: 'activity', reader_bookmarks: 'activity',
+  favorite_authors: 'activity', favorite_series: 'activity',
+  shelves: 'activity', shelf_books: 'activity',
+  system_events: 'activity', scan_schedule_log: 'activity'
+};
+
+function classifyDbObject(name) {
+  if (DB_TABLE_TO_CATEGORY[name]) return DB_TABLE_TO_CATEGORY[name];
+  /* Индексы идут с префиксами idx_<table>_…; маппим по корню таблицы. */
+  if (name.startsWith('idx_book_details_cache')) return 'covers';
+  if (name.startsWith('idx_books_') || name.startsWith('idx_dedup_projection')) return 'books';
+  if (name.startsWith('idx_book_authors') || name.startsWith('idx_book_series') || name.startsWith('idx_book_genres')) return 'catalogs';
+  if (name.startsWith('idx_authors_') || name.startsWith('idx_series_catalog_') || name.startsWith('idx_genres_catalog_')) return 'catalogs';
+  if (name.startsWith('idx_bookmarks_') || name.startsWith('idx_reading_') || name.startsWith('idx_reader_bookmarks_')) return 'activity';
+  if (name.startsWith('idx_read_books_') || name.startsWith('idx_favorite_') || name.startsWith('idx_shelves_') || name.startsWith('idx_shelf_books_')) return 'activity';
+  if (name.startsWith('idx_book_ratings_') || name.startsWith('idx_system_events_') || name.startsWith('idx_scan_schedule_log_')) return 'activity';
+  if (name.startsWith('idx_sources_')) return 'books';
+  /* sqlite_sequence, sqlite_stat*, autoindexes, неопознанные — в «прочее». */
+  return 'other';
+}
+
+let _dbBreakdownCache = null;
+let _stmtDbStat = null;
+let _dbStatSupported = null;
+const DB_BREAKDOWN_TTL_MS = 60_000;
+const DB_CATEGORY_ORDER = ['books', 'catalogs', 'covers', 'sidecar', 'activity', 'other'];
+
+/** Сводка по содержимому БД: размеры по категориям. {supported, total, segments[]}. */
+export function getDbBreakdown() {
+  const now = Date.now();
+  if (_dbBreakdownCache && now < _dbBreakdownCache.expiresAt) return _dbBreakdownCache.value;
+
+  /* Один раз проверяем, поддерживается ли dbstat — если нет, возвращаем
+     «неподдерживаемый» режим (UI покажет просто размер без разбивки). */
+  if (_dbStatSupported === null) {
+    try {
+      db.prepare('SELECT 1 FROM dbstat LIMIT 1').get();
+      _dbStatSupported = true;
+    } catch (err) {
+      _dbStatSupported = false;
+      console.warn('[db] dbstat virtual table unavailable:', err.message);
+    }
+  }
+
+  if (!_dbStatSupported) {
+    const value = { supported: false, total: 0, segments: [] };
+    _dbBreakdownCache = { value, expiresAt: now + DB_BREAKDOWN_TTL_MS };
+    return value;
+  }
+
+  const buckets = Object.create(null);
+  let total = 0;
+  try {
+    _stmtDbStat ??= db.prepare('SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name');
+    for (const row of _stmtDbStat.iterate()) {
+      const bytes = Number(row.bytes) || 0;
+      if (bytes <= 0) continue;
+      const category = classifyDbObject(String(row.name || ''));
+      buckets[category] = (buckets[category] || 0) + bytes;
+      total += bytes;
+    }
+  } catch (err) {
+    console.warn('[db] getDbBreakdown failed:', err.message);
+    _dbStatSupported = false;
+    const value = { supported: false, total: 0, segments: [] };
+    _dbBreakdownCache = { value, expiresAt: now + DB_BREAKDOWN_TTL_MS };
+    return value;
+  }
+
+  const segments = DB_CATEGORY_ORDER
+    .map((key) => ({
+      key,
+      bytes: buckets[key] || 0,
+      pct: total > 0 ? ((buckets[key] || 0) / total) * 100 : 0
+    }))
+    .filter((s) => s.bytes > 0);
+
+  const value = { supported: true, total, segments };
+  _dbBreakdownCache = { value, expiresAt: now + DB_BREAKDOWN_TTL_MS };
+  return value;
+}
+
+/* ── Scan schedule log ─────────────────────────────────────────── */
+
+let _stmtScheduleLogInsert = null;
+let _stmtScheduleLogTrim = null;
+let _stmtScheduleLogList = null;
+const SCAN_SCHEDULE_LOG_MAX = 50;
+
+/** Добавить запись в лог расписания. status: 'started' | 'ok' | 'skipped' | 'error'. */
+export function addScheduleLog({ mode = '', full = false, status = 'started', message = '' } = {}) {
+  _stmtScheduleLogInsert ??= db.prepare(
+    'INSERT INTO scan_schedule_log(mode, full, status, message) VALUES(?, ?, ?, ?)'
+  );
+  _stmtScheduleLogInsert.run(String(mode), full ? 1 : 0, String(status), String(message || ''));
+  /* Обрезаем хвост, чтобы таблица не росла бесконечно — храним только последние N. */
+  _stmtScheduleLogTrim ??= db.prepare(`
+    DELETE FROM scan_schedule_log
+    WHERE id NOT IN (SELECT id FROM scan_schedule_log ORDER BY id DESC LIMIT ?)
+  `);
+  _stmtScheduleLogTrim.run(SCAN_SCHEDULE_LOG_MAX);
+}
+
+export function getScheduleLog(limit = 10) {
+  const n = Math.max(1, Math.min(SCAN_SCHEDULE_LOG_MAX, Math.floor(Number(limit) || 10)));
+  _stmtScheduleLogList ??= db.prepare(
+    'SELECT id, ran_at AS ranAt, mode, full, status, message FROM scan_schedule_log ORDER BY id DESC LIMIT ?'
+  );
+  return _stmtScheduleLogList.all(n);
 }
 
 export function getSuppressedBookSubquery() {

@@ -90,8 +90,10 @@ export const READ_CHECK_SVG = '<svg viewBox="0 0 24 24"><polyline points="20 6 9
 
 export function renderCover(book, { readBookIds = null } = {}) {
   const readBadge = readBookIds && readBookIds.has(book.id) ? `<span class="read-badge">${READ_CHECK_SVG}</span>` : '';
-  const coverRating = book.libRate
-    ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${book.libRate}">${Array.from({ length: book.libRate }, () => '<span>★</span>').join('')}</span></span>`
+  /* Шкала рейтинга — 1..5; клампим на случай легаси-значений в БД (импорт из INPX или старый UI). */
+  const _libRateClamped = Math.max(0, Math.min(5, Math.floor(Number(book.libRate) || 0)));
+  const coverRating = _libRateClamped
+    ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${_libRateClamped}">${Array.from({ length: _libRateClamped }, () => '<span>★</span>').join('')}</span></span>`
     : '';
   return `
     <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
@@ -270,6 +272,7 @@ function renderAdminIndexControls(indexStatus) {
   const total = Number(indexStatus?.totalArchives || 0);
   const processed = Number(indexStatus?.processedArchives || 0);
   const imported = Math.max(0, Math.floor(Number(indexStatus?.importedBooks) || 0));
+  const unique = Math.max(0, Math.floor(Number(indexStatus?.uniqueBooks) || 0));
   const phaseDone = Number(indexStatus?.phaseDone || 0);
   const phaseTotal = Number(indexStatus?.phaseTotal || 0);
   const phaseLabel = String(indexStatus?.phaseLabel || '');
@@ -289,7 +292,7 @@ function renderAdminIndexControls(indexStatus) {
     detail = phaseLabel ? `<span class="muted" style="margin-left:12px">${escapeHtml(phaseLabel)}</span>` : '';
   } else {
     percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
-    detail = `<span class="muted" style="margin-left:12px">${escapeHtml(tp('app.adminIndexFilesLine', { processed, total, imported }))}</span>`;
+    detail = `<span class="muted" style="margin-left:12px">${escapeHtml(tp('app.adminIndexFilesLine', { processed, total, imported, unique }))}</span>`;
   }
   const line = active
     ? `${title} ${indeterminate ? '' : `<strong>${percent}%</strong>`}${detail}`
@@ -302,8 +305,8 @@ function renderAdminIndexControls(indexStatus) {
         <div id="sources-progress-text">${line}</div>
       </div>
       <div class="admin-actions-row" style="margin-top:8px">
-        <button type="button" data-operation-action="reindex-toggle-pause" data-operation-label="${paused ? 'Продолжить индексацию' : 'Пауза индексации'}" data-reindex-paused="${paused ? '1' : '0'}">${paused ? 'Продолжить' : 'Пауза'}</button>
-        <button type="button" data-operation-action="reindex-stop" data-operation-label="Остановить индексацию" class="button-danger">Остановить</button>
+        <button type="button" data-operation-action="reindex-toggle-pause" data-operation-label="${escapeHtml(paused ? t('app.adminIndexResumeLabel') : t('app.adminIndexPauseLabel'))}" data-reindex-paused="${paused ? '1' : '0'}">${escapeHtml(paused ? t('app.adminIndexResume') : t('app.adminIndexPause'))}</button>
+        <button type="button" data-operation-action="reindex-stop" data-operation-label="${escapeHtml(t('app.adminIndexStopLabel'))}" class="button-danger">${escapeHtml(t('app.adminIndexStop'))}</button>
       </div>
       <div class="muted" id="sources-progress-archive" style="margin-top:6px;word-break:break-word;min-height:1.2em">${archive}</div>
       <div class="muted" id="sources-progress-time" style="margin-top:4px;font-size:12px;min-height:1.2em" data-index-started="${active && indexStatus?.startedAt ? escapeHtml(indexStatus.startedAt) : ''}"></div>
@@ -667,7 +670,11 @@ export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetail
     <div class="grid">
       ${uniqueItems.map((book) => {
         const isRead = readBookIds && readBookIds.has(book.id);
-        const cacheKey = _cardCacheKey(book, `${flags}${isRead ? '1' : '0'}${book.libRate || 0}`);
+        /* readProgress входит в ключ кеша: иначе HTML карточки, отрендеренный
+           без прогресса (на каталоге), переиспользуется на /library/continue,
+           где прогресс реально присутствует — и полоска не появляется. */
+        const progressKey = Math.round(Number(book.readProgress) || 0);
+        const cacheKey = _cardCacheKey(book, `${flags}${isRead ? '1' : '0'}${book.libRate || 0}|p${progressKey}`);
         const cached = getCachedCardHtml(cacheKey);
         if (cached) return cached;
         const cardDl = effectiveBatch || hideDownloads ? '' : renderDownloadMenu(book, { compact: true, user });
@@ -1030,7 +1037,7 @@ export function pageShell({ title, content, user, query = '', field = 'all', sta
 </head>
 <body data-download-allowed="${canDownloadInUi(user) ? '1' : '0'}">
   <div class="nav-progress" id="nav-progress"></div>
-  <script>!function(){var b=document.getElementById('nav-progress');document.addEventListener('click',function(e){var a=e.target.closest('a[href]');if(!a)return;var h=a.getAttribute('href');if(!h||h.charAt(0)==='#'||a.target==='_blank'||e.ctrlKey||e.metaKey||e.shiftKey)return;b.classList.add('active')});document.addEventListener('submit',function(){b.classList.add('active')})}()</script>
+  <script>!function(){var b=document.getElementById('nav-progress');if(!b)return;function done(){b.classList.remove('active')}done();window.addEventListener('pageshow',done);window.addEventListener('popstate',done);document.addEventListener('click',function(e){var a=e.target.closest('a[href]');if(!a)return;var h=a.getAttribute('href');if(!h||h.charAt(0)==='#'||a.target==='_blank'||e.ctrlKey||e.metaKey||e.shiftKey)return;b.classList.add('active')});document.addEventListener('submit',function(){b.classList.add('active')})}()</script>
   <script type="application/json" id="ui-i18n-json">${serializeClientI18n()}</script>
   ${readBookIds && readBookIds.size ? `<script type="application/json" id="ui-read-ids">${JSON.stringify([...readBookIds])}</script>` : ''}
   <a class="skip-to-content" href="#main-content">${escapeHtml(t('skipToContent'))}</a>

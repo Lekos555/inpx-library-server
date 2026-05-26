@@ -9,3 +9,8 @@ cookies.txt
 filelist.txt
 release/
 converter/*.exe
+
+# IDE / editor metadata
+.idea/
+.windsurf/
+.vscode/

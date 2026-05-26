@@ -1,0 +1,11 @@
+const { db } = require('./src/db.js');
+const r = db.prepare("SELECT value FROM meta WHERE key = 'books_fts_dirty'").get();
+console.log('fts_dirty:', r?.value || 'not set');
+const r2 = db.prepare("SELECT COUNT(*) AS c FROM book_keywords").get();
+console.log('book_keywords rows:', r2.c);
+const r3 = db.prepare("SELECT COUNT(*) AS c FROM keywords_catalog").get();
+console.log('keywords_catalog rows:', r3.c);
+const r4 = db.prepare("SELECT COUNT(*) AS c FROM books").get();
+console.log('books rows:', r4.c);
+const r5 = db.prepare("SELECT COUNT(*) AS c FROM books_fts").get();
+console.log('books_fts rows:', r5.c);

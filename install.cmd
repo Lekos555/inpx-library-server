@@ -125,11 +125,11 @@ if exist "converter\fbc.exe" (
   goto :done
 )
 
-echo    Downloading fb2cng v1.1.8 for Windows...
+echo    Downloading fb2cng v1.3.8 for Windows...
 if not exist "converter" mkdir converter
 
 powershell -NoProfile -Command ^
-  "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/rupor-github/fb2cng/releases/download/v1.1.8/fbc-windows-amd64.zip' -OutFile 'converter\fbc.zip'"
+  "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/rupor-github/fb2cng/releases/download/v1.3.8/fbc-windows-amd64.zip' -OutFile 'converter\fbc.zip'"
 if errorlevel 1 (
   echo    WARNING: Download failed - FB2 to EPUB conversion will not work.
   echo    You can install it manually later.
