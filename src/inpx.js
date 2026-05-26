@@ -2930,6 +2930,15 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
       String(bookId)
     );
 
+    /*
+     * Ключ записей в authors/series_catalog/genres_catalog — это name.toLowerCase()
+     * (как делает INPX-импорт, см. resolveAuthorId/resolveSeriesId/resolveGenreId).
+     * Если здесь записать с оригинальным регистром — создастся ПАРАЛЛЕЛЬНАЯ
+     * запись каталога, и книга после edit «исчезнет» со страницы автора/серии
+     * (junction уйдёт к новой записи, а UI ходит к старой по lowercase-имени из URL).
+     * Это и есть причина бага «после изменения рейтинга книга пропадает у автора».
+     */
+
     // 2. Rebuild book_authors junction
     db.prepare('DELETE FROM book_authors WHERE book_id = ?').run(String(bookId));
     const authorTokens = splitAuthorValues(authorsNorm);
@@ -2944,11 +2953,12 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
     const selectAuthorId = db.prepare('SELECT id FROM authors WHERE name = ?');
     const linkBookAuthor = db.prepare('INSERT OR IGNORE INTO book_authors(book_id, author_id) VALUES(?, ?)');
     for (const token of authorTokens) {
-      const displayName = formatSingleAuthorName(token) || token;
+      const key = token.toLowerCase();
+      const displayName = authorDisplayName(token);
       const sortName = createSortKey(authorSortKey(token));
-      const searchName = createSortKey(displayName);
-      upsertAuthor.run(token, displayName, sortName, searchName);
-      const authorRow = selectAuthorId.get(token);
+      const searchName = authorSearchName(token);
+      upsertAuthor.run(key, displayName, sortName, searchName);
+      const authorRow = selectAuthorId.get(key);
       if (authorRow) {
         linkBookAuthor.run(String(bookId), authorRow.id);
       }
@@ -2957,9 +2967,10 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
     // 3. Rebuild book_series junction
     db.prepare('DELETE FROM book_series WHERE book_id = ?').run(String(bookId));
     if (seriesNorm) {
-      const displayName = seriesNorm;
-      const sortName = createSortKey(seriesNorm);
-      const searchName = createSortKey(seriesNorm);
+      const seriesKey = seriesNorm.toLowerCase();
+      const displayName = seriesDisplayName(seriesNorm);
+      const sortName = seriesSortName(seriesNorm);
+      const searchName = seriesSearchName(seriesNorm);
       db.prepare(`
         INSERT INTO series_catalog(name, display_name, sort_name, search_name)
         VALUES(?, ?, ?, ?)
@@ -2967,8 +2978,8 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
           display_name = excluded.display_name,
           sort_name = excluded.sort_name,
           search_name = excluded.search_name
-      `).run(seriesNorm, displayName, sortName, searchName);
-      const seriesRow = db.prepare('SELECT id FROM series_catalog WHERE name = ?').get(seriesNorm);
+      `).run(seriesKey, displayName, sortName, searchName);
+      const seriesRow = db.prepare('SELECT id FROM series_catalog WHERE name = ?').get(seriesKey);
       if (seriesRow) {
         db.prepare('INSERT OR IGNORE INTO book_series(book_id, series_id, series_no) VALUES(?, ?, ?)').run(String(bookId), seriesRow.id, seriesNoNorm);
       }
@@ -2988,11 +2999,12 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
     const selectGenreId = db.prepare('SELECT id FROM genres_catalog WHERE name = ?');
     const linkBookGenre = db.prepare('INSERT OR IGNORE INTO book_genres(book_id, genre_id) VALUES(?, ?)');
     for (const token of genreTokens) {
-      const displayName = genreDisplayName(token) || token;
+      const key = token.toLowerCase();
+      const displayName = genreDisplayName(token);
       const sortName = genreSortName(token);
       const searchName = genreSearchName(token);
-      upsertGenre.run(token, displayName, sortName, searchName);
-      const genreRow = selectGenreId.get(token);
+      upsertGenre.run(key, displayName, sortName, searchName);
+      const genreRow = selectGenreId.get(key);
       if (genreRow) {
         linkBookGenre.run(String(bookId), genreRow.id);
       }
@@ -3016,6 +3028,12 @@ export function updateBookMetadata(bookId, { title, authors, series, seriesNo, g
   });
 
   doUpdate();
+  /* Инвалидируем in-memory runtime-кеши (facetBooksCache, authorGroupedCache, etc.) —
+     иначе админ после edit видит на странице автора/серии прежнюю выборку
+     из кеша TTL=60s и думает, что edit ничего не изменил. clearPageDataCache()
+     в route-обработчике сбрасывает только pageDataCache из services/cache.js,
+     а runtime-кеши в этом модуле он не трогает. */
+  clearRuntimeQueryCaches();
   refreshCatalogBookCounts().catch(err => console.error('[refreshCatalogBookCounts] after updateBookMetadata:', err));
   return true;
 }
