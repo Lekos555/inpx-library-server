@@ -4600,17 +4600,28 @@ function opdsTitleSearch(prefix, genre = '') {
   const prefixKey = prefix ? createSortKey(prefix) : '';
   let sql, params;
   if (genre) {
-    sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang
+    sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
+                  b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+                  COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
+                  dc.annotation
            FROM active_books b
            JOIN book_genres bg ON bg.book_id = b.id
            JOIN genres_catalog gc ON gc.id = bg.genre_id AND gc.name IN (${genre.split(',').map(() => '?').join(',')})
+           LEFT JOIN sources s ON s.id = b.source_id
+           LEFT JOIN book_details_cache dc ON dc.book_id = b.id
            WHERE b.title_search >= ? AND b.title_search < ?
+           GROUP BY b.id
            ORDER BY b.title_search LIMIT 200`;
     const genreParams = genre.split(',').map(g => g.trim());
     params = [...genreParams, prefixKey, prefixKey + '\uffff'];
   } else {
-    sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang
+    sql = `SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
+                  b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+                  COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
+                  dc.annotation
            FROM active_books b
+           LEFT JOIN sources s ON s.id = b.source_id
+           LEFT JOIN book_details_cache dc ON dc.book_id = b.id
            WHERE b.title_search >= ? AND b.title_search < ?
            ORDER BY b.title_search LIMIT 200`;
     params = [prefixKey, prefixKey + '\uffff'];
@@ -4620,6 +4631,15 @@ function opdsTitleSearch(prefix, genre = '') {
     id: r.id,
     title: `${r.seriesNo ? `${r.seriesNo}. ` : ''}${r.title || t('opds.noTitle')} (${r.ext || 'fb2'})`,
     authors: r.authors,
+    series: r.series || '',
+    seriesNo: r.seriesNo || '',
+    genres: r.genres || '',
+    lang: r.lang || '',
+    archiveName: r.archiveName || '',
+    fileName: r.fileName || '',
+    sourceId: r.sourceId,
+    sourceFlibusta: r.sourceFlibusta,
+    annotation: r.annotation || '',
     bookId: r.id,
     ext: r.ext,
     isBook: true
@@ -4692,6 +4712,7 @@ export function getAuthorBooksOpds(authorName, genre = '') {
     sql = `
       SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
              b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+             COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
              dc.annotation
       FROM active_books b
       JOIN book_authors ba ON ba.book_id = b.id
@@ -4708,6 +4729,7 @@ export function getAuthorBooksOpds(authorName, genre = '') {
     sql = `
       SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
              b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+             COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
              dc.annotation
       FROM active_books b
       JOIN book_authors ba ON ba.book_id = b.id
@@ -4730,6 +4752,7 @@ export function getAuthorSeriesBooksOpds(authorName, seriesName, genre = '') {
     sql = `
       SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
              b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+             COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
              dc.annotation
       FROM active_books b
       JOIN book_authors ba ON ba.book_id = b.id
@@ -4747,6 +4770,7 @@ export function getAuthorSeriesBooksOpds(authorName, seriesName, genre = '') {
     sql = `
       SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
              b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+             COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
              dc.annotation
       FROM active_books b
       JOIN book_authors ba ON ba.book_id = b.id
@@ -4768,6 +4792,7 @@ export function getSeriesBooksOpds(seriesName) {
       `
     SELECT b.id, b.title, b.authors, b.series, b.series_no AS seriesNo, b.ext, b.lang, b.genres,
            b.archive_name AS archiveName, b.file_name AS fileName, b.source_id AS sourceId,
+           COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta,
            dc.annotation
     FROM active_books b
     JOIN book_series bs ON bs.book_id = b.id

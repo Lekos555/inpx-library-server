@@ -7,6 +7,7 @@ import { requireOpdsAuth } from '../middleware/auth.js';
 import { formatGenreLabel, getGenreGroups } from '../genre-map.js';
 import { safePage } from '../utils/safe-int.js';
 import { getOrExtractBookDetails } from '../fb2.js';
+import { attachFlibustaAnnotationsFromShards } from '../flibusta-sidecar.js';
 import {
   listGenres, getBookById,
   opdsQuery,
@@ -52,7 +53,7 @@ export function registerOpdsRoutes(app, deps) {
     res.send(renderOpdsOpenSearch(baseUrl(req)));
   });
 
-  app.get('/opds/search', requireOpdsAuth, (req, res) => {
+  app.get('/opds/search', requireOpdsAuth, async (req, res) => {
     let term = String(req.query.term || req.query.query || req.query.q || req.query.searchTerm || '').trim();
     const type = String(req.query.type || '').trim();
     const genre = String(req.query.genre || '').trim();
@@ -124,6 +125,7 @@ export function registerOpdsRoutes(app, deps) {
         const nextHref = hasMoreTitle
           ? `/opds/search?type=title&term=${encodeURIComponent(term)}${genre ? `&genre=${encodeURIComponent(genre)}` : ''}&page=${page + 1}`
           : '';
+        await attachFlibustaAnnotationsFromShards(result.items);
         res.type('application/atom+xml; charset=utf-8');
         return res.send(renderOpdsBooksFeed(base, { id: 'search', title: t('opds.nav.search'), selfPath: req.originalUrl, items: result.items, nextHref }));
       }
@@ -145,7 +147,7 @@ export function registerOpdsRoutes(app, deps) {
     res.send(renderOpdsSectionFeed(base, { id: 'search', title: t('opds.nav.search'), selfPath: req.originalUrl, entries: [] }));
   });
 
-  app.get('/opds/author', requireOpdsAuth, (req, res) => {
+  app.get('/opds/author', requireOpdsAuth, async (req, res) => {
     const author = String(req.query.author || '');
     const genre = String(req.query.genre || '');
     const seriesQ = String(req.query.series || '');
@@ -156,6 +158,7 @@ export function registerOpdsRoutes(app, deps) {
       const items = authorName
         ? getAuthorSeriesBooksOpds(authorName, seriesQ, genre)
         : getSeriesBooksOpds(seriesQ);
+      await attachFlibustaAnnotationsFromShards(items);
       res.type('application/atom+xml; charset=utf-8');
       return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesQ, selfPath: req.originalUrl, items }));
     }
@@ -184,6 +187,7 @@ export function registerOpdsRoutes(app, deps) {
           href: `/opds/author?author=${encodeURIComponent(author)}&series=${encodeURIComponent(name)}&genre=${encodeURIComponent(genre)}`,
           content: countLabel('book', count),
         }));
+      await attachFlibustaAnnotationsFromShards(standalone);
       res.type('application/atom+xml; charset=utf-8');
       return res.send(renderOpdsBooksFeed(base, {
         id: 'search',
@@ -212,7 +216,7 @@ export function registerOpdsRoutes(app, deps) {
     res.send(renderOpdsSectionFeed(base, { id: 'search', title: t('opds.nav.authors'), selfPath: req.originalUrl, entries }));
   });
 
-  app.get('/opds/series', requireOpdsAuth, (req, res) => {
+  app.get('/opds/series', requireOpdsAuth, async (req, res) => {
     const series = String(req.query.series || '');
     const genre = String(req.query.genre || '');
     const base = baseUrl(req);
@@ -220,6 +224,7 @@ export function registerOpdsRoutes(app, deps) {
     if (series.startsWith('=')) {
       const seriesName = series.slice(1);
       const items = getSeriesBooksOpds(seriesName);
+      await attachFlibustaAnnotationsFromShards(items);
       res.type('application/atom+xml; charset=utf-8');
       return res.send(renderOpdsBooksFeed(base, { id: 'search', title: seriesName || t('facet.facetSeries'), selfPath: req.originalUrl, items }));
     }

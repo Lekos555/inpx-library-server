@@ -7,6 +7,7 @@ import { requireOpdsAuth } from '../middleware/auth.js';
 import { formatGenreLabel, getGenreGroups } from '../genre-map.js';
 import { safePage } from '../utils/safe-int.js';
 import { getOrExtractBookDetails } from '../fb2.js';
+import { attachFlibustaAnnotationsFromShards } from '../flibusta-sidecar.js';
 import {
   listGenres, getBookById,
   opdsQuery,
@@ -47,7 +48,7 @@ export function registerOpdsV2Routes(app, deps) {
   });
 
   // Authors navigation (prefix-based)
-  app.get('/opds/v2/authors', requireOpdsAuth, (req, res) => {
+  app.get('/opds/v2/authors', requireOpdsAuth, async (req, res) => {
     const prefix = String(req.query.prefix || '');
     const genre = String(req.query.genre || '');
     const series = String(req.query.series || '');
@@ -56,6 +57,7 @@ export function registerOpdsV2Routes(app, deps) {
     if (series && prefix.startsWith('=')) {
       const authorName = prefix.slice(1);
       const items = getAuthorSeriesBooksOpds(authorName, series, genre);
+      await attachFlibustaAnnotationsFromShards(items);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: series,
@@ -88,6 +90,7 @@ export function registerOpdsV2Routes(app, deps) {
           href: `/opds/v2/authors?prefix=${encodeURIComponent(prefix)}&series=${encodeURIComponent(name)}&genre=${encodeURIComponent(genre)}`,
           count,
         }));
+      await attachFlibustaAnnotationsFromShards(standalone);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: authorName,
@@ -111,7 +114,7 @@ export function registerOpdsV2Routes(app, deps) {
   });
 
   // Series navigation
-  app.get('/opds/v2/series', requireOpdsAuth, (req, res) => {
+  app.get('/opds/v2/series', requireOpdsAuth, async (req, res) => {
     const prefix = String(req.query.prefix || '');
     const genre = String(req.query.genre || '');
     const base = baseUrl(req);
@@ -119,6 +122,7 @@ export function registerOpdsV2Routes(app, deps) {
     if (prefix.startsWith('=')) {
       const seriesName = prefix.slice(1);
       const items = getSeriesBooksOpds(seriesName);
+      await attachFlibustaAnnotationsFromShards(items);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, {
         title: seriesName || t('facet.facetSeries'),
@@ -141,7 +145,7 @@ export function registerOpdsV2Routes(app, deps) {
   });
 
   // Titles navigation
-  app.get('/opds/v2/titles', requireOpdsAuth, (req, res) => {
+  app.get('/opds/v2/titles', requireOpdsAuth, async (req, res) => {
     const prefix = String(req.query.prefix || '');
     const genre = String(req.query.genre || '');
     const base = baseUrl(req);
@@ -151,7 +155,23 @@ export function registerOpdsV2Routes(app, deps) {
     // Check if any are book entries (not nav)
     const hasBooks = items.some(i => i.isBook);
     if (hasBooks) {
-      const books = items.filter(i => i.isBook).map(i => ({ id: i.bookId, title: i.title, authors: i.authors, ext: i.ext || 'fb2', lang: i.lang || '', genres: i.genres || '', series: i.series || '', seriesNo: i.seriesNo || '', seriesList: i.seriesList || [] }));
+      const books = items.filter(i => i.isBook).map(i => ({
+        id: i.bookId,
+        title: i.title,
+        authors: i.authors,
+        ext: i.ext || 'fb2',
+        lang: i.lang || '',
+        genres: i.genres || '',
+        series: i.series || '',
+        seriesNo: i.seriesNo || '',
+        seriesList: i.seriesList || [],
+        archiveName: i.archiveName || '',
+        fileName: i.fileName || '',
+        sourceId: i.sourceId,
+        sourceFlibusta: i.sourceFlibusta,
+        annotation: i.annotation || ''
+      }));
+      await attachFlibustaAnnotationsFromShards(books);
       res.type(OPDS_JSON);
       return res.send(renderOpds2PublicationsFeed(base, { title: t('opds.nav.books'), selfPath: req.originalUrl, items: books }));
     }
@@ -212,7 +232,7 @@ export function registerOpdsV2Routes(app, deps) {
   });
 
   // Search
-  app.get('/opds/v2/search', requireOpdsAuth, (req, res) => {
+  app.get('/opds/v2/search', requireOpdsAuth, async (req, res) => {
     const query = String(req.query.query || req.query.term || req.query.q || '').trim();
     const genre = String(req.query.genre || '').trim();
     const page = safePage(req.query.page);
@@ -223,6 +243,7 @@ export function registerOpdsV2Routes(app, deps) {
       ? `/opds/v2/search?query=${encodeURIComponent(query)}&genre=${encodeURIComponent(genre)}&page=${page + 1}`
       : null;
 
+    await attachFlibustaAnnotationsFromShards(result.items);
     res.type(OPDS_JSON);
     res.send(renderOpds2PublicationsFeed(base, {
       title: query ? `${t('opds.nav.search')}: ${query}` : t('opds.nav.search'),

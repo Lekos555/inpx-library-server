@@ -717,6 +717,161 @@ export async function readFlibustaAnnotationHtml(libraryRoot, archiveName, fileN
 }
 
 /**
+ * Кэш XML-шардов из etc/annotations.7z: один шард = один книжный архив,
+ * содержит аннотации десятков/сотен книг. Без кэша при каждом OPDS-листинге
+ * пришлось бы заново спавнить 7z для каждой книги — катастрофично на больших зеркалах.
+ */
+const SIDECAR_ANNOTATION_SHARD_TTL_MS = parseEnvTimeoutMs(
+  'SIDECAR_ANNOTATION_SHARD_TTL_MS',
+  5 * 60_000
+);
+const SIDECAR_ANNOTATION_SHARD_MAX_ENTRIES = Math.max(
+  4,
+  Number.parseInt(String(process.env.SIDECAR_ANNOTATION_SHARD_MAX_ENTRIES || ''), 10) || 32
+);
+const annotationShardCache = new Map();
+
+function evictAnnotationShardCacheIfNeeded() {
+  while (annotationShardCache.size > SIDECAR_ANNOTATION_SHARD_MAX_ENTRIES) {
+    const oldest = annotationShardCache.keys().next().value;
+    if (oldest === undefined) break;
+    annotationShardCache.delete(oldest);
+  }
+}
+
+async function loadAnnotationShardXml(annPath, internalKey) {
+  const cacheKey = `${annPath}|${internalKey}`;
+  const now = Date.now();
+  const cached = annotationShardCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    /* LRU: переставляем в конец Map. */
+    annotationShardCache.delete(cacheKey);
+    annotationShardCache.set(cacheKey, cached);
+    return cached.xml;
+  }
+  if (cached) annotationShardCache.delete(cacheKey);
+  let xml = '';
+  try {
+    const buf = await readSevenZipEntry(annPath, internalKey, config.sevenZipPath);
+    xml = buf.toString('utf8');
+  } catch {
+    xml = '';
+  }
+  annotationShardCache.set(cacheKey, {
+    xml,
+    expiresAt: Date.now() + SIDECAR_ANNOTATION_SHARD_TTL_MS
+  });
+  evictAnnotationShardCacheIfNeeded();
+  return xml;
+}
+
+let _stmtGetStoredAnnotationLite;
+function getStoredAnnotationFast(bookId) {
+  if (!bookId) return '';
+  try {
+    if (!_stmtGetStoredAnnotationLite) {
+      _stmtGetStoredAnnotationLite = db.prepare(
+        `SELECT annotation FROM book_details_cache WHERE book_id = ?`
+      );
+    }
+    const row = _stmtGetStoredAnnotationLite.get(bookId);
+    return row?.annotation || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Пакетно подтягивает аннотации из etc/annotations.7z для книг с включённым flibusta sidecar.
+ * Используется в OPDS-листингах (без этого описания видны только в web UI, где их догружает
+ * getOrExtractBookDetails). Группирует книги по архиву — XML-шард извлекается один раз
+ * на архив (с TTL-кэшем), затем для каждой книги парсится её аннотация.
+ * Мутирует book.annotation у переданных объектов; ничего не возвращает.
+ */
+export async function attachFlibustaAnnotationsFromShards(books) {
+  if (!Array.isArray(books) || !books.length) return;
+  /** @type {Map<string, { annPath: string, root: string, archiveName: string, books: any[] }>} */
+  const groups = new Map();
+  /** Кэш «sourceId -> sidecar root» в рамках одного вызова: getSourceById делает SQL-запрос,
+   *  а на странице OPDS обычно 1–2 источника — повторно дёргать БД на каждую книгу не нужно. */
+  const rootBySourceId = new Map();
+  for (const book of books) {
+    if (!book || book.annotation) continue;
+    if (!book.archiveName) continue;
+    if (Number(book.sourceFlibusta) !== 1) continue;
+    const stored = getStoredAnnotationFast(book.id);
+    if (stored) {
+      book.annotation = stored;
+      continue;
+    }
+    const sid = book.sourceId;
+    let root;
+    if (rootBySourceId.has(sid)) {
+      root = rootBySourceId.get(sid);
+    } else {
+      root = getSidecarRootForBook(book);
+      rootBySourceId.set(sid, root);
+    }
+    if (!root) continue;
+    const annPath = path.join(root, ANNOTATIONS_REL);
+    const groupKey = `${root}\n${book.archiveName}`;
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = { annPath, root, archiveName: book.archiveName, books: [] };
+      groups.set(groupKey, group);
+    }
+    group.books.push(book);
+  }
+  if (!groups.size) return;
+  const entries = [...groups.values()];
+  const concurrency = Math.min(entries.length, 4);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (cursor < entries.length) {
+        const idx = cursor++;
+        const group = entries[idx];
+        try {
+          if (!fs.existsSync(group.annPath)) continue;
+          const resolved = resolveLibraryArchiveRelPath(group.root, group.archiveName);
+          const internals = [
+            ...new Set([
+              ...candidateAnnotationSevenZipInternals(group.archiveName),
+              ...candidateAnnotationSevenZipInternals(resolved)
+            ])
+          ].filter((s) => s && !s.includes('..'));
+          let xml = '';
+          for (const internal of internals) {
+            xml = await loadAnnotationShardXml(group.annPath, internal);
+            if (xml) break;
+          }
+          if (!xml) continue;
+          const folderCandidates = [
+            ...new Set([
+              ...annotationXmlFolderNameCandidates(group.archiveName),
+              ...annotationXmlFolderNameCandidates(resolved)
+            ])
+          ];
+          for (const book of group.books) {
+            const fileBase = String(book.fileName || '').replace(/\.fb2$/i, '');
+            if (!fileBase) continue;
+            for (const folderName of folderCandidates) {
+              const raw = parseAnnotationFromShardXml(xml, folderName, fileBase);
+              if (raw) {
+                book.annotation = sanitizeRichAnnotationHtml(raw);
+                break;
+              }
+            }
+          }
+        } catch {
+          /* OPDS-листинг не должен падать из-за единичных ошибок sidecar */
+        }
+      }
+    })
+  );
+}
+
+/**
  * Обложка строго из covers/*.zip|.7z (как FLibrary ParseCover, без подмены иллюстрацией).
  * Третий аргумент: lib_id (строка), массив ключей или объект book (см. coverPrimaryKeysForBook — как FLibrary ImageRestore).
  */
