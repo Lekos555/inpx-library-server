@@ -5036,7 +5036,7 @@ function attachDirtyFormTracking() {
   if (params.has('page')) currentPage = Math.max(1, parseInt(params.get('page'), 10) || 1);
 
   let suppPage = 1;
-  let suppFilter = '';
+  let sharedFilter = '';
   let lastSuppData = null;
 
   let dupBusy = false;
@@ -5072,7 +5072,9 @@ function attachDirtyFormTracking() {
     /* После любой мутации (удаление / автоочистка / восстановление) данные устарели —
        сбрасываем sessionStorage-кеш, чтобы reload-запрос точно перетёр результаты. */
     invalidateDupCache();
+    invalidateSuppCache();
     loadDuplicates(currentPage);
+    loadSuppressed(true);
   }
 
   function renderAutoCleanPanel(preview) {
@@ -5091,36 +5093,22 @@ function attachDirtyFormTracking() {
     if (!groups || !groups.length) {
       return '<p class="muted" style="margin:24px 0">' + escapeHtml(uiT('admin.duplicates.empty')) + '</p>';
     }
-    return groups.map(function(group, gi) {
-      var thTitle = escapeHtml(uiT('admin.duplicates.thTitle'));
-      var thAuthors = escapeHtml(uiT('admin.duplicates.thAuthors'));
-      var thFormat = escapeHtml(uiT('admin.duplicates.thFormat'));
-      var thSize = escapeHtml(uiT('admin.duplicates.thSize'));
-      var thLang = escapeHtml(uiT('admin.duplicates.thLang'));
-      var thFile = escapeHtml(uiT('admin.duplicates.thFile'));
-      var rows = group.items.map(function(book) {
+    return groups.map(function(group) {
+      var items = group.items || [];
+      var rows = items.map(function(book) {
         return '<tr>'
-          + '<td data-label="' + thTitle + '"><a href="/book/' + encodeURIComponent(book.id) + '">' + escapeHtml(book.title) + '</a></td>'
-          + '<td data-label="' + thAuthors + '">' + escapeHtml(book.authors || '') + '</td>'
-          + '<td data-label="' + thFormat + '"><span class="admin-chip admin-compact-btn">' + escapeHtml((book.ext || '').toUpperCase()) + '</span></td>'
-          + '<td data-label="' + thSize + '" style="white-space:nowrap">' + escapeHtml(fmtSize(book.size)) + '</td>'
-          + '<td data-label="' + thLang + '">' + escapeHtml(book.lang || '') + '</td>'
-          + '<td data-label="' + thFile + '" class="muted" style="font-size:.85em;word-break:break-all">' + escapeHtml(book.archive_name || book.file_name || '') + '</td>'
-          + '<td data-label=""><button type="button" class="button-danger admin-compact-btn" data-dup-delete="' + escapeHtml(book.id) + '" data-title="' + escapeHtml(book.title) + '">' + escapeHtml(uiT('admin.duplicates.delete')) + '</button></td></tr>';
+          + '<td>' + escapeHtml(book.title || book.id) + '</td>'
+          + '<td><span class="admin-chip" style="font-size:.8em">' + escapeHtml((book.ext || '').toUpperCase()) + '</span></td>'
+          + '<td><button type="button" class="button-danger admin-compact-btn" data-dup-delete="' + escapeHtml(book.id) + '" data-title="' + escapeHtml(book.title) + '" style="font-size:.8em;padding:3px 8px">' + escapeHtml(uiT('admin.duplicates.delete')) + '</button></td></tr>';
       }).join('');
-      return '<details class="admin-dup-group" ' + (gi < 5 ? 'open' : '') + '>'
+      return '<details class="admin-dup-group">'
         + '<summary class="admin-dup-group-summary">'
-        + '<strong class="admin-dup-group-title">' + escapeHtml(group.title) + '</strong>'
-        + '<span class="muted admin-dup-group-author"> \u2014 ' + escapeHtml(group.authors || uiT('book.authorUnknown')) + '</span>'
-        + '<span class="admin-chip admin-dup-group-count">' + group.items.length + ' ' + escapeHtml(uiPlural('copy', group.items.length)) + '</span>'
+        + '<strong class="admin-dup-group-title">' + escapeHtml(group.authors || uiT('book.authorUnknown')) + '</strong>'
+        + '<span class="admin-chip admin-dup-group-count">' + items.length + ' ' + escapeHtml(uiPlural('book', items.length)) + '</span>'
         + '</summary>'
-        + '<div class="admin-dup-table-wrap"><table class="admin-table admin-dup-table" style="width:100%;margin:8px 0"><thead><tr>'
+        + '<div style="overflow-x:auto"><table class="admin-table" style="width:100%;margin:8px 0"><thead><tr>'
         + '<th>' + escapeHtml(uiT('admin.duplicates.thTitle')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thAuthors')) + '</th>'
         + '<th>' + escapeHtml(uiT('admin.duplicates.thFormat')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thSize')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thLang')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thFile')) + '</th>'
         + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div></details>';
     }).join('');
   }
@@ -5128,17 +5116,32 @@ function attachDirtyFormTracking() {
   function renderPagination(total, pageSize, page) {
     var totalPages = Math.ceil(total / pageSize) || 1;
     if (totalPages <= 1) return '';
-    var html = '<div class="pagination" style="margin-top:16px">';
-    var maxP = Math.min(totalPages, 20);
-    for (var i = 1; i <= maxP; i++) {
+    var html = '<nav class="pagination" style="margin-top:16px" aria-label="' + escapeHtml(uiT('pagination.label') || 'Pagination') + '">';
+    if (page > 1) html += '<a href="#" class="page-link page-link-prev" data-page="' + (page - 1) + '">' + escapeHtml(uiT('pagination.prev') || '\u2190') + '</a> ';
+
+    var windowStart = Math.max(1, page - 2);
+    var windowEnd = Math.min(totalPages, page + 2);
+
+    if (windowStart > 1) {
+      html += '<a href="#" class="page-link" data-page="1">1</a> ';
+      if (windowStart > 2) html += '<span class="page-ellipsis muted">\u2026</span> ';
+    }
+
+    for (var i = windowStart; i <= windowEnd; i++) {
       if (i === page) {
-        html += '<span class="pagination-current">' + i + '</span> ';
+        html += '<span class="page-link page-link-active">' + i + '</span> ';
       } else {
-        html += '<a href="/admin/duplicates?page=' + i + '">' + i + '</a> ';
+        html += '<a href="#" class="page-link" data-page="' + i + '">' + i + '</a> ';
       }
     }
-    if (totalPages > 20) html += ' \u2026';
-    html += '</div>';
+
+    if (windowEnd < totalPages) {
+      if (windowEnd < totalPages - 1) html += '<span class="page-ellipsis muted">\u2026</span> ';
+      html += '<a href="#" class="page-link" data-page="' + totalPages + '">' + totalPages + '</a> ';
+    }
+
+    if (page < totalPages) html += '<a href="#" class="page-link page-link-next" data-page="' + (page + 1) + '">' + escapeHtml(uiT('pagination.next') || '\u2192') + '</a>';
+    html += '</nav>';
     return html;
   }
 
@@ -5224,21 +5227,23 @@ function attachDirtyFormTracking() {
     return groupsHtml + pagHtml + unsuppressAllBtn;
   }
 
-  function renderSuppressedSection(sdata) {
-    const totalBooks = sdata?.totalBooks ?? sdata?.total ?? 0;
-    const hasFilter = Boolean(sdata?.filter || suppFilter);
-    const filterHtml = '<form class="search-form browse-filter" id="supp-filter-form" style="margin-bottom:16px;max-width:460px;">'
-      + '<input type="text" name="q" id="supp-filter" placeholder="' + escapeHtml(uiT('admin.duplicates.filterPlaceholder')) + '" value="' + escapeHtml(sdata?.filter || suppFilter || '') + '">'
+  function renderSharedFilter(filter) {
+    const hasFilter = Boolean(filter);
+    return '<form class="search-form browse-filter" id="shared-filter-form" style="margin-bottom:16px;max-width:460px;">'
+      + '<input type="text" name="q" id="shared-filter" placeholder="' + escapeHtml(uiT('admin.duplicates.filterPlaceholder')) + '" value="' + escapeHtml(filter || '') + '">'
       + '<div class="actions">'
       + '<button type="submit" class="button">' + escapeHtml(uiT('admin.duplicates.filterBtn')) + '</button>'
-      + (hasFilter ? '<button type="button" class="button" id="supp-filter-reset">' + escapeHtml(uiT('browse.reset') || 'Сбросить') + '</button>' : '')
+      + (hasFilter ? '<button type="button" class="button" id="shared-filter-reset">' + escapeHtml(uiT('browse.reset') || 'Сбросить') + '</button>' : '')
       + '</div></form>';
+  }
 
-    return '<div class="admin-card" style="margin-top:20px">'
+  function renderSuppressedSection(sdata) {
+    const totalBooks = sdata?.totalBooks ?? sdata?.total ?? 0;
+
+    return '<div id="supp-section" class="admin-card" style="margin-top:20px">'
       + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div>'
       + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.suppressedHint')) + '</div>'
       + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.suppressedCount', { n: totalBooks })) + '</div>'
-      + filterHtml
       + '<div id="supp-content">' + renderSuppressedContent(sdata) + '</div>'
       + '</div>';
   }
@@ -5255,6 +5260,14 @@ function attachDirtyFormTracking() {
       btn.addEventListener('click', function() {
         var n = Number(btn.getAttribute('data-n') || 0);
         dupAction('/api/admin/duplicates/auto-clean', {}, uiTp('admin.duplicates.autoCleanConfirm', { n: n }), true, btn);
+      });
+    });
+    // Pagination
+    resultsEl.querySelectorAll('.page-link[data-page]').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        currentPage = Number(link.getAttribute('data-page') || 1);
+        loadDuplicates(currentPage, true);
       });
     });
   }
@@ -5282,17 +5295,25 @@ function attachDirtyFormTracking() {
         loadSuppressed();
       });
     });
-    // Suppressed client-side filter
-    const filterForm = section.querySelector('#supp-filter-form');
-    const filterInput = section.querySelector('#supp-filter');
-    const filterReset = section.querySelector('#supp-filter-reset');
+  }
+
+  var filterWrap = document.getElementById('dup-filter-wrap');
+  var suppWrap = document.getElementById('supp-wrap');
+
+  function wireSharedFilter() {
+    const filterForm = filterWrap.querySelector('#shared-filter-form');
+    const filterInput = filterWrap.querySelector('#shared-filter');
+    const filterReset = filterWrap.querySelector('#shared-filter-reset');
     if (!filterForm || !filterInput) return;
 
     const applyFilter = function() {
       const query = String(filterInput.value || '').trim().toLowerCase();
-      suppFilter = query;
+      if (sharedFilter === query) return;
+      sharedFilter = query;
+      currentPage = 1;
       suppPage = 1;
-      loadSuppressed();
+      loadDuplicates(currentPage, true);
+      loadSuppressed(true);
     };
 
     if (!filterForm.dataset.wired) {
@@ -5313,9 +5334,12 @@ function attachDirtyFormTracking() {
     if (filterReset && !filterReset.dataset.wired) {
       filterReset.addEventListener('click', function() {
         filterInput.value = '';
-        suppFilter = '';
+        if (sharedFilter === '') return;
+        sharedFilter = '';
+        currentPage = 1;
         suppPage = 1;
-        loadSuppressed();
+        loadDuplicates(currentPage, true);
+        loadSuppressed(true);
       });
       filterReset.dataset.wired = '1';
     }
@@ -5329,10 +5353,10 @@ function attachDirtyFormTracking() {
      удаления/автоочистки чистится принудительно (см. dupAction → invalidateCache). */
   var DUP_CACHE_KEY_PREFIX = 'inpx-dup-cache-v1:';
   var DUP_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // не показываем кеш старше 30 минут
-  function dupCacheKey(page) { return DUP_CACHE_KEY_PREFIX + 'page-' + page; }
-  function readDupCache(page) {
+  function dupCacheKey(page, filter) { return DUP_CACHE_KEY_PREFIX + 'page-' + page + ':f-' + (filter || ''); }
+  function readDupCache(page, filter) {
     try {
-      var raw = sessionStorage.getItem(dupCacheKey(page));
+      var raw = sessionStorage.getItem(dupCacheKey(page, filter));
       if (!raw) return null;
       var obj = JSON.parse(raw);
       if (!obj || !obj.ts) return null;
@@ -5340,9 +5364,10 @@ function attachDirtyFormTracking() {
       return obj;
     } catch (e) { return null; }
   }
-  function writeDupCache(page, data) {
+  function writeDupCache(page, filter, data) {
     try {
-      sessionStorage.setItem(dupCacheKey(page), JSON.stringify({ ts: Date.now(), data: data }));
+      sessionStorage.setItem(dupCacheKey(page, filter), JSON.stringify({ ts: Date.now(), data: data }));
+      trimCache(DUP_CACHE_KEY_PREFIX, 20);
     } catch (e) { /* квота переполнилась или storage недоступен — игнорируем */ }
   }
   function invalidateDupCache() {
@@ -5356,7 +5381,56 @@ function attachDirtyFormTracking() {
     } catch (e) {}
   }
 
-  function renderDupResults(data, sdata, isStale) {
+  var SUPP_CACHE_KEY_PREFIX = 'inpx-supp-cache-v1:';
+  var SUPP_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+  function suppCacheKey(page, filter) { return SUPP_CACHE_KEY_PREFIX + 'page-' + page + ':f-' + (filter || ''); }
+  function readSuppCache(page, filter) {
+    try {
+      var raw = sessionStorage.getItem(suppCacheKey(page, filter));
+      if (!raw) return null;
+      var obj = JSON.parse(raw);
+      if (!obj || !obj.ts) return null;
+      if (Date.now() - obj.ts > SUPP_CACHE_MAX_AGE_MS) return null;
+      return obj;
+    } catch (e) { return null; }
+  }
+  function writeSuppCache(page, filter, data) {
+    try {
+      sessionStorage.setItem(suppCacheKey(page, filter), JSON.stringify({ ts: Date.now(), data: data }));
+      trimCache(SUPP_CACHE_KEY_PREFIX, 20);
+    } catch (e) {}
+  }
+  function invalidateSuppCache() {
+    try {
+      var keys = [];
+      for (var i = 0; i < sessionStorage.length; i++) {
+        var k = sessionStorage.key(i);
+        if (k && k.indexOf(SUPP_CACHE_KEY_PREFIX) === 0) keys.push(k);
+      }
+      keys.forEach(function(k) { sessionStorage.removeItem(k); });
+    } catch (e) {}
+  }
+
+  function trimCache(prefix, maxKeys) {
+    try {
+      var keys = [];
+      for (var i = 0; i < sessionStorage.length; i++) {
+        var k = sessionStorage.key(i);
+        if (k && k.indexOf(prefix) === 0) keys.push(k);
+      }
+      if (keys.length <= maxKeys) return;
+      keys.sort(function(a, b) {
+        var ta = JSON.parse(sessionStorage.getItem(a) || '{}').ts || 0;
+        var tb = JSON.parse(sessionStorage.getItem(b) || '{}').ts || 0;
+        return tb - ta; // старые в конце
+      });
+      for (var j = maxKeys; j < keys.length; j++) {
+        sessionStorage.removeItem(keys[j]);
+      }
+    } catch (e) {}
+  }
+
+  function renderDupResults(data, isStale) {
     var staleBadge = isStale
       ? '<div class="muted" style="font-size:.85em;margin:0 0 8px 0;display:flex;align-items:center;gap:8px"><span class="btn-spinner" style="width:12px;height:12px"></span>' + escapeHtml(uiT('admin.duplicates.refreshing')) + '</div>'
       : '';
@@ -5368,12 +5442,12 @@ function attachDirtyFormTracking() {
       + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.totalGroups', { n: data.total })) + '</div>'
       + renderGroups(data.groups)
       + renderPagination(data.total, data.pageSize, data.page)
-      + '</div>'
-      + '<div id="supp-section">' + renderSuppressedSection(sdata && sdata.ok ? sdata : { total: 0, rows: [] }) + '</div>';
+      + '</div>';
     resultsEl.innerHTML = html;
     wireActions();
-    wireSuppressedActions();
   }
+
+  var _dupAbort = null;
 
   function showDupProgress() {
     /* Поиск дубликатов — это один большой SQL GROUP BY, реального прогресса от сервера нет;
@@ -5388,67 +5462,111 @@ function attachDirtyFormTracking() {
       + '</div>';
   }
 
-  function loadDuplicates(page) {
+  function showSuppProgress() {
+    if (!suppWrap) return;
+    suppWrap.innerHTML =
+      '<div class="admin-card" style="margin-top:20px;padding:20px;">'
+        + '<div class="muted" style="font-size:.9em;display:flex;align-items:center;gap:8px">'
+        + '<span class="btn-spinner" style="width:12px;height:12px"></span>'
+        + escapeHtml(uiT('app.loading') || 'Загрузка…') + '</div>'
+      + '</div>';
+  }
+
+  function loadDuplicates(page, skipProgress) {
+    if (_dupAbort) { _dupAbort.abort(); _dupAbort = null; }
+
     /* Шаг 1: если есть кеш — рендерим прошлый результат МГНОВЕННО.
-       Иначе показываем полоску прогресса. */
-    var cached = readDupCache(page);
+       Иначе показываем полоску прогресса (только при первой загрузке). */
+    var cached = readDupCache(page, sharedFilter);
     var shownFromCache = false;
     if (cached && cached.data && cached.data.ok) {
-      renderDupResults(cached.data, lastSuppData || { total: 0, rows: [] }, true);
+      renderDupResults(cached.data, !skipProgress);
       shownFromCache = true;
-    } else {
+    } else if (!skipProgress) {
       showDupProgress();
+    } else {
+      resultsEl.innerHTML = ''; // при смене фильтра без кеша не показываем старые данные
     }
 
-    /* Шаг 2: всегда тянем свежие данные фоном и заменяем UI когда придут. */
-    fetch('/api/admin/duplicates?page=' + page)
+    /* Шаг 2: тянем свежие данные фоном, отменяем устаревший запрос. */
+    var requestFilter = sharedFilter;
+    var requestPage = page;
+    _dupAbort = new AbortController();
+    fetch('/api/admin/duplicates?page=' + page + (sharedFilter ? '&filter=' + encodeURIComponent(sharedFilter) : ''), { signal: _dupAbort.signal })
       .then(function(r) { return r.json(); })
       .then(function(data) {
+        if (requestFilter !== sharedFilter || requestPage !== currentPage) return; // устаревший ответ
         if (!data || !data.ok) {
           if (!shownFromCache) {
             resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error loading duplicates</p></div>';
           }
           return;
         }
-        renderDupResults(data, lastSuppData || { total: 0, rows: [] }, false);
-        writeDupCache(page, data);
+        renderDupResults(data, false);
+        writeDupCache(page, sharedFilter, data);
       })
       .catch(function(err) {
+        if (err && err.name === 'AbortError') return;
+        if (requestFilter !== sharedFilter || requestPage !== currentPage) return;
         if (!shownFromCache) {
           resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error: ' + escapeHtml(String(err)) + '</p></div>';
         }
         /* Если кеш уже отрисован — оставляем его, не ломаем UI ошибкой. */
+      })
+      .finally(function() {
+        if (_dupAbort && _dupAbort.signal.aborted === false) _dupAbort = null;
       });
   }
 
-  function loadSuppressed() {
-    const url = '/api/admin/suppressed?page=' + suppPage + (suppFilter ? '&filter=' + encodeURIComponent(suppFilter) : '');
-    fetch(url)
+  function renderSuppSection(sdata) {
+    if (!suppWrap) return;
+    suppWrap.innerHTML = renderSuppressedSection(sdata || { total: 0, rows: [] });
+    wireSuppressedActions();
+  }
+
+  var _suppAbort = null;
+
+  function loadSuppressed(skipProgress) {
+    if (_suppAbort) { _suppAbort.abort(); _suppAbort = null; }
+
+    var cached = readSuppCache(suppPage, sharedFilter);
+    var shownFromCache = false;
+    if (cached && cached.data && cached.data.ok) {
+      lastSuppData = cached.data;
+      renderSuppSection(lastSuppData);
+      shownFromCache = true;
+    } else if (!skipProgress) {
+      showSuppProgress();
+    } else {
+      if (suppWrap) suppWrap.innerHTML = ''; // при смене фильтра без кеша не показываем старые данные
+    }
+
+    var requestFilter = sharedFilter;
+    var requestPage = suppPage;
+    _suppAbort = new AbortController();
+    const url = '/api/admin/suppressed?page=' + suppPage + (sharedFilter ? '&filter=' + encodeURIComponent(sharedFilter) : '');
+    fetch(url, { signal: _suppAbort.signal })
       .then(function(r) { return r.json(); })
       .then(function(sdata) {
-        lastSuppData = sdata && sdata.ok ? sdata : null;
-        const section = document.getElementById('supp-section');
-        if (!section) return;
-
-        const hintEl = section.querySelector('.list-context-hint');
-        if (hintEl) {
-          const totalBooks = lastSuppData?.totalBooks ?? lastSuppData?.total ?? 0;
-          hintEl.textContent = uiTp('admin.duplicates.suppressedCount', { n: totalBooks });
-        }
-
-        const contentEl = document.getElementById('supp-content');
-        if (contentEl) {
-          contentEl.innerHTML = renderSuppressedContent(lastSuppData || { total: 0, rows: [] });
-          wireSuppressedActions();
-        }
-        const active = document.activeElement;
-        if (!active || active.id !== 'supp-filter') {
-          section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
+        if (requestFilter !== sharedFilter || requestPage !== suppPage) return; // устаревший ответ
+        if (!sdata || !sdata.ok) return;
+        lastSuppData = sdata;
+        renderSuppSection(lastSuppData);
+        writeSuppCache(suppPage, sharedFilter, lastSuppData);
       })
       .catch(function(err) {
+        if (err && err.name === 'AbortError') return;
         console.error('loadSuppressed error', err);
+      })
+      .finally(function() {
+        if (_suppAbort && _suppAbort.signal.aborted === false) _suppAbort = null;
       });
+  }
+
+  /* Рендерим фильтр один раз в статичный контейнер. */
+  if (filterWrap) {
+    filterWrap.innerHTML = renderSharedFilter(sharedFilter);
+    wireSharedFilter();
   }
 
   /* Автоматический запуск при заходе: либо мгновенный рендер из кеша,

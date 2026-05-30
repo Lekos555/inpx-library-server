@@ -180,12 +180,20 @@ export function invalidateDuplicatesCache() {
   facetBooksCache.clear();
   facetSummaryCache.clear();
   _dupSummaryCache = null;
+  _dupGroupsCache = null;
 }
 
 /* Короткий кеш сводки по дубликатам: один полный проход вместо двух (total + preview). */
 let _dupSummaryCache = null;
 const DUP_SUMMARY_TTL_MS = 60_000;
 let _stmtDupSummary = null;
+
+/* Кеш групп дубликатов для пагинации: один проход, потом нарезка в памяти.
+   Кеш привязан к конкретному фильтру. */
+let _dupGroupsCache = null;
+const DUP_GROUPS_TTL_MS = 30_000;
+let _stmtDupGroupsAll = null;
+let _stmtDupGroupsFiltered = null;
 function getDuplicatesSummary() {
   if (_dupSummaryCache && Date.now() < _dupSummaryCache.expiresAt) {
     return _dupSummaryCache.value;
@@ -3057,42 +3065,81 @@ export function getBookDuplicateCandidates(_bookId, _limit = 8) {
 }
 
 // ─── Duplicate detection ─────────────────────────────────────────
-let _stmtDupGroups = null;
-export function getDuplicateGroups({ page = 1, pageSize = 50 } = {}) {
-  const offset = (page - 1) * pageSize;
-  /* Используем общую сводку — один проход вместо двух дорогих агрегатов на странице. */
-  const total = getDuplicatesSummary().totalGroups;
+export function getDuplicateGroups({ page = 1, pageSize = 50, filter = '' } = {}) {
+  const normalizedFilter = String(filter || '').trim().toLowerCase();
+  if (_dupGroupsCache && _dupGroupsCache.filter === normalizedFilter && Date.now() < _dupGroupsCache.expiresAt) {
+    const allGroups = _dupGroupsCache.value.groups;
+    const total = _dupGroupsCache.value.total;
+    const start = (page - 1) * pageSize;
+    return { total, groups: allGroups.slice(start, start + pageSize) };
+  }
 
-  _stmtDupGroups ??= db.prepare(`
-    WITH dup_keys AS (
-      SELECT title_sort, authors
-      FROM active_books
-      WHERE title_sort IS NOT NULL AND title_sort != ''
-      GROUP BY title_sort, authors
-      HAVING COUNT(*) > 1
-      ORDER BY title_sort ASC, authors ASC
-      LIMIT ? OFFSET ?
-    )
-    SELECT b.id, b.title, b.authors, b.ext, b.lang, b.size, b.file_name, b.archive_name,
-           b.title_sort, b.source_id
-    FROM active_books b
-    JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = b.authors
-    ORDER BY b.title_sort ASC, b.authors ASC, b.ext ASC, b.id ASC
-  `);
-  const groups = _stmtDupGroups.all(pageSize, offset);
+  let rows;
+  if (normalizedFilter) {
+    const like = '%' + normalizedFilter + '%';
+    _stmtDupGroupsFiltered ??= db.prepare(`
+      WITH dup_keys AS (
+        SELECT title_sort, COALESCE(authors, '') AS authors
+        FROM active_books
+        WHERE title_sort IS NOT NULL AND title_sort != ''
+        GROUP BY title_sort, authors
+        HAVING COUNT(*) > 1
+      ),
+      matched_keys AS (
+        SELECT dk.title_sort, dk.authors
+        FROM dup_keys dk
+        WHERE EXISTS (
+          SELECT 1 FROM active_books b2
+          WHERE b2.title_sort = dk.title_sort
+            AND COALESCE(b2.authors, '') = dk.authors
+            AND (lower_unicode(b2.title) LIKE ? OR lower_unicode(b2.authors) LIKE ?)
+        )
+      )
+      SELECT b.id, b.title, b.authors, b.ext, b.lang, b.size, b.file_name, b.archive_name,
+             b.title_sort, b.source_id
+      FROM active_books b
+      JOIN matched_keys mk ON b.title_sort = mk.title_sort AND COALESCE(b.authors, '') = mk.authors
+      ORDER BY COALESCE(b.authors, '') ASC, b.title_sort ASC, b.ext ASC, b.id ASC
+    `);
+    rows = _stmtDupGroupsFiltered.all(like, like);
+  } else {
+    _stmtDupGroupsAll ??= db.prepare(`
+      WITH dup_keys AS (
+        SELECT title_sort, COALESCE(authors, '') AS authors
+        FROM active_books
+        WHERE title_sort IS NOT NULL AND title_sort != ''
+        GROUP BY title_sort, authors
+        HAVING COUNT(*) > 1
+      )
+      SELECT b.id, b.title, b.authors, b.ext, b.lang, b.size, b.file_name, b.archive_name,
+             b.title_sort, b.source_id
+      FROM active_books b
+      JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = COALESCE(b.authors, '')
+      ORDER BY COALESCE(b.authors, '') ASC, b.title_sort ASC, b.ext ASC, b.id ASC
+    `);
+    rows = _stmtDupGroupsAll.all();
+  }
 
-  // Group into arrays by (title_sort, authors)
-  const grouped = [];
+  const allGroups = [];
   let current = null;
-  for (const row of groups) {
-    const key = `${row.title_sort}\0${row.authors}`;
-    if (!current || current.key !== key) {
-      current = { key, title: row.title, authors: row.authors, items: [] };
-      grouped.push(current);
+  for (const row of rows) {
+    const author = row.authors || '';
+    if (!current || current.key !== author) {
+      current = { key: author, title: author, authors: author, items: [] };
+      allGroups.push(current);
     }
     current.items.push(row);
   }
-  return { total, groups: grouped };
+
+  const total = allGroups.length;
+  _dupGroupsCache = {
+    filter: normalizedFilter,
+    value: { total, groups: allGroups },
+    expiresAt: Date.now() + DUP_GROUPS_TTL_MS
+  };
+
+  const start = (page - 1) * pageSize;
+  return { total, groups: allGroups.slice(start, start + pageSize) };
 }
 
 export function softDeleteBook(bookId) {

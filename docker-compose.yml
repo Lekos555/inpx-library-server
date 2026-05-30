@@ -1,13 +1,12 @@
 services:
   library:
-    build: .
-    container_name: inpx-library
     image: habsaec/inpx-library-server:latest
+    container_name: inpx-library
     restart: unless-stopped
-    # Лимит памяти контейнера (рекомендуется 2g для embedded, 4g для больших библиотек)
-    mem_limit: 2g
+    mem_limit: 4g
+    network_mode: "bridge"
     ports:
-      - "3000:3000"
+      - "3535:3000"
     volumes:
       # Код и node_modules в именованном томе (в UI Synology раздел «Тома» может отсутствовать —
       # том всё равно есть; смотреть: SSH → docker volume ls).
@@ -19,7 +18,7 @@ services:
       # Замените строку выше (app-data:/app/data) на:
       - /volume1/docker/inpx-library-data:/app/data
       # Папку нужно создать заранее: mkdir -p /volume1/docker/inpx-library-data
-      # - /volume1/books/library:/library:ro
+      # - /путь/к библиотеке:/library:ro
       # Дополнительные источники книг: монтируйте папки в /sources/*
       # и добавьте их через админку (Источники книг → Добавить → тип «Папка»).
       # Пример:

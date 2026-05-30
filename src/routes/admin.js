@@ -1196,9 +1196,10 @@ export function registerAdminRoutes(app, deps) {
   app.get('/api/admin/duplicates', requireAdminApi, (req, res) => {
     const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
     const pageSize = 50;
-    const result = getDuplicateGroups({ page, pageSize });
+    const filter = String(req.query.filter || '').trim();
+    const result = getDuplicateGroups({ page, pageSize, filter });
     const preview = previewAutoClean();
-    res.json({ ok: true, groups: result.groups, total: result.total, page, pageSize, preview });
+    res.json({ ok: true, groups: result.groups, total: result.total, page, pageSize, filter, preview });
   });
 
   app.post('/api/admin/duplicates/delete', requireAdminApi, (req, res) => {

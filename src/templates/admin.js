@@ -852,7 +852,9 @@ export function renderAdminDuplicates({ user, stats, indexStatus, flash = '', cs
   const content = `
     ${flash ? renderAlert('success', flash) : ''}
     <div data-duplicates-page data-page="1">
+      <div id="dup-filter-wrap"></div>
       <div id="dup-results"></div>
+      <div id="supp-wrap"></div>
     </div>
   `;
   return pageShell({ title: t('admin.nav.duplicates'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('admin.nav.duplicates') }], mode: 'admin', currentPath: '/admin/duplicates', csrfToken });
