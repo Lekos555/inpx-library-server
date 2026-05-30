@@ -6,6 +6,7 @@ import {
   db,
   getMeta,
   setMeta,
+  getSetting,
   getEnabledSources,
   getSourceById,
   addSource,
@@ -67,9 +68,20 @@ const HEAP_WARNING_THRESHOLD_MB = 600;
 const FACET_CACHE_TTL_MS = 120_000; // 20s → 120s:减少分面/系列/作者页面查询
 /** COUNT дедупа по фасету не зависит от страницы — кешируем отдельно, чтобы «далее» не гоняло тяжёлый подсчёт. */
 const FACET_DEDUP_TOTAL_TTL_MS = parseEnvTimeoutMs('FACET_DEDUP_TOTAL_TTL_MS', 300_000);
+/**
+ * Размер фасета (книг), выше которого панели «связанные авторы/серии/жанры» не строятся.
+ * Их GROUP BY по огромному жанру/языку (сотни тысяч книг) блокирует event loop на секунды.
+ * 0 — ограничение отключено (старое поведение). Переопределяется FACET_SUMMARY_MAX_BOOKS.
+ * 5000 — компромисс: для средних фасетов (5–15k) GROUP BY занимает сотни мс–секунды.
+ */
+const FACET_SUMMARY_MAX_BOOKS = Math.max(0, Number.parseInt(String(process.env.FACET_SUMMARY_MAX_BOOKS || ''), 10) || 5_000);
+/** Summary (связанные панели) меняются редко — кэшируем дольше, чем страницы книг. */
+const FACET_SUMMARY_CACHE_TTL_MS = 600_000;
 const AUTHOR_GROUPED_CACHE_TTL_MS = 60_000; // 12s → 60s:减少作者分组页查询
-/** Макс. число строк на странице автора (лимит выборки из БД). */
-const AUTHOR_GROUPED_FETCH_CAP = 50_000;
+/** Макс. число строк на странице автора (лимит выборки из БД).
+ * 50 000 → 10 000: выборка десятков тысяч строк из junction + view
+ * с ORDER BY и LEFT JOIN создаёт многосекундную блокировку event loop. */
+const AUTHOR_GROUPED_FETCH_CAP = 10_000;
 const ARCHIVE_STEM_LOOKUP_TTL_MS = 120_000;
 const BOOKS_FTS_DIRTY_META_KEY = 'books_fts_dirty';
 
@@ -107,6 +119,7 @@ function resetInpxPreparedStatements() {
   _stmtGetStats = null;
   _stmtIsBookRead = null;
   _stmtIsSeriesFullyRead = null;
+  _stmtFacetCountLang = null;
   _stmtBookmarksBySort.clear();
   _stmtBookmarksLimitedBySort.clear();
   _stmtReadBooksBySort.clear();
@@ -2859,9 +2872,9 @@ export function getBooksByIds(ids) {
            b.archive_name AS archiveName, b.size, b.lib_id AS libId, b.ext, b.date, b.lang, b.keywords,
            b.lib_rate AS libRate, b.source_id AS sourceId, b.imported_at AS importedAt,
            COALESCE(s.flibusta_sidecar, 0) AS sourceFlibusta
-    FROM active_books b
+    FROM books b
     LEFT JOIN sources s ON s.id = b.source_id
-    WHERE b.id IN (${placeholders})
+    WHERE b.deleted = 0 AND (b.source_id IS NULL OR s.enabled = 1) AND b.id IN (${placeholders})
   `).all(...ids);
   const books = [];
   const result = new Map();
@@ -3475,9 +3488,16 @@ export function listSeries({ page = 1, pageSize = 50, query = '', sort = 'name',
   return { total, items };
 }
 
+function getExcludedGenreSet() {
+  const raw = getSetting('excluded_genres');
+  return new Set(raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
+}
+
 let _stmtGenresGroupedCount = null;
 let _stmtGenresGroupedName = null;
 export function listGenresGrouped({ sort = 'count' } = {}) {
+  const excludedSet = getExcludedGenreSet();
+  let rows;
   if (sort === 'name') {
     _stmtGenresGroupedName ??= db.prepare(`
       SELECT g.name, COALESCE(g.display_name, g.name) AS displayName,
@@ -3486,16 +3506,18 @@ export function listGenresGrouped({ sort = 'count' } = {}) {
       WHERE g.book_count > 0
       ORDER BY COALESCE(g.sort_name, LOWER(g.name)) ASC
     `);
-    return _stmtGenresGroupedName.all();
+    rows = _stmtGenresGroupedName.all();
+  } else {
+    _stmtGenresGroupedCount ??= db.prepare(`
+      SELECT g.name, COALESCE(g.display_name, g.name) AS displayName,
+             g.book_count AS bookCount
+      FROM genres_catalog g
+      WHERE g.book_count > 0
+      ORDER BY g.book_count DESC
+    `);
+    rows = _stmtGenresGroupedCount.all();
   }
-  _stmtGenresGroupedCount ??= db.prepare(`
-    SELECT g.name, COALESCE(g.display_name, g.name) AS displayName,
-           g.book_count AS bookCount
-    FROM genres_catalog g
-    WHERE g.book_count > 0
-    ORDER BY g.book_count DESC
-  `);
-  return _stmtGenresGroupedCount.all();
+  return excludedSet.size ? rows.filter(g => !excludedSet.has(g.name)) : rows;
 }
 
 export function listGenres({ page = 1, pageSize = 50, query = '', sort = 'name', order = '', letter = '' }) {
@@ -3506,8 +3528,14 @@ export function listGenres({ page = 1, pageSize = 50, query = '', sort = 'name',
     ? applyOrder('COALESCE(g.sort_name, LOWER(g.name)) ASC', order)
     : applyOrder('g.book_count DESC, COALESCE(g.sort_name, LOWER(g.name)) ASC', order);
 
+  const excludedSet = getExcludedGenreSet();
+  const excludedArr = [...excludedSet];
   const whereParts = ['g.book_count > 0'];
   const whereParams = [];
+  if (excludedArr.length) {
+    whereParts.push(`g.name NOT IN (${excludedArr.map(() => '?').join(',')})`);
+    whereParams.push(...excludedArr);
+  }
   if (searchSql) { whereParts.push(searchSql.where); whereParams.push(...searchSql.params); }
   if (letterNorm) { whereParts.push('COALESCE(g.sort_name, LOWER(g.name)) LIKE ?'); whereParams.push(`${letterNorm}%`); }
   const fullWhereClause = `WHERE ${whereParts.join(' AND ')}`;
@@ -3731,9 +3759,10 @@ function _getFacetStmts(facet, sort, order = '', author = '') {
     ? applyOrder('CAST(bs.series_no AS INTEGER) ASC, b.title_sort ASC, b.id DESC', order)
     : sort === 'recent' ? rankOrder : resolveBookAliasSort(sort, 'b', order);
   const totalSql = {
-    authors: `SELECT COUNT(DISTINCT b.id) AS count FROM book_authors ba JOIN authors a ON a.id = ba.author_id JOIN active_books b ON b.id = ba.book_id WHERE a.name = ?`,
-    series: `SELECT COUNT(DISTINCT b.id) AS count FROM book_series bs JOIN series_catalog s ON s.id = bs.series_id JOIN active_books b ON b.id = bs.book_id${seriesJoin} WHERE s.name = ?${seriesWhere}`,
-    genres: `SELECT COUNT(DISTINCT b.id) AS count FROM book_genres bg JOIN genres_catalog g ON g.id = bg.genre_id JOIN active_books b ON b.id = bg.book_id WHERE g.name = ?`,
+    // Junction PK (book_id, author_id) гарантирует уникальность книги на автора → COUNT(*) достаточно.
+    authors: `SELECT COUNT(*) AS count FROM book_authors ba JOIN authors a ON a.id = ba.author_id JOIN active_books b ON b.id = ba.book_id WHERE a.name = ?`,
+    series: `SELECT COUNT(*) AS count FROM book_series bs JOIN series_catalog s ON s.id = bs.series_id JOIN active_books b ON b.id = bs.book_id${seriesJoin} WHERE s.name = ?${seriesWhere}`,
+    genres: `SELECT COUNT(*) AS count FROM book_genres bg JOIN genres_catalog g ON g.id = bg.genre_id JOIN active_books b ON b.id = bg.book_id WHERE g.name = ?`,
     languages: `SELECT COUNT(*) AS count FROM active_books b WHERE COALESCE(NULLIF(b.lang, ''), 'unknown') = ?`
   };
   const itemsSql = {
@@ -3801,7 +3830,15 @@ export function getBooksByFacet({ facet, value, page = 1, pageSize = 24, sort = 
   const totalKey = `${facet}|${value}|${author}`;
   let total = readTimedCache(facetDedupTotalCache, totalKey);
   if (total == null || !Number.isFinite(Number(total))) {
-    total = author ? stmts.total.get(value, author).count : stmts.total.get(value).count;
+    // book_count в catalog-таблицах — предрассчитанный COUNT по active_books.
+    // Для authors/genres/series без доп. фильтра — мгновенный PK-lookup.
+    if (!author && (facet === 'authors' || facet === 'genres' || facet === 'series')) {
+      const catalogTable = facet === 'authors' ? 'authors' : facet === 'genres' ? 'genres_catalog' : 'series_catalog';
+      const countCol = facet === 'authors' ? 'name' : 'name';
+      total = db.prepare(`SELECT book_count AS c FROM ${catalogTable} WHERE ${countCol} = ?`).get(value)?.c ?? 0;
+    } else {
+      total = author ? stmts.total.get(value, author).count : stmts.total.get(value).count;
+    }
     writeTimedCache(facetDedupTotalCache, totalKey, total, FACET_DEDUP_TOTAL_TTL_MS, 400);
   }
 
@@ -3937,6 +3974,13 @@ export function getAuthorBooksGrouped(authorName, sort = 'title', order = '', { 
   const cacheKey = `${authorName}|${sort}|${order}`;
   const cached = readTimedCache(authorGroupedCache, cacheKey);
   if (cached) return cached;
+  const totalBooks = db.prepare('SELECT book_count AS c FROM authors WHERE name = ?').get(authorName)?.c ?? 0;
+  // Guard: если у автора нет книг — не гоняем тяжёлые SQL-запросы через active_books VIEW.
+  if (totalBooks === 0) {
+    const empty = { series: [], standaloneBooks: [], total: 0 };
+    writeTimedCache(authorGroupedCache, cacheKey, empty, AUTHOR_GROUPED_CACHE_TTL_MS, 20);
+    return empty;
+  }
   const authorBooksFrom = `
       FROM book_authors ba
       JOIN authors a ON a.id = ba.author_id
@@ -3946,16 +3990,6 @@ export function getAuthorBooksGrouped(authorName, sort = 'title', order = '', { 
       LEFT JOIN sources src ON src.id = b.source_id
       WHERE a.name = ?
   `;
-
-  const totalBooks =
-    db
-      .prepare(
-        `
-    SELECT COUNT(DISTINCT b.id) AS c
-    ${authorBooksFrom}
-  `
-      )
-      .get(authorName)?.c ?? 0;
 
   const fetchLimit = Math.min(AUTHOR_GROUPED_FETCH_CAP, Math.max(totalBooks, 1));
 
@@ -4109,6 +4143,48 @@ export function getAllBookIdsByFacet(facet, value) {
   return db.prepare(query).all(value).map((row) => row.id);
 }
 
+const EMPTY_FACET_SUMMARY = {
+  relatedTitle: '',
+  relatedPath: '',
+  relatedItems: [],
+  secondaryTitle: '',
+  secondaryPath: '',
+  secondaryItems: []
+};
+
+let _stmtFacetCountAuthor = null;
+let _stmtFacetCountSeries = null;
+let _stmtFacetCountGenre = null;
+let _stmtFacetCountLang = null;
+/**
+ * Дешёвая оценка размера фасета (книг): из предрассчитанного book_count
+ * (authors/series_catalog/genres_catalog) либо индексированного COUNT по языку.
+ * Нужна, чтобы не строить тяжёлые панели «связанных» для гигантских фасетов.
+ */
+function facetEntityBookCount(facet, v) {
+  try {
+    if (facet === 'authors') {
+      _stmtFacetCountAuthor ??= db.prepare('SELECT book_count AS c FROM authors WHERE name = ?');
+      return _stmtFacetCountAuthor.get(v)?.c ?? 0;
+    }
+    if (facet === 'series') {
+      _stmtFacetCountSeries ??= db.prepare('SELECT book_count AS c FROM series_catalog WHERE name = ?');
+      return _stmtFacetCountSeries.get(v)?.c ?? 0;
+    }
+    if (facet === 'genres') {
+      _stmtFacetCountGenre ??= db.prepare('SELECT book_count AS c FROM genres_catalog WHERE name = ?');
+      return _stmtFacetCountGenre.get(v)?.c ?? 0;
+    }
+    if (facet === 'languages') {
+      _stmtFacetCountLang ??= db.prepare("SELECT COUNT(*) AS c FROM active_books WHERE COALESCE(NULLIF(lang, ''), 'unknown') = ?");
+      return _stmtFacetCountLang.get(v)?.c ?? 0;
+    }
+  } catch {
+    /* при недоступности счётчика не блокируем — вернём 0 (guard не сработает) */
+  }
+  return 0;
+}
+
 export function getFacetSummary(facet, value) {
   let v = String(value || '');
   if (facet === 'series') {
@@ -4117,6 +4193,19 @@ export function getFacetSummary(facet, value) {
   const summaryKey = `${facet}|${v}`;
   const summaryHit = readTimedCache(facetSummaryCache, summaryKey);
   if (summaryHit) return summaryHit;
+
+  // Если у фасета 0 книг — не гоняем SQL.
+  const fbc = facetEntityBookCount(facet, v);
+  if (fbc === 0) {
+    writeTimedCache(facetSummaryCache, summaryKey, EMPTY_FACET_SUMMARY, FACET_SUMMARY_CACHE_TTL_MS, 150);
+    return EMPTY_FACET_SUMMARY;
+  }
+  // Для огромных фасетов (жанр/язык на сотни тысяч книг) панели «связанных»
+  // строить нельзя: GROUP BY по всему фасету — секунды синхронной блокировки.
+  if (FACET_SUMMARY_MAX_BOOKS > 0 && fbc > FACET_SUMMARY_MAX_BOOKS) {
+    writeTimedCache(facetSummaryCache, summaryKey, EMPTY_FACET_SUMMARY, FACET_SUMMARY_CACHE_TTL_MS, 150);
+    return EMPTY_FACET_SUMMARY;
+  }
 
   if (facet === 'authors') {
     const series = db.prepare(`
@@ -4153,7 +4242,7 @@ export function getFacetSummary(facet, value) {
       secondaryPath: '/facet/genres',
       secondaryItems: genres
     };
-    writeTimedCache(facetSummaryCache, summaryKey, authorSummary, FACET_CACHE_TTL_MS, 150);
+    writeTimedCache(facetSummaryCache, summaryKey, authorSummary, FACET_SUMMARY_CACHE_TTL_MS, 150);
     return authorSummary;
   }
 
@@ -4192,7 +4281,7 @@ export function getFacetSummary(facet, value) {
       secondaryPath: '/facet/genres',
       secondaryItems: genres
     };
-    writeTimedCache(facetSummaryCache, summaryKey, seriesSummary, FACET_CACHE_TTL_MS, 150);
+    writeTimedCache(facetSummaryCache, summaryKey, seriesSummary, FACET_SUMMARY_CACHE_TTL_MS, 150);
     return seriesSummary;
   }
 
@@ -4231,7 +4320,7 @@ export function getFacetSummary(facet, value) {
       secondaryPath: '/facet/series',
       secondaryItems: series
     };
-    writeTimedCache(facetSummaryCache, summaryKey, genreSummary, FACET_CACHE_TTL_MS, 150);
+    writeTimedCache(facetSummaryCache, summaryKey, genreSummary, FACET_SUMMARY_CACHE_TTL_MS, 150);
     return genreSummary;
   }
 
@@ -4266,7 +4355,7 @@ export function getFacetSummary(facet, value) {
       secondaryPath: '/facet/authors',
       secondaryItems: authors
     };
-    writeTimedCache(facetSummaryCache, summaryKey, langSummary, FACET_CACHE_TTL_MS, 150);
+    writeTimedCache(facetSummaryCache, summaryKey, langSummary, FACET_SUMMARY_CACHE_TTL_MS, 150);
     return langSummary;
   }
 
@@ -4278,7 +4367,7 @@ export function getFacetSummary(facet, value) {
     secondaryPath: '',
     secondaryItems: []
   };
-  writeTimedCache(facetSummaryCache, summaryKey, emptySummary, FACET_CACHE_TTL_MS, 150);
+  writeTimedCache(facetSummaryCache, summaryKey, emptySummary, FACET_SUMMARY_CACHE_TTL_MS, 150);
   return emptySummary;
 }
 

@@ -25,6 +25,9 @@ import { parseEnvTimeoutMs } from './utils/async-timeout.js';
 import { readSevenZipEntry } from './seven-zip.js';
 
 const ANNOTATIONS_REL = path.join('etc', 'annotations.7z');
+const _authorPortraitCache = new Map();
+const _authorBioCache = new Map();
+const AUTHOR_EXTRAS_TTL_MS = 300_000; // 5 минут: портрет/био из sidecar-архивов не меняются часто.
 /** Как FLibrary: `GetAdditionalFolder()` + `/reviews` (см. AuthorReviewModel.cpp); у типичной выкладки Флибусты additional = `etc`. */
 const REVIEWS_DIR = path.join('etc', 'reviews');
 const AUTHORS_DIR = path.join('etc', 'authors');
@@ -1221,10 +1224,17 @@ export function flibustaAuthorKeyCandidates(authorName) {
  * Портрет по имени автора: MD5-кандидаты + только запись из индекса sidecar (без обхода архивов).
  */
 export async function readFlibustaAuthorPortraitForAuthorName(authorName, libraryRoot) {
+  const cacheKey = `${authorName}|${libraryRoot}`;
+  const cached = _authorPortraitCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < AUTHOR_EXTRAS_TTL_MS) return cached.value;
   for (const key of flibustaAuthorKeyCandidates(authorName)) {
     const pic = await readFlibustaAuthorPortraitBuffer(String(key).toLowerCase(), libraryRoot);
-    if (pic?.data?.length) return pic;
+    if (pic?.data?.length) {
+      _authorPortraitCache.set(cacheKey, { ts: Date.now(), value: pic });
+      return pic;
+    }
   }
+  _authorPortraitCache.set(cacheKey, { ts: Date.now(), value: null });
   return null;
 }
 
@@ -1577,14 +1587,20 @@ function getFlibustaAuthorShardRowPreferGlobal(authorKeyLower, sourceId) {
   }
   return db
     .prepare(
-      `SELECT shard_name, entry_path FROM flibusta_author_shard WHERE LOWER(author_key) = LOWER(?) LIMIT 1`
+      `SELECT shard_name, entry_path FROM flibusta_author_shard WHERE author_key = ? COLLATE NOCASE LIMIT 1`
     )
     .get(authorKeyLower);
 }
 
 export async function readFlibustaAuthorBioHtml(authorName, libraryRoot, sourceId) {
+  const cacheKey = `${authorName}|${libraryRoot}|${sourceId ?? ''}`;
+  const cached = _authorBioCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < AUTHOR_EXTRAS_TTL_MS) return cached.value;
   const root = path.resolve(String(libraryRoot || '').trim());
-  if (!root) return '';
+  if (!root) {
+    _authorBioCache.set(cacheKey, { ts: Date.now(), value: '' });
+    return '';
+  }
   for (const key of flibustaAuthorKeyCandidates(authorName)) {
     const k = key.toLowerCase();
     const row = getFlibustaAuthorShardRowPreferGlobal(k, sourceId);
@@ -1602,11 +1618,15 @@ export async function readFlibustaAuthorBioHtml(authorName, libraryRoot, sourceI
         }
       }
       const body = sanitizeRichAnnotationHtml(raw);
-      if (body) return body;
+      if (body) {
+        _authorBioCache.set(cacheKey, { ts: Date.now(), value: body });
+        return body;
+      }
     } catch {
       /* skip */
     }
   }
+  _authorBioCache.set(cacheKey, { ts: Date.now(), value: '' });
   return '';
 }
 

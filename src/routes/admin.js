@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { runWithLocaleLang, resolveLocale, t, tp, countLabel, translateKnownErrorMessage, setDefaultLocale } from '../i18n.js';
 import { ApiErrorCode, apiFail } from '../api-errors.js';
 import { requireAdminWeb, requireAdminApi } from '../middleware/auth.js';
-import { clearPageDataCache } from '../services/cache.js';
+import { getCachedPageData, clearPageDataCache } from '../services/cache.js';
 import { invalidateAllRecommendations } from '../services/recommendations.js';
 import { verifySmtpConnection } from '../services/email.js';
 import {
@@ -1242,8 +1242,9 @@ export function registerAdminRoutes(app, deps) {
 
   app.get('/api/admin/suppressed', requireAdminApi, (req, res) => {
     const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
-    const result = getSuppressedBooks({ page, pageSize: 50 });
-    res.json({ ok: true, ...result, page, pageSize: 50 });
+    const filter = String(req.query.filter || '').trim();
+    const result = getSuppressedBooks({ page, pageSize: 50, filter });
+    res.json({ ok: true, ...result, page, pageSize: 50, filter });
   });
 
   app.post('/api/admin/duplicates/unsuppress', requireAdminApi, (req, res) => {
@@ -1288,13 +1289,15 @@ export function registerAdminRoutes(app, deps) {
 
   app.get('/admin/languages', requireAdminWeb, (req, res) => res.redirect('/admin/content'));
 
+  const CONTENT_LANG_GENRE_CACHE_TTL_MS = 60_000;
+
   app.get('/admin/content', requireAdminWeb, (req, res) => {
-    const allLangs = getDistinctLanguages();
+    const allLangs = getCachedPageData('admin:distinct-langs', () => getDistinctLanguages(), CONTENT_LANG_GENRE_CACHE_TTL_MS);
     const excludedLangs = getSetting('excluded_languages');
     const excludedLangSet = new Set(
       excludedLangs ? excludedLangs.split(',').map(s => s.trim()).filter(Boolean) : []
     );
-    const allGenres = getDistinctGenres();
+    const allGenres = getCachedPageData('admin:distinct-genres', () => getDistinctGenres(), CONTENT_LANG_GENRE_CACHE_TTL_MS);
     const excludedGenres = getSetting('excluded_genres');
     const excludedGenreSet = new Set(
       excludedGenres ? excludedGenres.split(',').map(s => s.trim()).filter(Boolean) : []

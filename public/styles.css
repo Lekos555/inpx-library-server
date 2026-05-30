@@ -464,7 +464,31 @@ html[data-theme="light"] .topbar-admin {
 /* Большой спарклайн для CPU / Память — высота отдаёт лучше тренд при отсутствии
    текстовой подсказки под графиком. */
 .monitor-spark--lg {
-  height: 56px;
+  height: 72px;
+  flex: 1;
+}
+/* Обёртка графика + шкала слева. */
+.monitor-graph-wrap {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-top: 8px;
+}
+.monitor-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.75;
+  text-align: right;
+  width: 36px;
+  line-height: 1;
+  padding: 2px 6px 2px 0;
+  border-right: 1px dashed color-mix(in srgb, var(--muted) 40%, transparent);
+}
+.monitor-scale span {
+  display: block;
 }
 /* Короткая подсказка под каждым тайлом — объясняет, что метрика значит и где порог
    тревоги. Видна без hover, чтобы новый админ не гадал, что такое «event-loop lag». */
@@ -578,14 +602,20 @@ html[data-theme="light"] .topbar-admin {
   font-weight: 600;
   color: var(--text);
 }
+.monitor-spark text.spark-label {
+  fill: var(--muted);
+  font-size: 8px;
+  font-family: sans-serif;
+  text-anchor: end;
+}
 .monitor-spark path.spark-line {
   fill: none;
   stroke: #3fb95e; /* зелёный severity-good, не зависит от темы (одинаково читаемо на тёмной и светлой) */
-  stroke-width: 1.8;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
 .monitor-spark path.spark-fill {
-  fill: color-mix(in srgb, #3fb95e 22%, transparent);
+  fill: color-mix(in srgb, #3fb95e 12%, transparent);
 }
 /* Тонкая сетка на 25 / 50 / 75 % для визуальной шкалы. */
 .monitor-spark line.spark-grid {
@@ -596,6 +626,12 @@ html[data-theme="light"] .topbar-admin {
 }
 .monitor-spark line.spark-grid-mid {
   stroke: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+/* Разделительная линия между шкалой и графиком. */
+.monitor-spark line.spark-axis {
+  stroke: color-mix(in srgb, var(--muted) 40%, transparent);
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
 }
 /* Ряд статистики под графиком: «сейчас X% · min Y% · max Z%». */
 .spark-stats {
@@ -3709,6 +3745,13 @@ html[data-theme="light"] .alert-info {
 .admin-dup-group { border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 8px; }
 .admin-dup-group-summary { padding: 10px 14px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; list-style: none; border-radius: var(--radius-lg); }
 .admin-dup-group-summary::-webkit-details-marker { display: none; }
+.admin-dup-group-summary::after {
+  content: '\25BE'; margin-left: auto; color: var(--muted);
+  transform: rotate(-90deg); transition: transform 0.18s ease;
+}
+.admin-dup-group[open] > .admin-dup-group-summary::after {
+  transform: rotate(0deg);
+}
 .admin-dup-group[open] > .admin-dup-group-summary { border-bottom: 1px solid var(--border); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .admin-dup-group-title { min-width: 0; overflow-wrap: break-word; word-break: break-word; }
 .admin-dup-group-author { min-width: 0; overflow-wrap: break-word; }

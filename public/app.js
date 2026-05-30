@@ -7,6 +7,9 @@ function escapeHtml(value = '') {
     .replace(/'/g, '&#39;');
 }
 
+let _homeRecTimer = 0;
+window.addEventListener('pagehide', () => { if (_homeRecTimer) { clearTimeout(_homeRecTimer); _homeRecTimer = 0; } });
+
 async function loadHomeRecommendationsProgressively(attempt = 0) {
   const section = document.querySelector('[data-home-recommendations]');
   if (!section || section.dataset.loaded === '1') return;
@@ -21,7 +24,9 @@ async function loadHomeRecommendationsProgressively(attempt = 0) {
     const data = await r.json();
     if (data.computing) {
       if (attempt < 10) {
-        setTimeout(() => {
+        if (_homeRecTimer) clearTimeout(_homeRecTimer);
+        _homeRecTimer = setTimeout(() => {
+          _homeRecTimer = 0;
           if (document.querySelector('[data-home-recommendations]')) {
             loadHomeRecommendationsProgressively(attempt + 1);
           }
@@ -340,48 +345,83 @@ function setCoverFallbackState(rootNode, showFallback) {
   }
 }
 
+const _coverFallbackPending = new Map(); // img -> { host, deadline }
+let _coverFallbackTimer = 0;
+
+function _scheduleCoverFallbackFlush() {
+  if (_coverFallbackTimer) return;
+  const now = performance.now();
+  let nextDeadline = Infinity;
+  for (const [, entry] of _coverFallbackPending) {
+    nextDeadline = Math.min(nextDeadline, entry.deadline);
+  }
+  if (nextDeadline === Infinity) return;
+  const delay = Math.max(0, nextDeadline - now);
+  _coverFallbackTimer = window.setTimeout(_flushCoverFallbacks, delay);
+}
+
+function _flushCoverFallbacks() {
+  _coverFallbackTimer = 0;
+  const now = performance.now();
+  for (const [img, entry] of _coverFallbackPending) {
+    if (img.complete) {
+      _coverFallbackPending.delete(img);
+      if (img.naturalWidth > 0) img.classList.add('is-loaded');
+      setCoverFallbackState(entry.host, !(img.naturalWidth > 0));
+      continue;
+    }
+    if (now >= entry.deadline) {
+      setCoverFallbackState(entry.host, true);
+      _coverFallbackPending.delete(img);
+    }
+  }
+  _scheduleCoverFallbackFlush();
+}
+
 /** Декоративная обложка в разметке; при error /cover-thumb (404 без обложки) и при coverAvailable=false не подменяем заглушкой с API. */
 function attachCoverErrorFallback(scope = document) {
   const root = scope && scope.querySelectorAll ? scope : document;
   const imgs = root.querySelectorAll('.cover .cover-image');
+  let added = false;
   for (const img of imgs) {
     if (img.dataset.coverErrBound === '1') continue;
     img.dataset.coverErrBound = '1';
     const host = img.closest('.card, .book-detail-main, .cover');
-    const showFallbackSoonTimer = window.setTimeout(() => {
-      setCoverFallbackState(host, true);
-    }, 2000);
-    const clearSlowTimer = () => window.clearTimeout(showFallbackSoonTimer);
+    const removePending = () => { _coverFallbackPending.delete(img); };
     img.addEventListener('load', () => {
-      clearSlowTimer();
+      removePending();
       img.classList.add('is-loaded');
       setCoverFallbackState(host, false);
     }, { once: true });
     img.addEventListener('error', () => {
-      clearSlowTimer();
+      removePending();
       setCoverFallbackState(host, true);
     }, { once: true });
     if (img.complete) {
-      clearSlowTimer();
+      removePending();
       if (img.naturalWidth > 0) img.classList.add('is-loaded');
       setCoverFallbackState(host, !(img.naturalWidth > 0));
+    } else {
+      _coverFallbackPending.set(img, { host, deadline: performance.now() + 2000 });
+      added = true;
     }
   }
+  if (added) _scheduleCoverFallbackFlush();
 }
 
 const CARD_DETAILS_BATCH_SIZE = 48;
-const CARD_DETAILS_FLUSH_DELAY_MS = 35;
+const CARD_DETAILS_FLUSH_DELAY_MS = 150;
 const CARD_DETAILS_CACHE_MAX = 300;
 const _cardDetailsCache = new Map();
 const _cardDetailsQueued = new Set();
 const _cardDetailsInFlight = new Set();
 let _cardDetailsFlushTimer = 0;
+let _cardDetailsFlushPending = false;
 let _cardDetailsObserver = null;
-let _pagehideListenerAttached = false;
 
 function applyCardDetailsForId(id, details) {
   if (!id || !details) return;
-  const cards = [...document.querySelectorAll('[data-book-id]')].filter((card) => card.dataset.bookId === id);
+  const cards = document.querySelectorAll(`[data-book-id="${CSS.escape(id)}"]`);
   for (const card of cards) {
     card.dataset.coverAvailable = details.coverAvailable ? 'true' : 'false';
     const img = card.querySelector('.cover .cover-image');
@@ -396,7 +436,15 @@ function applyCardDetailsForId(id, details) {
   }
 }
 
+const CARD_DETAILS_CACHE_TTL_MS = 5 * 60 * 1000;
+
 function trimCardDetailsCache() {
+  const now = Date.now();
+  for (const [id, entry] of _cardDetailsCache) {
+    if (now - entry.ts > CARD_DETAILS_CACHE_TTL_MS) {
+      _cardDetailsCache.delete(id);
+    }
+  }
   while (_cardDetailsCache.size > CARD_DETAILS_CACHE_MAX) {
     const first = _cardDetailsCache.keys().next().value;
     if (first === undefined) break;
@@ -408,6 +456,8 @@ function scheduleCardDetailsFlush() {
   if (_cardDetailsFlushTimer) return;
   _cardDetailsFlushTimer = window.setTimeout(async () => {
     _cardDetailsFlushTimer = 0;
+    if (_cardDetailsFlushPending) return;
+    _cardDetailsFlushPending = true;
     while (_cardDetailsQueued.size > 0) {
       const ids = [..._cardDetailsQueued].slice(0, CARD_DETAILS_BATCH_SIZE);
       ids.forEach((id) => {
@@ -427,7 +477,7 @@ function scheduleCardDetailsFlush() {
         for (const id of ids) {
           const details = items[id];
           if (!details) continue;
-          _cardDetailsCache.set(id, details);
+          _cardDetailsCache.set(id, { details, ts: Date.now() });
           trimCardDetailsCache();
           applyCardDetailsForId(id, details);
         }
@@ -437,6 +487,8 @@ function scheduleCardDetailsFlush() {
         ids.forEach((id) => _cardDetailsInFlight.delete(id));
       }
     }
+    _cardDetailsFlushPending = false;
+    if (_cardDetailsQueued.size > 0) scheduleCardDetailsFlush();
   }, CARD_DETAILS_FLUSH_DELAY_MS);
 }
 
@@ -465,14 +517,14 @@ function getCardDetailsObserver() {
       const id = card?.dataset?.bookId;
       if (!id) continue;
       if (_cardDetailsCache.has(id)) {
-        applyCardDetailsForId(id, _cardDetailsCache.get(id));
+        applyCardDetailsForId(id, _cardDetailsCache.get(id).details);
       } else {
         queueCardDetailsById(id);
       }
     }
   }, {
     root: null,
-    rootMargin: '700px 0px',
+    rootMargin: '100px 0px',
     threshold: 0.01
   });
   return _cardDetailsObserver;
@@ -487,7 +539,7 @@ function loadCardDetails(cardList) {
     const id = card.dataset.bookId;
     if (!id) continue;
     if (_cardDetailsCache.has(id)) {
-      applyCardDetailsForId(id, _cardDetailsCache.get(id));
+      applyCardDetailsForId(id, _cardDetailsCache.get(id).details);
       continue;
     }
     if (observer) {
@@ -519,7 +571,7 @@ function attachThemeToggle() {
 
   const render = () => {
     const theme = getTheme();
-    for (const button of buttons) {
+    for (const button of document.querySelectorAll('[data-theme-toggle]')) {
       const labelNode = button.querySelector('[data-theme-toggle-label]');
       const label = getNextThemeLabel(theme);
       if (labelNode) {
@@ -544,7 +596,9 @@ function attachThemeToggle() {
 
   render();
 
-  /* Следим за системной темой, пока пользователь не сделал ручной выбор */
+  /* Следим за системной темой, пока пользователь не сделал ручной выбор.
+     Удаляем старый listener перед добавлением нового — при MPA matchMedia
+     глобальна, а listeners накапливаются при переходе между страницами. */
   if (window.matchMedia) {
     const mq = window.matchMedia('(prefers-color-scheme: light)');
     const onChange = (e) => {
@@ -553,9 +607,14 @@ function attachThemeToggle() {
       } catch {
         return;
       }
-      root.dataset.theme = e.matches ? 'light' : 'dark';
+      document.documentElement.dataset.theme = e.matches ? 'light' : 'dark';
       render();
     };
+    if (attachThemeToggle._mqHandler) {
+      if (mq.removeEventListener) mq.removeEventListener('change', attachThemeToggle._mqHandler);
+      else if (mq.removeListener) mq.removeListener(attachThemeToggle._mqHandler);
+    }
+    attachThemeToggle._mqHandler = onChange;
     if (mq.addEventListener) {
       mq.addEventListener('change', onChange);
     } else if (mq.addListener) {
@@ -685,6 +744,8 @@ function showPageSpinner() {
   // no-op: replaced by inline button feedback and progress banner
 }
 
+const TOAST_MAX_VISIBLE = 3;
+
 function showToast(message, tone = 'info', opts = {}) {
   let host = document.querySelector('[data-toast-host]');
   if (!host) {
@@ -695,6 +756,13 @@ function showToast(message, tone = 'info', opts = {}) {
     host.setAttribute('aria-live', 'polite');
     host.setAttribute('aria-atomic', 'true');
     document.body.appendChild(host);
+  }
+
+  const existing = [...host.children];
+  if (existing.length >= TOAST_MAX_VISIBLE) {
+    for (let i = 0; i <= existing.length - TOAST_MAX_VISIBLE; i++) {
+      existing[i].remove();
+    }
   }
 
   const toast = document.createElement('div');
@@ -879,8 +947,11 @@ function attachCoverLongPress() {
       timer = null;
       // Visual feedback — guaranteed even when the OS swallows our vibration request.
       cover.classList.remove('cover-longpress-flash');
-      void cover.offsetWidth; // force reflow so re-adding restarts the animation
-      cover.classList.add('cover-longpress-flash');
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          cover.classList.add('cover-longpress-flash');
+        });
+      });
       cover.addEventListener('animationend', () => cover.classList.remove('cover-longpress-flash'), { once: true });
       // Haptic feedback (best-effort). Android often drops short single-shots; a pattern
       // increases the chance of being delivered, but it remains best-effort by spec.
@@ -1433,6 +1504,9 @@ async function pollIndexStatus() {
 async function pollAdminIndexControls() {
   const root = document.querySelector('[data-admin-index-controls]');
   if (!root) return;
+  let timerId = 0;
+  const clearTimer = () => { if (timerId) { clearTimeout(timerId); timerId = 0; } };
+  window.addEventListener('pagehide', clearTimer, { once: true });
   // On sources page, attachSourcesReindex handles indexing progress,
   // but we still need to handle deletion progress on all pages.
   const isSourcesPage = Boolean(document.querySelector('[data-reindex-btn]'));
@@ -1559,6 +1633,8 @@ async function pollAdminIndexControls() {
   };
 
   const refresh = async () => {
+    clearTimer();
+    if (!root.isConnected) return;
     // On sources page, attachSourceDelete handles deletion progress — skip here to avoid conflicts.
     if (!isSourcesPage) {
       try {
@@ -1567,7 +1643,7 @@ async function pollAdminIndexControls() {
         if (delRes.ok) {
           const delStatus = await delRes.json();
           if (applyDeleteStatus(delStatus)) {
-            window.setTimeout(scheduleRefresh, 500);
+            timerId = window.setTimeout(scheduleRefresh, 500);
             return;
           }
         }
@@ -1581,16 +1657,17 @@ async function pollAdminIndexControls() {
         }
       } catch {}
     }
-    window.setTimeout(scheduleRefresh, 3000);
+    timerId = window.setTimeout(scheduleRefresh, 3000);
   };
 
   const scheduleRefresh = () => {
+    clearTimer();
     if (document.visibilityState === 'visible') {
       refresh();
     } else {
       const onVisible = () => {
         document.removeEventListener('visibilitychange', onVisible);
-        refresh();
+        scheduleRefresh();
       };
       document.addEventListener('visibilitychange', onVisible);
     }
@@ -1887,76 +1964,112 @@ function renderEventsListInnerHtml(events) {
   return rows || `<div class="muted admin-events-empty">${escapeHtml(uiT('admin.events.empty'))}</div>`;
 }
 
+const _sparklineSizes = new WeakMap();
+let _sparklineResizeObs = null;
+
+function _ensureSparklineResizeObs() {
+  if (_sparklineResizeObs || typeof ResizeObserver === 'undefined') return;
+  _sparklineResizeObs = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const svg = entry.target;
+      if (!svg) continue;
+      const w = Math.round(entry.contentRect.width) || Math.round(svg.clientWidth) || 400;
+      const h = Math.round(entry.contentRect.height) || Math.round(svg.clientHeight) || 48;
+      _sparklineSizes.set(svg, { w, h });
+    }
+  });
+}
+
 async function pollOperationsDashboard() {
   const dashboard = document.querySelector('[data-operations-dashboard]');
   if (!dashboard) {
     return;
   }
-  const SPARK_HISTORY_POINTS = 12;
-  const cpuHistory = [];
-  const memHistory = [];
+  let timerId = 0;
+  const clearTimer = () => { if (timerId) { clearTimeout(timerId); timerId = 0; } };
+  const SPARK_HISTORY_POINTS = 30;
+  const cpuHistory = new Array(SPARK_HISTORY_POINTS).fill(0);
+  const memHistory = new Array(SPARK_HISTORY_POINTS).fill(0);
   const pushSparkHistory = (arr, value) => {
     if (!Number.isFinite(value)) return;
     arr.push(Math.max(0, Math.min(100, Number(value))));
-    while (arr.length > SPARK_HISTORY_POINTS) arr.shift();
+    arr.shift();
   };
+  const observedSvgs = new Set();
+  const cleanupObserved = () => {
+    for (const svg of observedSvgs) {
+      if (_sparklineResizeObs) _sparklineResizeObs.unobserve(svg);
+    }
+    observedSvgs.clear();
+  };
+  const onPageHide = () => { clearTimer(); cleanupObserved(); };
+  window.addEventListener('pagehide', onPageHide, { once: true });
+
   const renderSparkline = (field, values) => {
     const svg = document.querySelector(`[data-operations-field="${field}"]`);
     if (!svg) return;
-    /* SVG viewBox у больших спарклайнов — 100×48, у маленьких — 100×24.
-       Берём текущий, чтобы корректно ложиться в оба варианта. */
-    const vbAttr = svg.getAttribute('viewBox') || '0 0 100 48';
-    const vb = vbAttr.split(/\s+/).map(Number);
-    const W = vb[2] || 100;
-    const H = vb[3] || 48;
-    /* Тонкая сетка на 25 / 50 / 75 % — даёт визуальную шкалу. Рисуем всегда,
-       даже когда истории ещё нет — чтобы график не «прыгал» при появлении данных. */
-    const gridY = [25, 50, 75].map((p) => {
-      const y = (H - (p / 100) * H).toFixed(2);
-      const cls = p === 50 ? 'spark-grid spark-grid-mid' : 'spark-grid';
-      return `<line class="${cls}" x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
-    }).join('');
+    const LINES_COUNT = 4;
+    /* Фактические размеры SVG кэшируются; ResizeObserver обновляет при resize. */
+    let size = _sparklineSizes.get(svg);
+    if (!size) {
+      const rect = svg.getBoundingClientRect();
+      size = { w: Math.round(rect.width) || 400, h: Math.round(rect.height) || 48 };
+      _sparklineSizes.set(svg, size);
+      _ensureSparklineResizeObs();
+      if (_sparklineResizeObs) {
+        _sparklineResizeObs.observe(svg);
+        observedSvgs.add(svg);
+      }
+    }
+    const H = size.h;
+    const TOTAL_W = size.w;
+    const PAD = 28;
+    const GRAPH_W = Math.max(50, TOTAL_W - PAD);
     if (!values || values.length < 2) {
-      svg.innerHTML = gridY;
+      svg.setAttribute('viewBox', `0 0 ${TOTAL_W} ${H}`);
+      svg.innerHTML = '';
       return;
     }
-    const stepX = W / (values.length - 1);
+    /* Autoscale Y: округляем max до кратного 5, минимум 10%. */
+    let maxVal = values[0];
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] > maxVal) maxVal = values[i];
+    }
+    const currentMaxY = Math.max(10, Math.ceil(maxVal / 5) * 5);
+    /* Шкала + сетка внутри SVG: текст слева, линии справа. */
+    const grid = [];
+    for (let i = 0; i <= LINES_COUNT; i++) {
+      const y = (H / LINES_COUNT) * i;
+      const pct = Math.round(currentMaxY - (i * (currentMaxY / LINES_COUNT)));
+      grid.push(`<text class="spark-label" x="${PAD - 3}" y="${y}" dy="0.35em">${pct}%</text>`);
+      grid.push(`<line class="spark-grid" x1="${PAD}" y1="${y}" x2="${TOTAL_W}" y2="${y}"/>`);
+    }
+    /* Разделительная линия между шкалой и графиком. */
+    grid.push(`<line class="spark-axis" x1="${PAD}" y1="0" x2="${PAD}" y2="${H}"/>`);
+    const stepX = GRAPH_W / (SPARK_HISTORY_POINTS - 1);
     const points = values.map((v, i) => {
-      const x = i * stepX;
-      const y = H - (v / 100) * H;
+      const x = PAD + i * stepX;
+      const y = H - (v / currentMaxY) * H;
       return `${x.toFixed(2)} ${y.toFixed(2)}`;
     });
     const linePath = `M ${points.join(' L ')}`;
-    const fillPath = `${linePath} L ${W.toFixed(2)} ${H} L 0 ${H} Z`;
-    /* Маркер текущего значения внутри SVG не рисуем: viewBox идёт с
-       preserveAspectRatio="none", и любая <circle> превращается в овал,
-       а на правом краю ещё и обрезается границей. «Сейчас X%» под графиком
-       и так передаёт текущее значение — отдельный визуальный маркер избыточен. */
-    svg.innerHTML = `${gridY}<path class="spark-fill" d="${fillPath}"></path><path class="spark-line" d="${linePath}"></path>`;
+    const fillPath = `${linePath} L ${TOTAL_W} ${H} L ${PAD} ${H} Z`;
+    svg.setAttribute('viewBox', `0 0 ${TOTAL_W} ${H}`);
+    svg.innerHTML = `${grid.join('')}<path class="spark-fill" d="${fillPath}"></path><path class="spark-line" d="${linePath}"></path>`;
   };
-  /* Под графиком: «сейчас X% · min Y% · max Z%» из истории. */
-  const renderSparkStats = (field, values) => {
+  /* Статистика под графиком отключена — данные видны в заголовке тайла. */
+  const renderSparkStats = (field) => {
     const el = document.querySelector(`[data-operations-field="${field}"]`);
-    if (!el) return;
-    if (!values || !values.length) { el.innerHTML = ''; return; }
-    const now = values[values.length - 1];
-    let min = values[0], max = values[0];
-    for (let i = 1; i < values.length; i++) {
-      if (values[i] < min) min = values[i];
-      if (values[i] > max) max = values[i];
-    }
-    const fmt = (n) => `${Number(n).toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 0 })}%`;
-    el.innerHTML =
-      `<span class="spark-stat-now">${escapeHtml(uiT('admin.monitor.sparkNow'))} ${escapeHtml(fmt(now))}</span>` +
-      `<span>${escapeHtml(uiT('admin.monitor.sparkMin'))} ${escapeHtml(fmt(min))}</span>` +
-      `<span>${escapeHtml(uiT('admin.monitor.sparkMax'))} ${escapeHtml(fmt(max))}</span>`;
+    if (el) el.innerHTML = '';
   };
 
   const refresh = async () => {
+    clearTimer();
+    if (!dashboard.isConnected) { cleanupObserved(); return; }
     try {
       const response = await fetch('/api/operations', { credentials: 'same-origin' });
       if (!response.ok) {
-        window.setTimeout(scheduleRefresh, 5000);
+        timerId = window.setTimeout(scheduleRefresh, 2000);
         return;
       }
 
@@ -2022,8 +2135,8 @@ async function pollOperationsDashboard() {
         lastRepairAt: `${uiT('app.lastRepair')} ${operations.lastRepairAt || uiT('common.dash')}`,
         lastRepairError: operations.lastRepairError || '',
         cacheCountInline: `${uiCountLabel('record', operations.cacheCount)} · ${mb.toLocaleString(loc, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} ${uiT('app.unitMb')}`,
-        /* CPU: оба значения. Полоска ниже базируется на cpuSingle (более показательно для нас). */
-        monitorCpu: `${Number.isFinite(cpuAll) ? cpuAll.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}% / ${Number.isFinite(cpuSingle) ? cpuSingle.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}% ${uiT('admin.monitor.cpuSingleSuffix')}`,
+        /* CPU: % от одного ядра — совпадает с полоской загрузки. */
+        monitorCpu: `${Number.isFinite(cpuSingle) ? cpuSingle.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : uiT('common.dash')}%`,
         /* RSS как для тайла «Память приложения». Авто-единицы + «из X ГБ». */
         monitorMem: (() => {
           if (!Number.isFinite(rssMb)) return uiT('common.dash');
@@ -2211,12 +2324,13 @@ async function pollOperationsDashboard() {
     } catch (error) {
       console.error(error);
     }
-    window.setTimeout(scheduleRefresh, 5000);
+    timerId = window.setTimeout(scheduleRefresh, 2000);
   };
 
   const scheduleRefresh = () => {
+    clearTimer();
     if (document.visibilityState === 'visible') { refresh(); } else {
-      const onVisible = () => { document.removeEventListener('visibilitychange', onVisible); refresh(); };
+      const onVisible = () => { document.removeEventListener('visibilitychange', onVisible); scheduleRefresh(); };
       document.addEventListener('visibilitychange', onVisible);
     }
   };
@@ -2234,7 +2348,11 @@ async function pollAdminEventsPage() {
   const totalEl = document.querySelector('[data-admin-events-total]');
   let latestEvents = [];
   let latestTotal = null;
+  let _lastEventsSig = '';
   const renderEventsPayload = (events, total = null) => {
+    const sig = (events[0]?.id || '') + ':' + (events.length) + ':' + (total ?? '');
+    if (sig === _lastEventsSig) return;
+    _lastEventsSig = sig;
     if (eventsList) {
       eventsList.innerHTML = renderEventsListInnerHtml(events || []);
     }
@@ -2244,12 +2362,17 @@ async function pollAdminEventsPage() {
   };
 
   const startPolling = () => {
+    let timerId = 0;
+    const clearTimer = () => { if (timerId) { clearTimeout(timerId); timerId = 0; } };
+    window.addEventListener('pagehide', clearTimer, { once: true });
     const refresh = async () => {
+      clearTimer();
+      if (!pageRoot.isConnected) return;
       try {
         const q = window.location.search || '';
         const response = await fetch(`/api/admin/system-events${q}`, { credentials: 'same-origin' });
         if (!response.ok) {
-          window.setTimeout(scheduleRefresh, 5000);
+          timerId = window.setTimeout(scheduleRefresh, 2000);
           return;
         }
         const data = await response.json();
@@ -2259,16 +2382,17 @@ async function pollAdminEventsPage() {
       } catch (error) {
         console.error(error);
       }
-      window.setTimeout(scheduleRefresh, 5000);
+      timerId = window.setTimeout(scheduleRefresh, 2000);
     };
 
     const scheduleRefresh = () => {
+      clearTimer();
       if (document.visibilityState === 'visible') {
         refresh();
       } else {
         const onVisible = () => {
           document.removeEventListener('visibilitychange', onVisible);
-          refresh();
+          scheduleRefresh();
         };
         document.addEventListener('visibilitychange', onVisible);
       }
@@ -2729,19 +2853,19 @@ function attachLoadMore() {
     }
   } catch (_) { /* ignore */ }
 
-  let activeFetch = null;
-  if (!_pagehideListenerAttached) {
-    _pagehideListenerAttached = true;
-    window.addEventListener('pagehide', () => {
-      if (activeFetch) activeFetch.abort();
-    });
-  }
+    const activeFetches = new Set();
+  window.addEventListener('pagehide', () => {
+    for (const ctrl of activeFetches) { try { ctrl.abort(); } catch {} }
+    activeFetches.clear();
+  }, { once: true });
 
   const skeletonHtml = Array.from({ length: 6 }, () => '<div class="skeleton-card"><div class="skeleton-cover"></div><div class="skeleton-line"></div><div class="skeleton-line skeleton-line-short"></div></div>').join('');
 
   trigger.addEventListener('click', async () => {
-    activeFetch?.abort();
-    activeFetch = new AbortController();
+    for (const ctrl of activeFetches) { try { ctrl.abort(); } catch {} }
+    activeFetches.clear();
+    const activeFetch = new AbortController();
+    activeFetches.add(activeFetch);
     const { signal } = activeFetch;
     page++;
     trigger.disabled = true;
@@ -2782,9 +2906,8 @@ function attachLoadMore() {
         const allCards = grid.querySelectorAll('.book-card');
         if (allCards.length > MAX_VISIBLE_CARDS) {
           const excess = allCards.length - MAX_VISIBLE_CARDS;
-          for (let i = 0; i < excess; i++) {
-            allCards[i].remove();
-          }
+          const toRemove = [...allCards].slice(0, excess);
+          for (const el of toRemove) el.remove();
         }
 
         for (const card of newCards) attachCoverErrorFallback(card);
@@ -2810,6 +2933,8 @@ function attachLoadMore() {
       trigger.disabled = false;
       trigger.textContent = uiT('catalog.loadMore');
       showToast(uiT('app.loadFailed'), 'error');
+    } finally {
+      activeFetches.delete(activeFetch);
     }
   });
 }
@@ -3003,15 +3128,22 @@ function attachBatchDownloadSelection() {
 
 /**
  * Страницы /facet/* часто попадают в bfcache при «назад» из книги/серии.
- * Скрипт не выполняется повторно — остаются прерванные fetch (кнопка «ещё» disabled),
- * старые слушатели. Полная перезагрузка дешевле и надёжнее, чем дублировать всю инициализацию.
+ * Вместо полной перезагрузки сбрасываем состояние кнопки «ещё» и переподписываем
+ * обработчики — bfcache восстанавливает DOM мгновенно, а fetch-переменные
+ * остаются прерванными (abort при pagehide).
  */
 function attachBfCacheFacetReload() {
   window.addEventListener('pageshow', (ev) => {
     if (!ev.persisted) return;
     const p = window.location.pathname || '';
     if (p.startsWith('/facet/')) {
-      window.location.reload();
+      const trigger = document.querySelector('[data-load-more-trigger]');
+      if (trigger) {
+        trigger.disabled = false;
+        trigger.dataset.loadMoreBound = '';
+      }
+      attachLoadMore();
+      loadCardDetails();
     }
   });
 }
@@ -4903,6 +5035,10 @@ function attachDirtyFormTracking() {
   const params = new URLSearchParams(window.location.search);
   if (params.has('page')) currentPage = Math.max(1, parseInt(params.get('page'), 10) || 1);
 
+  let suppPage = 1;
+  let suppFilter = '';
+  let lastSuppData = null;
+
   let dupBusy = false;
 
   /** POST JSON to API, show inline spinner on triggering button, reload data on success. */
@@ -5011,28 +5147,99 @@ function attachDirtyFormTracking() {
     return uiT('admin.duplicates.reasonUser');
   }
 
-  function renderSuppressedSection(sdata) {
-    if (!sdata || !sdata.total) return '<div class="admin-card" style="margin-top:20px"><div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div><p class="muted">' + escapeHtml(uiT('admin.duplicates.suppressedEmpty')) + '</p></div>';
-    var rows = sdata.rows.map(function(s) {
-      return '<tr>'
-        + '<td>' + escapeHtml(s.title || s.book_id) + '</td>'
-        + '<td>' + escapeHtml(s.authors || '') + '</td>'
-        + '<td><span class="admin-chip" style="font-size:.8em">' + escapeHtml(reasonLabel(s.reason)) + '</span></td>'
-        + '<td><button type="button" class="button" data-dup-unsuppress="' + escapeHtml(s.book_id) + '" style="font-size:.8em;padding:3px 8px">' + escapeHtml(uiT('admin.duplicates.unsuppress')) + '</button></td></tr>';
+  function renderSuppPagination(total, pageSize, page) {
+    const totalPages = Math.ceil(total / pageSize) || 1;
+    if (totalPages <= 1) return '';
+    let html = '<nav class="pagination" style="margin-top:12px" aria-label="' + escapeHtml(uiT('pagination.label') || 'Pagination') + '">';
+    if (page > 1) html += '<a href="#" class="page-link page-link-prev" data-page="' + (page - 1) + '">' + escapeHtml(uiT('pagination.prev') || '←') + '</a> ';
+
+    // Оконная пагинация: текущая ± 2, плюс границы
+    const windowStart = Math.max(1, page - 2);
+    const windowEnd = Math.min(totalPages, page + 2);
+
+    if (windowStart > 1) {
+      html += '<a href="#" class="page-link" data-page="1">1</a> ';
+      if (windowStart > 2) html += '<span class="page-ellipsis muted">\u2026</span> ';
+    }
+
+    for (let i = windowStart; i <= windowEnd; i++) {
+      if (i === page) {
+        html += '<span class="page-link page-link-active">' + i + '</span> ';
+      } else {
+        html += '<a href="#" class="page-link" data-page="' + i + '">' + i + '</a> ';
+      }
+    }
+
+    if (windowEnd < totalPages) {
+      if (windowEnd < totalPages - 1) html += '<span class="page-ellipsis muted">\u2026</span> ';
+      html += '<a href="#" class="page-link" data-page="' + totalPages + '">' + totalPages + '</a> ';
+    }
+
+    if (page < totalPages) html += '<a href="#" class="page-link page-link-next" data-page="' + (page + 1) + '">' + escapeHtml(uiT('pagination.next') || '→') + '</a>';
+    html += '</nav>';
+    return html;
+  }
+
+  function renderSuppressedContent(sdata) {
+    if (!sdata || (!sdata.total && (!sdata.rows || !sdata.rows.length))) {
+      return '<p class="muted">' + escapeHtml(uiT('admin.duplicates.suppressedEmpty')) + '</p>';
+    }
+
+    // Group by author and sort alphabetically
+    const groups = {};
+    for (let i = 0; i < sdata.rows.length; i++) {
+      const row = sdata.rows[i];
+      const authorKey = row.authors || uiT('book.authorUnknown');
+      if (!groups[authorKey]) groups[authorKey] = [];
+      groups[authorKey].push(row);
+    }
+    const authorNames = Object.keys(groups).sort(function(a, b) { return a.localeCompare(b); });
+
+    const groupsHtml = authorNames.map(function(author) {
+      const items = groups[author];
+      const itemRows = items.map(function(s) {
+        return '<tr>'
+          + '<td>' + escapeHtml(s.title || s.book_id) + '</td>'
+          + '<td><span class="admin-chip" style="font-size:.8em">' + escapeHtml(reasonLabel(s.reason)) + '</span></td>'
+          + '<td><button type="button" class="button" data-dup-unsuppress="' + escapeHtml(s.book_id) + '" style="font-size:.8em;padding:3px 8px">' + escapeHtml(uiT('admin.duplicates.unsuppress')) + '</button></td></tr>';
+      }).join('');
+      return '<details class="admin-dup-group">'
+        + '<summary class="admin-dup-group-summary">'
+        + '<strong class="admin-dup-group-title">' + escapeHtml(author) + '</strong>'
+        + '<span class="admin-chip admin-dup-group-count">' + items.length + ' ' + escapeHtml(uiPlural('book', items.length)) + '</span>'
+        + '</summary>'
+        + '<div style="overflow-x:auto"><table class="admin-table" style="width:100%;margin:8px 0"><thead><tr>'
+        + '<th>' + escapeHtml(uiT('admin.duplicates.thTitle')) + '</th>'
+        + '<th>' + escapeHtml(uiT('admin.duplicates.thFormat')) + '</th>'
+        + '<th></th></tr></thead><tbody>' + itemRows + '</tbody></table></div></details>';
     }).join('');
-    var unsuppressAllBtn = sdata.total > 1
-      ? '<button type="button" class="button-danger" data-dup-unsuppress-all data-n="' + sdata.total + '" style="font-size:.9em;padding:5px 16px;margin-top:12px">' + escapeHtml(uiT('admin.duplicates.unsuppressAll')) + '</button>'
+
+    const pagHtml = renderSuppPagination(sdata.total, sdata.pageSize, sdata.page);
+
+    const totalBooks = sdata.totalBooks || sdata.total;
+    const unsuppressAllBtn = totalBooks > 1
+      ? '<button type="button" class="button-danger" data-dup-unsuppress-all data-n="' + totalBooks + '" style="font-size:.9em;padding:5px 16px;margin-top:12px">' + escapeHtml(uiT('admin.duplicates.unsuppressAll')) + '</button>'
       : '';
+
+    return groupsHtml + pagHtml + unsuppressAllBtn;
+  }
+
+  function renderSuppressedSection(sdata) {
+    const totalBooks = sdata?.totalBooks ?? sdata?.total ?? 0;
+    const hasFilter = Boolean(sdata?.filter || suppFilter);
+    const filterHtml = '<form class="search-form browse-filter" id="supp-filter-form" style="margin-bottom:16px;max-width:460px;">'
+      + '<input type="text" name="q" id="supp-filter" placeholder="' + escapeHtml(uiT('admin.duplicates.filterPlaceholder')) + '" value="' + escapeHtml(sdata?.filter || suppFilter || '') + '">'
+      + '<div class="actions">'
+      + '<button type="submit" class="button">' + escapeHtml(uiT('admin.duplicates.filterBtn')) + '</button>'
+      + (hasFilter ? '<button type="button" class="button" id="supp-filter-reset">' + escapeHtml(uiT('browse.reset') || 'Сбросить') + '</button>' : '')
+      + '</div></form>';
+
     return '<div class="admin-card" style="margin-top:20px">'
       + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div>'
       + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.suppressedHint')) + '</div>'
-      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.suppressedCount', { n: sdata.total })) + '</div>'
-      + '<div style="overflow-x:auto"><table class="admin-table" style="width:100%"><thead><tr>'
-      + '<th>' + escapeHtml(uiT('admin.duplicates.thTitle')) + '</th>'
-      + '<th>' + escapeHtml(uiT('admin.duplicates.thAuthors')) + '</th>'
-      + '<th>' + escapeHtml(uiT('admin.duplicates.thFormat')) + '</th>'
-      + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-      + unsuppressAllBtn
+      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.suppressedCount', { n: totalBooks })) + '</div>'
+      + filterHtml
+      + '<div id="supp-content">' + renderSuppressedContent(sdata) + '</div>'
       + '</div>';
   }
 
@@ -5050,17 +5257,68 @@ function attachDirtyFormTracking() {
         dupAction('/api/admin/duplicates/auto-clean', {}, uiTp('admin.duplicates.autoCleanConfirm', { n: n }), true, btn);
       });
     });
-    resultsEl.querySelectorAll('[data-dup-unsuppress]').forEach(function(btn) {
+  }
+
+  function wireSuppressedActions() {
+    const section = document.getElementById('supp-section');
+    if (!section) return;
+
+    section.querySelectorAll('[data-dup-unsuppress]').forEach(function(btn) {
       btn.addEventListener('click', function() {
         dupAction('/api/admin/duplicates/unsuppress', { bookId: btn.getAttribute('data-dup-unsuppress') }, null, false, btn);
       });
     });
-    resultsEl.querySelectorAll('[data-dup-unsuppress-all]').forEach(function(btn) {
+    section.querySelectorAll('[data-dup-unsuppress-all]').forEach(function(btn) {
       btn.addEventListener('click', function() {
-        var n = Number(btn.getAttribute('data-n') || 0);
+        const n = Number(btn.getAttribute('data-n') || 0);
         dupAction('/api/admin/duplicates/unsuppress-all', {}, uiTp('admin.duplicates.unsuppressAllConfirm', { n: n }), true, btn);
       });
     });
+    // Suppressed pagination
+    section.querySelectorAll('.page-link[data-page]').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        suppPage = Number(link.getAttribute('data-page') || 1);
+        loadSuppressed();
+      });
+    });
+    // Suppressed client-side filter
+    const filterForm = section.querySelector('#supp-filter-form');
+    const filterInput = section.querySelector('#supp-filter');
+    const filterReset = section.querySelector('#supp-filter-reset');
+    if (!filterForm || !filterInput) return;
+
+    const applyFilter = function() {
+      const query = String(filterInput.value || '').trim().toLowerCase();
+      suppFilter = query;
+      suppPage = 1;
+      loadSuppressed();
+    };
+
+    if (!filterForm.dataset.wired) {
+      filterForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        applyFilter();
+      });
+
+      let filterTimer = null;
+      filterInput.addEventListener('input', function() {
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(applyFilter, 250);
+      });
+
+      filterForm.dataset.wired = '1';
+    }
+
+    if (filterReset && !filterReset.dataset.wired) {
+      filterReset.addEventListener('click', function() {
+        filterInput.value = '';
+        suppFilter = '';
+        suppPage = 1;
+        loadSuppressed();
+      });
+      filterReset.dataset.wired = '1';
+    }
   }
 
   var resultsEl = document.getElementById('dup-results');
@@ -5082,9 +5340,9 @@ function attachDirtyFormTracking() {
       return obj;
     } catch (e) { return null; }
   }
-  function writeDupCache(page, data, sdata) {
+  function writeDupCache(page, data) {
     try {
-      sessionStorage.setItem(dupCacheKey(page), JSON.stringify({ ts: Date.now(), data: data, sdata: sdata }));
+      sessionStorage.setItem(dupCacheKey(page), JSON.stringify({ ts: Date.now(), data: data }));
     } catch (e) { /* квота переполнилась или storage недоступен — игнорируем */ }
   }
   function invalidateDupCache() {
@@ -5111,9 +5369,10 @@ function attachDirtyFormTracking() {
       + renderGroups(data.groups)
       + renderPagination(data.total, data.pageSize, data.page)
       + '</div>'
-      + renderSuppressedSection(sdata && sdata.ok ? sdata : { total: 0, rows: [] });
+      + '<div id="supp-section">' + renderSuppressedSection(sdata && sdata.ok ? sdata : { total: 0, rows: [] }) + '</div>';
     resultsEl.innerHTML = html;
     wireActions();
+    wireSuppressedActions();
   }
 
   function showDupProgress() {
@@ -5135,28 +5394,24 @@ function attachDirtyFormTracking() {
     var cached = readDupCache(page);
     var shownFromCache = false;
     if (cached && cached.data && cached.data.ok) {
-      renderDupResults(cached.data, cached.sdata, true);
+      renderDupResults(cached.data, lastSuppData || { total: 0, rows: [] }, true);
       shownFromCache = true;
     } else {
       showDupProgress();
     }
 
     /* Шаг 2: всегда тянем свежие данные фоном и заменяем UI когда придут. */
-    Promise.all([
-      fetch('/api/admin/duplicates?page=' + page).then(function(r) { return r.json(); }),
-      fetch('/api/admin/suppressed').then(function(r) { return r.json(); })
-    ])
-      .then(function(results) {
-        var data = results[0];
-        var sdata = results[1];
+    fetch('/api/admin/duplicates?page=' + page)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
         if (!data || !data.ok) {
           if (!shownFromCache) {
             resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error loading duplicates</p></div>';
           }
           return;
         }
-        renderDupResults(data, sdata, false);
-        writeDupCache(page, data, sdata);
+        renderDupResults(data, lastSuppData || { total: 0, rows: [] }, false);
+        writeDupCache(page, data);
       })
       .catch(function(err) {
         if (!shownFromCache) {
@@ -5166,9 +5421,40 @@ function attachDirtyFormTracking() {
       });
   }
 
+  function loadSuppressed() {
+    const url = '/api/admin/suppressed?page=' + suppPage + (suppFilter ? '&filter=' + encodeURIComponent(suppFilter) : '');
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(sdata) {
+        lastSuppData = sdata && sdata.ok ? sdata : null;
+        const section = document.getElementById('supp-section');
+        if (!section) return;
+
+        const hintEl = section.querySelector('.list-context-hint');
+        if (hintEl) {
+          const totalBooks = lastSuppData?.totalBooks ?? lastSuppData?.total ?? 0;
+          hintEl.textContent = uiTp('admin.duplicates.suppressedCount', { n: totalBooks });
+        }
+
+        const contentEl = document.getElementById('supp-content');
+        if (contentEl) {
+          contentEl.innerHTML = renderSuppressedContent(lastSuppData || { total: 0, rows: [] });
+          wireSuppressedActions();
+        }
+        const active = document.activeElement;
+        if (!active || active.id !== 'supp-filter') {
+          section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      })
+      .catch(function(err) {
+        console.error('loadSuppressed error', err);
+      });
+  }
+
   /* Автоматический запуск при заходе: либо мгновенный рендер из кеша,
      либо полоска прогресса + фоновый запрос. */
   loadDuplicates(currentPage);
+  loadSuppressed();
 })();
 
 /* ── Форма расписания сканирования: переключение видимости полей по выбранному режиму

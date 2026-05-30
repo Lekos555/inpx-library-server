@@ -768,16 +768,20 @@ export function registerLibraryRoutes(app, deps) {
       if (hasEntityView && view !== 'books') {
         const entityPageSize = 50;
         const entitySort = ['count', 'name'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'count';
-        let entityResult;
-        if (facet === 'genres') {
-          entityResult = view === 'authors'
-            ? listAuthorsByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort })
-            : listSeriesByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort });
-        } else {
-          entityResult = view === 'authors'
+        // Агрегация авторов/серий по жанру/языку — тяжёлый GROUP BY по всему фасету.
+        // Кэшируем (stale-while-revalidate), как на /authors, чтобы повторные заходы
+        // на крупный жанр/язык не гоняли многосекундный синхронный подсчёт.
+        const entityCacheKey = `facet:entity:${facet}:${view}:${value}:${entitySort}:p${page}`;
+        const entityResult = getStaleOrSchedule(entityCacheKey, () => {
+          if (facet === 'genres') {
+            return view === 'authors'
+              ? listAuthorsByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort })
+              : listSeriesByGenre({ genre: value, page, pageSize: entityPageSize, sort: entitySort });
+          }
+          return view === 'authors'
             ? listAuthorsByLanguage({ lang: value, page, pageSize: entityPageSize, sort: entitySort })
             : listSeriesByLanguage({ lang: value, page, pageSize: entityPageSize, sort: entitySort });
-        }
+        }, PAGE_CACHE_TTL_MS, { total: 0, items: [] });
         const summary = getFacetSummary(facet, value);
         res.send(renderFacetBooks({
           title: tp('facet.titleWithValue', { label: facetLabels[facet] || t('facet.sectionFallback'), value: displayValue }),

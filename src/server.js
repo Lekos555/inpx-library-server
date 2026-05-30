@@ -35,6 +35,7 @@ import {
   getClientKey, pruneExpiredEntries as pruneLoginAttempts
 } from './services/rate-limiter.js';
 import { getOnlineUserCount, pruneOfflineUsers } from './services/online-tracker.js';
+import { createPerfMetricsMiddleware, getPerfSnapshot } from './services/perf-metrics.js';
 import { getCachedPageData, clearPageDataCache } from './services/cache.js';
 import { logSystemEvent } from './services/system-events.js';
 
@@ -44,7 +45,7 @@ import { startScanScheduler } from './services/scheduler.js';
 import {
   STATS_CACHE_TTL_MS, HOME_SECTIONS_CACHE_TTL_MS
 } from './constants.js';
-import { db, getUserByUsername, hasAdminUser, initDb, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts, countSuppressedBooks, getDbBreakdown } from './db.js';
+import { db, getUserByUsername, hasAdminUser, initDb, ensureSchemaIndexes, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts, countSuppressedBooks, getDbBreakdown } from './db.js';
 import {
   backfillCatalogSearchFields,
   getConfiguredInpxFile,
@@ -88,11 +89,64 @@ installRuntimeLogCapture();
 const app = express();
 app.set('trust proxy', config.trustProxy);
 app.use(securityHeaders);
+// Сбор пер-роутовых таймингов (count/avg/p95/max) — для диагностики медленных страниц.
+// Монтируем максимально рано, чтобы учитывать полное время обработки запроса.
+app.use(createPerfMetricsMiddleware());
 const serverStartedAt = new Date();
 let lastKnownIndexActive = false;
 let lastIndexProgressLog = 0;
 /** Редкие system-events о ходе индексации (для Live logs / «События»), без спама каждые 12 с. */
 let lastKeyIndexProgressEvent = 0;
+function readCgroupMemoryLimitBytes() {
+  try {
+    const v2 = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    if (v2 !== 'max') {
+      const n = Number(v2);
+      if (Number.isFinite(n) && n > 0 && n < Number.MAX_SAFE_INTEGER) return n;
+    }
+  } catch {}
+  try {
+    const v1 = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+    const n = Number(v1);
+    if (Number.isFinite(n) && n > 0 && n < Number.MAX_SAFE_INTEGER) return n;
+  } catch {}
+  return null;
+}
+
+function readCgroupCpuCount() {
+  try {
+    const v2 = fs.readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim();
+    const parts = v2.split(/\s+/);
+    if (parts.length === 2) {
+      const quota = parts[0] === 'max' ? Infinity : Number(parts[0]);
+      const period = Number(parts[1]);
+      if (Number.isFinite(quota) && Number.isFinite(period) && period > 0 && quota > 0 && quota !== Infinity) {
+        return Math.max(1, quota / period);
+      }
+    }
+  } catch {}
+  try {
+    const quota = Number(fs.readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'utf8').trim());
+    const period = Number(fs.readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'utf8').trim());
+    if (Number.isFinite(quota) && Number.isFinite(period) && period > 0 && quota > 0) {
+      return Math.max(1, quota / period);
+    }
+  } catch {}
+  return null;
+}
+
+/** Лимит памяти для контейнера (cgroup) или fallback на os.totalmem(). */
+function getSystemMemoryLimitMB() {
+  const cgroup = readCgroupMemoryLimitBytes();
+  if (cgroup) return Math.round(cgroup / 1024 / 1024);
+  return Math.round(os.totalmem() / 1024 / 1024);
+}
+
+/** Количество CPU для контейнера (cgroup) или fallback на os.cpus().length. */
+function getCpuCount() {
+  return readCgroupCpuCount() ?? Math.max(1, Array.isArray(os.cpus()) ? os.cpus().length : 1);
+}
+
 const operationsState = {
   reindexRunning: false,
   repairRunning: false,
@@ -120,7 +174,7 @@ function sampleProcessCpuPercent() {
   const elapsedMs = Math.max(1, nowMs - lastCpuSampleAtMs);
   const deltaUser = usage.user - lastCpuSampleUsage.user;
   const deltaSystem = usage.system - lastCpuSampleUsage.system;
-  const cpuCount = Math.max(1, Array.isArray(os.cpus()) ? os.cpus().length : 1);
+  const cpuCount = getCpuCount();
   const totalMs = (deltaUser + deltaSystem) / 1000;
   const ratioAll = totalMs / (elapsedMs * cpuCount);
   const ratioSingle = totalMs / elapsedMs;
@@ -406,7 +460,7 @@ function getOperationsSnapshot() {
     totalUsers: _stmtTotalUsers.get().count,
     onlineUsers: getOnlineUserCount(),
     memoryMB: Math.round(mem.rss / 1024 / 1024),
-    systemMemoryMB: Math.round(os.totalmem() / 1024 / 1024),
+    systemMemoryMB: getSystemMemoryLimitMB(),
     heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
     heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
     diskTotalMB: disk?.totalMB ?? null,
@@ -600,7 +654,7 @@ app.use('/opds', (req, res, next) => {
 app.use(browseLimiter);
 
 // Публичные диагностические маршруты — до express.static, чтобы не пересекаться с файлами из public/.
-registerHealthRoutes(app, { getCachedStats, getServiceValidation });
+registerHealthRoutes(app, { getCachedStats, getServiceValidation, getPerfSnapshot });
 registerBrowseApiRoutes(app);
 
 app.use(express.static(config.publicDir, {
@@ -993,6 +1047,8 @@ app.use((err, req, res, next) => {
 
 async function bootstrap() {
   initDb();
+  // Индексы создаём в фоне — на большой БД это секунды-минуты блокировки event loop.
+  setImmediate(() => ensureSchemaIndexes());
   // Run DB optimize manually/offline; in-process optimize can block HTTP loop on large datasets.
   setSiteName(getSetting('site_name'));
   setAllowAnonymousDownload(getSetting('allow_anonymous_download') === '1');
@@ -1020,6 +1076,7 @@ async function bootstrap() {
     console.log(`INPX Library Server listening on http://localhost:${config.port}`);
     console.log(`Library root: ${getLibraryRoot()}`);
     logSystemEvent('info', 'server', 'server started', { port: config.port, libraryRoot: getLibraryRoot() });
+    warmSharedPageCaches();
   });
   app.set('httpServer', httpServer);
 
@@ -1057,7 +1114,7 @@ async function bootstrap() {
         console.error('[startup] refreshCatalogBookCounts fallback failed:', e.message);
       }
     }
-  }, 50);
+  }, 5_000);
 
   setTimeout(async () => {
     if (getMeta('books_fts_dirty') === '1') {

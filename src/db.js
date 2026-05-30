@@ -39,6 +39,7 @@ export function decryptValue(stored) {
 fs.mkdirSync(config.dataDir, { recursive: true });
 
 export const db = new Database(config.dbPath, { timeout: 30000 });
+db.function('lower_unicode', { deterministic: true }, (text) => String(text || '').toLowerCase());
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 30000');
 const appliedTimeout = db.pragma('busy_timeout', { simple: true });
@@ -1051,92 +1052,25 @@ WHERE rp.progress >= 99
     }
   }
 
-  const SCHEMA_BOOT_KEY = 'schema_bootstrap_v4';
+  const SCHEMA_BOOT_KEY = 'schema_bootstrap_v6';
   const schemaBootDone = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(SCHEMA_BOOT_KEY)?.value === '1';
   if (!schemaBootDone) {
-    db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_book_authors_author_id ON book_authors(author_id);
-      CREATE INDEX IF NOT EXISTS idx_book_authors_book_id ON book_authors(book_id);
-      CREATE INDEX IF NOT EXISTS idx_book_genres_genre_id ON book_genres(genre_id);
-      CREATE INDEX IF NOT EXISTS idx_book_genres_book_id ON book_genres(book_id);
-      CREATE INDEX IF NOT EXISTS idx_book_series_series_id ON book_series(series_id);
-      CREATE INDEX IF NOT EXISTS idx_book_series_book_id ON book_series(book_id);
-      CREATE INDEX IF NOT EXISTS idx_books_title_sort ON books(title_sort);
-      CREATE INDEX IF NOT EXISTS idx_books_author_sort ON books(author_sort);
-      CREATE INDEX IF NOT EXISTS idx_books_series_sort_series_index ON books(series_sort, series_index);
-      CREATE INDEX IF NOT EXISTS idx_books_imported_at ON books(imported_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_books_date_imported_at ON books(date DESC, imported_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_books_title_search ON books(title_search);
-      CREATE INDEX IF NOT EXISTS idx_books_authors_search ON books(authors_search);
-      CREATE INDEX IF NOT EXISTS idx_books_series_search ON books(series_search);
-      CREATE INDEX IF NOT EXISTS idx_books_genres_search ON books(genres_search);
-      CREATE INDEX IF NOT EXISTS idx_books_keywords_search ON books(keywords_search);
-      CREATE INDEX IF NOT EXISTS idx_authors_sort_name ON authors(sort_name);
-      CREATE INDEX IF NOT EXISTS idx_authors_search_name ON authors(search_name);
-      CREATE INDEX IF NOT EXISTS idx_series_catalog_sort_name ON series_catalog(sort_name);
-      CREATE INDEX IF NOT EXISTS idx_series_catalog_search_name ON series_catalog(search_name);
-      CREATE INDEX IF NOT EXISTS idx_genres_catalog_sort_name ON genres_catalog(sort_name);
-      CREATE INDEX IF NOT EXISTS idx_genres_catalog_search_name ON genres_catalog(search_name);
-      CREATE INDEX IF NOT EXISTS idx_reading_history_username_opened ON reading_history(username, last_opened_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_books_source_id ON books(source_id);
-      CREATE INDEX IF NOT EXISTS idx_books_deleted ON books(deleted);
-      CREATE INDEX IF NOT EXISTS idx_books_deleted_source ON books(deleted, source_id);
-      CREATE INDEX IF NOT EXISTS idx_books_lang ON books(lang);
-      CREATE INDEX IF NOT EXISTS idx_books_ext ON books(ext);
-      CREATE INDEX IF NOT EXISTS idx_books_lang_norm ON books(COALESCE(NULLIF(lang, ''), 'unknown'));
-      CREATE INDEX IF NOT EXISTS idx_books_series_index_title ON books(series_index, title_sort, id DESC);
-      CREATE INDEX IF NOT EXISTS idx_bookmarks_username ON bookmarks(username);
-      CREATE INDEX IF NOT EXISTS idx_bookmarks_book_id ON bookmarks(book_id);
-      CREATE INDEX IF NOT EXISTS idx_bookmarks_username_book_id ON bookmarks(username, book_id);
-      CREATE INDEX IF NOT EXISTS idx_reading_history_book_id ON reading_history(book_id);
-      CREATE INDEX IF NOT EXISTS idx_reading_history_book_user_open ON reading_history(book_id, username, last_opened_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_reading_history_username_book ON reading_history(username, book_id, last_opened_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_reader_bookmarks_username ON reader_bookmarks(username);
-      CREATE INDEX IF NOT EXISTS idx_shelf_books_book_id ON shelf_books(book_id);
-      CREATE INDEX IF NOT EXISTS idx_shelf_books_shelf_id ON shelf_books(shelf_id);
-      CREATE INDEX IF NOT EXISTS idx_read_books_username ON read_books(username, book_id);
-      CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username);
-      CREATE INDEX IF NOT EXISTS idx_favorite_series_username ON favorite_series(username);
-      CREATE INDEX IF NOT EXISTS idx_shelves_username ON shelves(username);
-      CREATE INDEX IF NOT EXISTS idx_sources_enabled ON sources(enabled);
-      CREATE INDEX IF NOT EXISTS idx_dedup_projection_sort_date ON library_dedup_projection(sort_date DESC, book_id DESC);
-      CREATE INDEX IF NOT EXISTS idx_dedup_projection_title ON library_dedup_projection(title_sort ASC, book_id DESC);
-      CREATE INDEX IF NOT EXISTS idx_dedup_projection_author_title ON library_dedup_projection(author_sort ASC, title_sort ASC, book_id DESC);
-      CREATE INDEX IF NOT EXISTS idx_dedup_projection_series ON library_dedup_projection(series_sort ASC, series_index ASC, title_sort ASC, book_id DESC);
-      CREATE INDEX IF NOT EXISTS idx_books_deleted_deleted0 ON books(deleted) WHERE deleted = 0;
-      CREATE INDEX IF NOT EXISTS idx_book_details_cache_book_id ON book_details_cache(book_id);
-      CREATE INDEX IF NOT EXISTS idx_authors_book_count ON authors(book_count DESC);
-      CREATE INDEX IF NOT EXISTS idx_series_catalog_book_count ON series_catalog(book_count DESC);
-      CREATE INDEX IF NOT EXISTS idx_genres_catalog_book_count ON genres_catalog(book_count DESC);
-      CREATE INDEX IF NOT EXISTS idx_book_ratings_book ON book_ratings(book_id);
-      CREATE INDEX IF NOT EXISTS idx_book_ratings_user_book ON book_ratings(username, book_id);
-    `);
     db.exec(`DROP VIEW IF EXISTS active_books`);
     db.exec(`CREATE VIEW active_books AS SELECT b.* FROM books b LEFT JOIN sources s ON s.id = b.source_id WHERE b.deleted = 0 AND (b.source_id IS NULL OR s.enabled = 1)`);
     db.prepare(`
       INSERT INTO meta(key, value) VALUES(?, '1')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(SCHEMA_BOOT_KEY);
-  } else {
-    // Fast path for recurring starts; recreate view only if unexpectedly missing.
-    const hasActiveBooksView = Boolean(
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'active_books'`).get()
-    );
-    if (!hasActiveBooksView) {
-      db.exec(`CREATE VIEW active_books AS SELECT b.* FROM books b LEFT JOIN sources s ON s.id = b.source_id WHERE b.deleted = 0 AND (b.source_id IS NULL OR s.enabled = 1)`);
-    }
+  }
+  // Fast path: recreate view only if unexpectedly missing.
+  const hasActiveBooksView = Boolean(
+    db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'active_books'`).get()
+  );
+  if (!hasActiveBooksView) {
+    db.exec(`CREATE VIEW active_books AS SELECT b.* FROM books b LEFT JOIN sources s ON s.id = b.source_id WHERE b.deleted = 0 AND (b.source_id IS NULL OR s.enabled = 1)`);
   }
 
   ensureBooksFtsTriggers();
-
-  // Ensure indexes exist for user activity tables (idempotent, covers upgrades from older DBs)
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_read_books_username ON read_books(username, book_id);
-    CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username);
-    CREATE INDEX IF NOT EXISTS idx_favorite_series_username ON favorite_series(username);
-    CREATE INDEX IF NOT EXISTS idx_shelves_username ON shelves(username);
-  `);
 
   // Recovery: if a previous indexing crashed after dropping FTS triggers,
   // the books_fts index is stale. Detect and schedule a synchronous rebuild.
@@ -1154,6 +1088,102 @@ WHERE rp.progress >= 99
 
   seedDefaultAdmin();
   migrateInpxToSources();
+}
+
+/**
+ * Создаёт индексы схемы по одному с уступкой event loop — предотвращает
+ * многосекундную блокировку HTTP-сервера при старте на большой БД.
+ */
+export function ensureSchemaIndexes() {
+  const indexes = [
+    'CREATE INDEX IF NOT EXISTS idx_book_authors_author_id ON book_authors(author_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_authors_book_id ON book_authors(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_genres_genre_id ON book_genres(genre_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_genres_book_id ON book_genres(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_series_series_id ON book_series(series_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_series_book_id ON book_series(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_books_title_sort ON books(title_sort)',
+    'CREATE INDEX IF NOT EXISTS idx_books_author_sort ON books(author_sort)',
+    'CREATE INDEX IF NOT EXISTS idx_books_series_sort_series_index ON books(series_sort, series_index)',
+    'CREATE INDEX IF NOT EXISTS idx_books_imported_at ON books(imported_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_date_imported_at ON books(date DESC, imported_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_title_search ON books(title_search)',
+    'CREATE INDEX IF NOT EXISTS idx_books_authors_search ON books(authors_search)',
+    'CREATE INDEX IF NOT EXISTS idx_books_series_search ON books(series_search)',
+    'CREATE INDEX IF NOT EXISTS idx_books_genres_search ON books(genres_search)',
+    'CREATE INDEX IF NOT EXISTS idx_books_keywords_search ON books(keywords_search)',
+    'CREATE INDEX IF NOT EXISTS idx_authors_sort_name ON authors(sort_name)',
+    'CREATE INDEX IF NOT EXISTS idx_authors_search_name ON authors(search_name)',
+    'CREATE INDEX IF NOT EXISTS idx_series_catalog_sort_name ON series_catalog(sort_name)',
+    'CREATE INDEX IF NOT EXISTS idx_series_catalog_search_name ON series_catalog(search_name)',
+    'CREATE INDEX IF NOT EXISTS idx_genres_catalog_sort_name ON genres_catalog(sort_name)',
+    'CREATE INDEX IF NOT EXISTS idx_genres_catalog_search_name ON genres_catalog(search_name)',
+    'CREATE INDEX IF NOT EXISTS idx_reading_history_username_opened ON reading_history(username, last_opened_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_source_id ON books(source_id)',
+    'CREATE INDEX IF NOT EXISTS idx_books_deleted ON books(deleted)',
+    'CREATE INDEX IF NOT EXISTS idx_books_deleted_source ON books(deleted, source_id)',
+    'CREATE INDEX IF NOT EXISTS idx_books_lang ON books(lang)',
+    'CREATE INDEX IF NOT EXISTS idx_books_ext ON books(ext)',
+    "CREATE INDEX IF NOT EXISTS idx_books_lang_norm ON books(COALESCE(NULLIF(lang, ''), 'unknown'))",
+    'CREATE INDEX IF NOT EXISTS idx_books_series_index_title ON books(series_index, title_sort, id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_bookmarks_username ON bookmarks(username)',
+    'CREATE INDEX IF NOT EXISTS idx_bookmarks_book_id ON bookmarks(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_bookmarks_username_book_id ON bookmarks(username, book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_reading_history_book_id ON reading_history(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_reading_history_book_user_open ON reading_history(book_id, username, last_opened_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_reading_history_username_book ON reading_history(username, book_id, last_opened_at DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_reader_bookmarks_username ON reader_bookmarks(username)',
+    'CREATE INDEX IF NOT EXISTS idx_shelf_books_book_id ON shelf_books(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shelf_books_shelf_id ON shelf_books(shelf_id)',
+    'CREATE INDEX IF NOT EXISTS idx_read_books_username ON read_books(username, book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_favorite_authors_username ON favorite_authors(username)',
+    'CREATE INDEX IF NOT EXISTS idx_favorite_series_username ON favorite_series(username)',
+    'CREATE INDEX IF NOT EXISTS idx_shelves_username ON shelves(username)',
+    'CREATE INDEX IF NOT EXISTS idx_sources_enabled ON sources(enabled)',
+    'CREATE INDEX IF NOT EXISTS idx_dedup_projection_sort_date ON library_dedup_projection(sort_date DESC, book_id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_dedup_projection_title ON library_dedup_projection(title_sort ASC, book_id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_dedup_projection_author_title ON library_dedup_projection(author_sort ASC, title_sort ASC, book_id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_dedup_projection_series ON library_dedup_projection(series_sort ASC, series_index ASC, title_sort ASC, book_id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_deleted_deleted0 ON books(deleted) WHERE deleted = 0',
+    'CREATE INDEX IF NOT EXISTS idx_books_deleted_lang ON books(deleted, lang) WHERE deleted = 0',
+    'CREATE INDEX IF NOT EXISTS idx_books_deleted_ext ON books(deleted, ext) WHERE deleted = 0',
+    'CREATE INDEX IF NOT EXISTS idx_book_details_cache_book_id ON book_details_cache(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_authors_book_count ON authors(book_count DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_series_catalog_book_count ON series_catalog(book_count DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_genres_catalog_book_count ON genres_catalog(book_count DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_book_ratings_book ON book_ratings(book_id)',
+    'CREATE INDEX IF NOT EXISTS idx_book_ratings_user_book ON book_ratings(username, book_id)',
+    // Expression indexes для facet-запросов
+    "CREATE INDEX IF NOT EXISTS idx_books_recent_sort ON books(COALESCE(NULLIF(date, ''), imported_at) DESC, imported_at DESC, id DESC)",
+    'CREATE INDEX IF NOT EXISTS idx_books_author_title_id ON books(author_sort ASC, title_sort ASC, id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_series_full ON books(series_sort ASC, series_index ASC, title_sort ASC, id DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_books_rating ON books(lib_rate DESC, title_sort ASC, id DESC)',
+    // Критические индексы для facet-запросов
+    'CREATE INDEX IF NOT EXISTS idx_authors_name ON authors(name)',
+    'CREATE INDEX IF NOT EXISTS idx_series_catalog_name ON series_catalog(name)',
+    'CREATE INDEX IF NOT EXISTS idx_genres_catalog_name ON genres_catalog(name)',
+    'CREATE INDEX IF NOT EXISTS idx_flibusta_author_shard_key ON flibusta_author_shard(author_key COLLATE NOCASE)',
+  ];
+
+  let i = 0;
+  function step() {
+    if (i >= indexes.length) {
+      console.log('[boot] Индексы созданы — запускаем ANALYZE в фоне…');
+      analyzeDatabaseYielding()
+        .then(() => console.log('[boot] ANALYZE завершён после создания индексов.'))
+        .catch((err) => console.warn('[boot] ANALYZE после индексов не удался:', err.message));
+      return;
+    }
+    try {
+      db.exec(indexes[i]);
+    } catch (err) {
+      console.warn('[boot] skip index:', err.message);
+    }
+    i += 1;
+    setImmediate(step);
+  }
+  step();
 }
 
 // --- Sources CRUD ---
@@ -1772,7 +1802,7 @@ export async function rebuildActiveBooksView() {
     ? ` AND COALESCE(NULLIF(b.lang, ''), 'unknown') NOT IN (SELECT value FROM excluded_filters WHERE type = 'lang')`
     : '';
   const genreFilter = genres.length > 0
-    ? ` AND NOT EXISTS (SELECT 1 FROM book_genres bg JOIN genres_catalog gc ON gc.id = bg.genre_id WHERE bg.book_id = b.id AND gc.name IN (SELECT value FROM excluded_filters WHERE type = 'genre'))`
+    ? ` AND (NOT EXISTS (SELECT 1 FROM book_genres bg WHERE bg.book_id = b.id) OR EXISTS (SELECT 1 FROM book_genres bg JOIN genres_catalog gc ON gc.id = bg.genre_id WHERE bg.book_id = b.id AND gc.name NOT IN (SELECT value FROM excluded_filters WHERE type = 'genre')))`
     : '';
 
   db.exec('DROP VIEW IF EXISTS active_books');
@@ -2212,11 +2242,54 @@ export function isBookSuppressed(bookId) {
   return Boolean(db.prepare('SELECT 1 FROM suppressed_books WHERE book_id = ?').get(String(bookId)));
 }
 
-export function getSuppressedBooks({ page = 1, pageSize = 50 } = {}) {
+export function getSuppressedBooks({ page = 1, pageSize = 50, filter = '' } = {}) {
   const offset = (page - 1) * pageSize;
-  const total = db.prepare('SELECT COUNT(*) AS count FROM suppressed_books').get()?.count || 0;
-  const rows = db.prepare('SELECT * FROM suppressed_books ORDER BY suppressed_at DESC LIMIT ? OFFSET ?').all(pageSize, offset);
-  return { total, rows };
+  const normalizedFilter = String(filter || '').trim().toLowerCase();
+
+  const filterWhere = normalizedFilter
+    ? 'WHERE lower_unicode(title) LIKE ? OR lower_unicode(authors) LIKE ?'
+    : '';
+  const filterParams = normalizedFilter ? ['%' + normalizedFilter + '%', '%' + normalizedFilter + '%'] : [];
+
+  const totalBooksSql = `SELECT COUNT(*) AS count FROM suppressed_books ${filterWhere}`;
+  const totalBooks = db.prepare(totalBooksSql).get(...filterParams)?.count || 0;
+  if (!totalBooks) {
+    return { total: 0, totalBooks: 0, rows: [] };
+  }
+
+  // Пагинация по авторам среди совпадений
+  const authorsSql = `
+    SELECT DISTINCT COALESCE(authors, '') AS authors
+    FROM suppressed_books
+    ${filterWhere}
+    ORDER BY authors ASC
+    LIMIT ? OFFSET ?
+  `;
+  const authorRows = db.prepare(authorsSql).all(...filterParams, pageSize, offset);
+
+  if (!authorRows.length) {
+    const totalAuthorsSql = `SELECT COUNT(DISTINCT COALESCE(authors, '')) AS count FROM suppressed_books ${filterWhere}`;
+    const total = db.prepare(totalAuthorsSql).get(...filterParams)?.count || 0;
+    return { total, totalBooks: 0, rows: [] };
+  }
+
+  const authors = authorRows.map(r => r.authors);
+  const placeholders = authors.map(() => '?').join(',');
+
+  const booksSql = `
+    SELECT * FROM suppressed_books
+    WHERE COALESCE(authors, '') IN (${placeholders})
+      ${normalizedFilter ? 'AND (lower_unicode(title) LIKE ? OR lower_unicode(authors) LIKE ?)' : ''}
+    ORDER BY COALESCE(authors, '') ASC, title ASC
+  `;
+  const booksParams = [...authors];
+  if (normalizedFilter) booksParams.push(...filterParams);
+  const rows = db.prepare(booksSql).all(...booksParams);
+
+  const totalAuthorsSql = `SELECT COUNT(DISTINCT COALESCE(authors, '')) AS count FROM suppressed_books ${filterWhere}`;
+  const total = db.prepare(totalAuthorsSql).get(...filterParams)?.count || 0;
+
+  return { total, totalBooks, rows };
 }
 
 let _stmtCountSuppressed;

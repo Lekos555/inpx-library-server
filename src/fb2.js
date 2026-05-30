@@ -380,6 +380,9 @@ function bookHasFlibustaSidecar(book) {
   return effectiveSourceFlibustaForBook(book) === 1;
 }
 
+const failedExtractCache = new Map();
+const FAILED_EXTRACT_TTL_MS = 600_000; // 10 минут: при постоянно битом архиве не пытаться перечитывать каждый запрос.
+
 export async function getOrExtractBookDetails(book, { skipCoverAugment = false } = {}) {
   const cached = getCachedBookDetails(book.id);
   if (cached) {
@@ -391,6 +394,12 @@ export async function getOrExtractBookDetails(book, { skipCoverAugment = false }
       return augmentFlibustaCoverIfMissing(cached, book);
     }
     return cached;
+  }
+
+  // Если недавно уже падали при чтении этой книги — не повторяем, сразу возвращаем fallback.
+  const failEntry = failedExtractCache.get(book.id);
+  if (failEntry && Date.now() - failEntry.ts < FAILED_EXTRACT_TTL_MS) {
+    return failEntry.details;
   }
 
   let details;
@@ -426,12 +435,14 @@ export async function getOrExtractBookDetails(book, { skipCoverAugment = false }
   }
 
   if (!details.annotationIsHtml) details.annotationIsHtml = false;
-  // При транзиентной ошибке чтения файла/архива не сохраняем «отравленную» запись
-  // с cover=null — иначе последующие запросы вернут кэшированный null и никогда
-  // не попробуют перечитать файл. Пусть запрос будет повторён в следующий раз.
+
+  // Полный провал извлечения: кэшируем FAIL in-memory на 10 минут, чтобы не гонять
+  // повторные запросы к битому/отсутствующему архиву. SQLite-кэш при этом не трогаем.
   if (extractFailed && !details.cover && !details.annotation) {
+    failedExtractCache.set(book.id, { ts: Date.now(), details });
     return details;
   }
+
   try {
     const persist = bookHasFlibustaSidecar(book)
       ? { ...details, cover: null }

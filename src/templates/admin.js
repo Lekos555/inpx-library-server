@@ -9,7 +9,6 @@ import {
   formatGenreLabel
 } from './shared.js';
 import { getGenreGroups } from '../genre-map.js';
-
 export function renderOperations({ user, stats = {}, indexStatus = {}, operations = {}, siteName = '', homeSubtitle = '', defaultLocale = 'auto', csrfToken = '' }) {
   /* Сплошной цвет по тому же градиенту (для одиночных элементов — donut, иконки и т.п.).
      0-70% → зелёный → жёлтый; 70-100% → жёлтый → красный. */
@@ -63,12 +62,11 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
   const uptimeStr = days ? `${days}${dU} ${hrs}${hU} ${mins}${mU}` : hrs ? `${hrs}${hU} ${mins}${mU}` : `${mins}${mU}`;
   const dbSizeMB = operations.dbSizeBytes ? (operations.dbSizeBytes / 1024 / 1024).toFixed(1) : t('common.dash');
   const loc = getLocale() === 'en' ? 'en-US' : 'ru-RU';
-  /* CPU: показываем оба значения — % от всех ядер (полоска) и % от одного ядра (правее).
-     Полезно именно нам: better-sqlite3+Express однопоточные, занятость 1 ядра = реальный лимит. */
+  /* CPU: % от общей мощности (нормирован на количество ядер). */
   const cpuAllPct = Number(operations.cpuAll ?? operations.cpuPercent);
   const cpuSinglePct = Number(operations.cpuSingle);
   const fmtPct = (n) => Number.isFinite(n) ? n.toLocaleString(loc, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : t('common.dash');
-  const cpuStr = `${fmtPct(cpuAllPct)}% / ${fmtPct(cpuSinglePct)}% ${escapeHtml(t('admin.monitor.cpuSingleSuffix'))}`;
+  const cpuStr = `${fmtPct(cpuAllPct)}%`;
   /* «Память приложения»: RSS (Resident Set Size) — то, что показывает ОС в htop.
      Раньше я показывал V8 heap, но это лишь ~5% от реальной памяти процесса —
      SQLite page cache живёт в нативной C++-памяти и в heap не видна. Админу нужна
@@ -240,12 +238,8 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
                   <span class="monitor-value" data-operations-field="monitorCpu">${cpuStr}</span>
                 </div>
                 <div class="monitor-meter"><span data-operations-field="monitorCpuBar" style="width:${Number.isFinite(cpuSinglePct) ? cpuSinglePct : 0}%;background:${monitorBarGradient(Number.isFinite(cpuSinglePct) ? cpuSinglePct : 0)}"></span></div>
-                <svg class="monitor-spark monitor-spark--lg" viewBox="0 0 100 48" preserveAspectRatio="none" data-operations-field="monitorCpuSpark" aria-hidden="true">
-                  <line class="spark-grid" x1="0" y1="12" x2="100" y2="12"/>
-                  <line class="spark-grid spark-grid-mid" x1="0" y1="24" x2="100" y2="24"/>
-                  <line class="spark-grid" x1="0" y1="36" x2="100" y2="36"/>
-                </svg>
                 <div class="spark-stats" data-operations-field="monitorCpuStats"></div>
+                <svg class="monitor-spark monitor-spark--lg" data-operations-field="monitorCpuSpark" aria-hidden="true"></svg>
               </div>
               <div class="monitor-item monitor-item--graph" data-monitor-key="mem" title="${escapeHtml(t('admin.monitor.memHint'))}">
                 <div class="monitor-item-top">
@@ -253,12 +247,8 @@ export function renderOperations({ user, stats = {}, indexStatus = {}, operation
                   <span class="monitor-value" data-operations-field="monitorMem">${memStr}</span>
                 </div>
                 <div class="monitor-meter"><span data-operations-field="monitorMemBar" style="width:${memPct.toFixed(1)}%;background:${monitorBarGradient(memPct)}"></span></div>
-                <svg class="monitor-spark monitor-spark--lg" viewBox="0 0 100 48" preserveAspectRatio="none" data-operations-field="monitorMemSpark" aria-hidden="true">
-                  <line class="spark-grid" x1="0" y1="12" x2="100" y2="12"/>
-                  <line class="spark-grid spark-grid-mid" x1="0" y1="24" x2="100" y2="24"/>
-                  <line class="spark-grid" x1="0" y1="36" x2="100" y2="36"/>
-                </svg>
                 <div class="spark-stats" data-operations-field="monitorMemStats"></div>
+                <svg class="monitor-spark monitor-spark--lg" data-operations-field="monitorMemSpark" aria-hidden="true"></svg>
               </div>
               <div class="monitor-item" data-monitor-key="db" title="${escapeHtml(t('admin.monitor.dbHint'))}">
                 <div class="monitor-item-top">
@@ -623,14 +613,19 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
       </tr>`;
   }).join('');
 
-  // Group genres like in the user-facing genre page
+  // Группировка жанров с сортировкой по алфавиту внутри каждой группы
   const genreMap = new Map(genres.map(g => [g.code, g]));
   const groupsDef = getGenreGroups();
   const genreGroupsHtml = [];
   const allGroupedCodes = new Set(Object.values(groupsDef).flat());
   let groupIdx = 0;
+  const sortByLabel = (a, b) => {
+    const la = formatGenreLabel(a.code);
+    const lb = formatGenreLabel(b.code);
+    return la.localeCompare(lb, getLocale() === 'en' ? 'en' : 'ru');
+  };
   for (const [groupName, codes] of Object.entries(groupsDef)) {
-    const items = codes.map(c => genreMap.get(c)).filter(Boolean);
+    const items = codes.map(c => genreMap.get(c)).filter(Boolean).sort(sortByLabel);
     if (!items.length) continue;
     const gid = `gg-${groupIdx++}`;
     const allChecked = items.every(g => !excludedGenreSet.has(g.code));
@@ -660,13 +655,21 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
         <div class="acg-body" style="border-top:1px solid var(--border)">
           <table class="admin-table acg-table">
             <colgroup><col style="width:40px"><col><col style="width:30%"><col style="width:80px"></colgroup>
+            <thead>
+              <tr>
+                <th style="width:50px;text-align:center"></th>
+                <th>${escapeHtml(t('admin.content.thName'))}</th>
+                <th>${escapeHtml(t('admin.content.thCode'))}</th>
+                <th style="text-align:right">${escapeHtml(t('admin.content.thBooks'))}</th>
+              </tr>
+            </thead>
             <tbody data-group="${gid}">${rows}</tbody>
           </table>
         </div>
       </div>`);
   }
-  // Uncategorized genres
-  const uncategorized = genres.filter(g => !allGroupedCodes.has(g.code));
+  // Uncategorized genres — тоже сортируем по алфавиту
+  const uncategorized = genres.filter(g => !allGroupedCodes.has(g.code)).sort(sortByLabel);
   if (uncategorized.length) {
     const gid = `gg-${groupIdx++}`;
     const allChecked = uncategorized.every(g => !excludedGenreSet.has(g.code));
@@ -696,6 +699,14 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
         <div class="acg-body" style="border-top:1px solid var(--border)">
           <table class="admin-table acg-table">
             <colgroup><col style="width:40px"><col><col style="width:30%"><col style="width:80px"></colgroup>
+            <thead>
+              <tr>
+                <th style="width:50px;text-align:center"></th>
+                <th>${escapeHtml(t('admin.content.thName'))}</th>
+                <th>${escapeHtml(t('admin.content.thCode'))}</th>
+                <th style="text-align:right">${escapeHtml(t('admin.content.thBooks'))}</th>
+              </tr>
+            </thead>
             <tbody data-group="${gid}">${rows}</tbody>
           </table>
         </div>
@@ -762,6 +773,19 @@ export function renderAdminContent({ user, stats, indexStatus, languages = [], e
       document.getElementById('lang-toggle-all')?.addEventListener('change', function() {
         document.querySelectorAll('input[name="enabled_lang"]').forEach(cb => { cb.checked = this.checked; });
       });
+      document.querySelectorAll('input[name="enabled_lang"]').forEach(cb => {
+        cb.addEventListener('change', updateGlobalLangToggle);
+      });
+      function updateGlobalLangToggle() {
+        const all = document.querySelectorAll('input[name="enabled_lang"]');
+        const checked = [...all].filter(c => c.checked).length;
+        const globalToggle = document.getElementById('lang-toggle-all');
+        if (globalToggle) {
+          globalToggle.checked = checked === all.length;
+          globalToggle.indeterminate = checked > 0 && checked < all.length;
+        }
+      }
+      updateGlobalLangToggle();
       // Global genre toggle
       document.getElementById('genre-toggle-all')?.addEventListener('change', function() {
         const checked = this.checked;
