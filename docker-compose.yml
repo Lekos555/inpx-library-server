@@ -2,6 +2,7 @@ services:
   library:
     build: .
     container_name: inpx-library
+    image: habsaec/inpx-library-server:latest
     restart: unless-stopped
     # Лимит памяти контейнера (рекомендуется 2g для embedded, 4g для больших библиотек)
     mem_limit: 2g

@@ -43,7 +43,7 @@ export function renderHome({ user, stats, indexStatus, history = [], favoriteAut
       </div>
     </section>
     ${!isAuthenticated ? `<div class="home-inline-note">${loginHint}</div>` : ''}
-    ${renderHomeShelf({ title: t('home.shelfNew'), href: '/library/recent', items: sections.newest || [], type: 'books', isAuthenticated, showBatch: true, user, readBookIds })}
+    ${renderHomeShelf({ title: t('home.shelfNew'), href: '/library/recent', items: sections.newest || [], type: 'books', isAuthenticated, showBatch: false, user, readBookIds })}
     ${recommendationsShelf}
     ${isAuthenticated && hasContinueData
       ? (continueBooks.length
