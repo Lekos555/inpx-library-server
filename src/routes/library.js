@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import sharp from 'sharp';
 import iconv from 'iconv-lite';
+import { getSharp } from '../services/sharp-loader.js';
 import { config } from '../config.js';
 import { t, tp, getLocale } from '../i18n.js';
 import { ApiErrorCode, apiFail } from '../api-errors.js';
@@ -148,6 +148,14 @@ async function normalizeBookImageForClient(img) {
   const sourceType = detectImageMimeFromBuffer(img?.data) || String(img?.contentType || '').toLowerCase();
   if (ALLOWED_BOOK_IMAGE_TYPES.has(sourceType)) {
     return { contentType: sourceType, data: img.data };
+  }
+  const sharp = await getSharp();
+  if (!sharp) {
+    /* Обработка отключена (нет sharp/libvips) — отдаём как есть, если это изображение */
+    if (sourceType && sourceType.startsWith('image/')) {
+      return { contentType: sourceType, data: img.data };
+    }
+    return null;
   }
   await acquireSharpSlot();
   try {
@@ -1037,22 +1045,29 @@ export function registerLibraryRoutes(app, deps) {
 
       let outBuf = coverBuffer;
       let outType = 'image/webp';
-      await acquireSharpSlot();
-      try {
-        outBuf = await sharp(coverBuffer, { failOn: 'none' })
-          .resize({
-            width: getCoverWidth(),
-            height: getCoverHeight(),
-            fit: 'inside',
-            withoutEnlargement: true
-          })
-          .webp({ quality: 62, effort: 2 })
-          .toBuffer();
-      } catch {
+      const sharp = await getSharp();
+      if (sharp) {
+        await acquireSharpSlot();
+        try {
+          outBuf = await sharp(coverBuffer, { failOn: 'none' })
+            .resize({
+              width: getCoverWidth(),
+              height: getCoverHeight(),
+              fit: 'inside',
+              withoutEnlargement: true
+            })
+            .webp({ quality: 62, effort: 2 })
+            .toBuffer();
+        } catch {
+          outType = coverMime;
+          outBuf = coverBuffer;
+        } finally {
+          releaseSharpSlot();
+        }
+      } else {
+        /* Обработка отключена — отдаём оригинал без ресайза */
         outType = coverMime;
         outBuf = coverBuffer;
-      } finally {
-        releaseSharpSlot();
       }
 
       setCachedCoverThumb(book.id, outType, outBuf);

@@ -384,15 +384,17 @@ export function getUserByUsername(username) {
   return _stmtGetUser.get(username);
 }
 
+let _stmtListUsers = null;
 export function listUsers() {
-  return db.prepare(`
+  _stmtListUsers ??= db.prepare(`
     SELECT u.username, u.role, u.created_at AS createdAt,
       COALESCE(u.blocked, 0) AS blocked,
       (SELECT COUNT(*) FROM reading_history rh WHERE rh.username = u.username) AS readingCount,
       (SELECT MAX(rh.last_opened_at) FROM reading_history rh WHERE rh.username = u.username) AS lastReadAt
     FROM users u
     ORDER BY role DESC, username ASC
-  `).all();
+  `);
+  return _stmtListUsers.all();
 }
 
 let _stmtCountAdmins = null;
@@ -485,12 +487,16 @@ export function deleteUser(username) {
   })();
 }
 
+let _stmtBlockUser = null;
 export function blockUser(username) {
-  db.prepare(`UPDATE users SET blocked = 1 WHERE username = ?`).run(String(username || '').trim());
+  _stmtBlockUser ??= db.prepare(`UPDATE users SET blocked = 1 WHERE username = ?`);
+  _stmtBlockUser.run(String(username || '').trim());
 }
 
+let _stmtUnblockUser = null;
 export function unblockUser(username) {
-  db.prepare(`UPDATE users SET blocked = 0 WHERE username = ?`).run(String(username || '').trim());
+  _stmtUnblockUser ??= db.prepare(`UPDATE users SET blocked = 0 WHERE username = ?`);
+  _stmtUnblockUser.run(String(username || '').trim());
 }
 
 /** Триггеры синхронизации fts5 (content='books') с таблицей books. */
@@ -1188,47 +1194,56 @@ export function ensureSchemaIndexes() {
 
 // --- Sources CRUD ---
 
+let _stmtGetSources = null;
 export function getSources() {
-  return db.prepare(`
+  _stmtGetSources ??= db.prepare(`
     SELECT id, name, type, path, enabled, last_indexed_at AS lastIndexedAt,
            book_count AS bookCount, created_at AS createdAt,
            flibusta_sidecar AS flibustaSidecar
     FROM sources
     ORDER BY created_at ASC
-  `).all();
+  `);
+  return _stmtGetSources.all();
 }
 
+let _stmtGetEnabledSources = null;
 export function getEnabledSources() {
-  return db.prepare(`
+  _stmtGetEnabledSources ??= db.prepare(`
     SELECT id, name, type, path, enabled, last_indexed_at AS lastIndexedAt,
            book_count AS bookCount, created_at AS createdAt,
            flibusta_sidecar AS flibustaSidecar
     FROM sources
     WHERE enabled = 1
     ORDER BY created_at ASC
-  `).all();
+  `);
+  return _stmtGetEnabledSources.all();
 }
 
+let _stmtGetSourceById = null;
 export function getSourceById(id) {
-  return db.prepare(`
+  _stmtGetSourceById ??= db.prepare(`
     SELECT id, name, type, path, enabled, last_indexed_at AS lastIndexedAt,
            book_count AS bookCount, created_at AS createdAt,
            flibusta_sidecar AS flibustaSidecar
     FROM sources
     WHERE id = ?
-  `).get(id) || null;
+  `);
+  return _stmtGetSourceById.get(id) || null;
 }
 
+let _stmtGetSourceByPath = null;
 export function getSourceByPath(sourcePath) {
-  return db.prepare(`
+  _stmtGetSourceByPath ??= db.prepare(`
     SELECT id, name, type, path, enabled, last_indexed_at AS lastIndexedAt,
            book_count AS bookCount, created_at AS createdAt,
            flibusta_sidecar AS flibustaSidecar
     FROM sources
     WHERE path = ?
-  `).get(sourcePath) || null;
+  `);
+  return _stmtGetSourceByPath.get(sourcePath) || null;
 }
 
+let _stmtAddSource = null;
 export function addSource({ name, type, path: sourcePath }) {
   const trimmedName = String(name || '').trim();
   const trimmedPath = String(sourcePath || '').trim();
@@ -1237,9 +1252,10 @@ export function addSource({ name, type, path: sourcePath }) {
   if (!trimmedPath) throw new Error('Путь к источнику не указан');
   const existing = getSourceByPath(trimmedPath);
   if (existing) throw new Error('Источник с таким путём уже существует');
-  const result = db.prepare(`
+  _stmtAddSource ??= db.prepare(`
     INSERT INTO sources(name, type, path) VALUES(?, ?, ?)
-  `).run(trimmedName, normalizedType, trimmedPath);
+  `);
+  const result = _stmtAddSource.run(trimmedName, normalizedType, trimmedPath);
   return getSourceById(result.lastInsertRowid);
 }
 
@@ -1612,20 +1628,25 @@ export function migrateInpxToSources() {
   db.prepare('UPDATE sources SET book_count = ? WHERE id = ?').run(count, sourceId);
 }
 
+let _stmtGetMeta = null;
 export function getMeta(key) {
-  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+  _stmtGetMeta ??= db.prepare('SELECT value FROM meta WHERE key = ?');
+  const row = _stmtGetMeta.get(key);
   return row?.value ?? null;
 }
 
+let _stmtSetMeta = null;
 export function setMeta(key, value) {
-  db.prepare(`
+  _stmtSetMeta ??= db.prepare(`
     INSERT INTO meta(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(key, value);
+  `);
+  _stmtSetMeta.run(key, value);
 }
 
+let _stmtGetUserShelves = null;
 export function getUserShelves(username) {
-  const rows = db.prepare(`
+  _stmtGetUserShelves ??= db.prepare(`
     SELECT s.id, s.name, s.description, s.created_at AS createdAt,
            (SELECT COUNT(*) FROM shelf_books sb WHERE sb.shelf_id = s.id) AS bookCount,
            (SELECT GROUP_CONCAT(sb2.book_id, '|') FROM (
@@ -1637,51 +1658,69 @@ export function getUserShelves(username) {
     FROM shelves s
     WHERE s.username = ?
     ORDER BY s.name COLLATE NOCASE
-  `).all(username);
+  `);
+  const rows = _stmtGetUserShelves.all(username);
   for (const row of rows) {
     row.previewBookIds = row.previewBookIds ? row.previewBookIds.split('|') : [];
   }
   return rows;
 }
 
+let _stmtGetShelfById = null;
 export function getShelfById(shelfId, username) {
-  return db.prepare(`
+  _stmtGetShelfById ??= db.prepare(`
     SELECT id, username, name, description, created_at AS createdAt
     FROM shelves WHERE id = ? AND username = ?
-  `).get(shelfId, username);
+  `);
+  return _stmtGetShelfById.get(shelfId, username);
 }
 
+let _stmtCreateShelfDup = null;
+let _stmtCreateShelfInsert = null;
 export function createShelf(username, name, description = '') {
   const trimmed = String(name || '').trim();
   if (!trimmed) throw new Error('Название полки не указано');
-  const existing = db.prepare('SELECT id FROM shelves WHERE username = ? AND name = ?').get(username, trimmed);
+  _stmtCreateShelfDup ??= db.prepare('SELECT id FROM shelves WHERE username = ? AND name = ?');
+  const existing = _stmtCreateShelfDup.get(username, trimmed);
   if (existing) throw new Error('Полка с таким названием уже существует');
-  const result = db.prepare('INSERT INTO shelves(username, name, description) VALUES(?, ?, ?)').run(username, trimmed, String(description || '').trim());
+  _stmtCreateShelfInsert ??= db.prepare('INSERT INTO shelves(username, name, description) VALUES(?, ?, ?)');
+  const result = _stmtCreateShelfInsert.run(username, trimmed, String(description || '').trim());
   return result.lastInsertRowid;
 }
 
+let _stmtUpdateShelfDup = null;
+let _stmtUpdateShelf = null;
 export function updateShelf(shelfId, username, name, description) {
   const trimmed = String(name || '').trim();
   if (!trimmed) throw new Error('Название полки не указано');
-  const dup = db.prepare('SELECT id FROM shelves WHERE username = ? AND name = ? AND id != ?').get(username, trimmed, shelfId);
+  _stmtUpdateShelfDup ??= db.prepare('SELECT id FROM shelves WHERE username = ? AND name = ? AND id != ?');
+  const dup = _stmtUpdateShelfDup.get(username, trimmed, shelfId);
   if (dup) throw new Error('Полка с таким названием уже существует');
-  return db.prepare('UPDATE shelves SET name = ?, description = ? WHERE id = ? AND username = ?').run(trimmed, String(description || '').trim(), shelfId, username).changes;
+  _stmtUpdateShelf ??= db.prepare('UPDATE shelves SET name = ?, description = ? WHERE id = ? AND username = ?');
+  return _stmtUpdateShelf.run(trimmed, String(description || '').trim(), shelfId, username).changes;
 }
 
+let _stmtDeleteShelf = null;
 export function deleteShelf(shelfId, username) {
-  return db.prepare('DELETE FROM shelves WHERE id = ? AND username = ?').run(shelfId, username).changes;
+  _stmtDeleteShelf ??= db.prepare('DELETE FROM shelves WHERE id = ? AND username = ?');
+  return _stmtDeleteShelf.run(shelfId, username).changes;
 }
 
+let _stmtAddBookToShelf = null;
 export function addBookToShelf(shelfId, bookId) {
-  db.prepare('INSERT OR IGNORE INTO shelf_books(shelf_id, book_id) VALUES(?, ?)').run(shelfId, bookId);
+  _stmtAddBookToShelf ??= db.prepare('INSERT OR IGNORE INTO shelf_books(shelf_id, book_id) VALUES(?, ?)');
+  _stmtAddBookToShelf.run(shelfId, bookId);
 }
 
+let _stmtRemoveBookFromShelf = null;
 export function removeBookFromShelf(shelfId, bookId) {
-  return db.prepare('DELETE FROM shelf_books WHERE shelf_id = ? AND book_id = ?').run(shelfId, bookId).changes;
+  _stmtRemoveBookFromShelf ??= db.prepare('DELETE FROM shelf_books WHERE shelf_id = ? AND book_id = ?');
+  return _stmtRemoveBookFromShelf.run(shelfId, bookId).changes;
 }
 
+let _stmtGetShelfBooks = null;
 export function getShelfBooks(shelfId, username) {
-  return db.prepare(`
+  _stmtGetShelfBooks ??= db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.ext, b.lang,
            b.archive_name AS archiveName, sb.added_at AS addedAt
     FROM shelf_books sb
@@ -1689,7 +1728,8 @@ export function getShelfBooks(shelfId, username) {
     JOIN shelves s ON s.id = sb.shelf_id AND s.username = ?
     WHERE sb.shelf_id = ?
     ORDER BY sb.added_at DESC
-  `).all(username, shelfId);
+  `);
+  return _stmtGetShelfBooks.all(username, shelfId);
 }
 
 db.exec(`CREATE TABLE IF NOT EXISTS settings (
@@ -1697,38 +1737,48 @@ db.exec(`CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL DEFAULT ''
 )`);
 
+const _settingCache = new Map();
+
 let _stmtGetSetting = null;
 export function getSetting(key) {
+  const cached = _settingCache.get(key);
+  if (cached !== undefined) return cached;
   _stmtGetSetting ??= db.prepare('SELECT value FROM settings WHERE key = ?');
   const row = _stmtGetSetting.get(key);
-  return row?.value || '';
+  const value = row?.value || '';
+  _settingCache.set(key, value);
+  return value;
 }
 
 let _stmtSetSetting = null;
 export function setSetting(key, value) {
   _stmtSetSetting ??= db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   _stmtSetSetting.run(key, String(value ?? ''));
+  _settingCache.delete(key);
 }
 
 /**
  * Список всех уникальных языков из таблицы books (включая удалённые/отключённые),
  * чтобы админ видел полную картину.
  */
+let _stmtDistinctLanguagesDb = null;
 export function getDistinctLanguages() {
-  return db.prepare(`
+  _stmtDistinctLanguagesDb ??= db.prepare(`
     SELECT COALESCE(NULLIF(lang, ''), 'unknown') AS code, COUNT(*) AS bookCount
     FROM books WHERE deleted = 0
     GROUP BY COALESCE(NULLIF(lang, ''), 'unknown')
     ORDER BY bookCount DESC
-  `).all();
+  `);
+  return _stmtDistinctLanguagesDb.all();
 }
 
 /**
  * Все жанры с количеством книг (из raw books, не active_books),
  * чтобы админ видел полную картину.
  */
+let _stmtDistinctGenresDb = null;
 export function getDistinctGenres() {
-  return db.prepare(`
+  _stmtDistinctGenresDb ??= db.prepare(`
     SELECT g.name AS code, COALESCE(g.display_name, g.name) AS displayName,
            COUNT(bg.book_id) AS bookCount
     FROM genres_catalog g
@@ -1736,7 +1786,8 @@ export function getDistinctGenres() {
     JOIN books b ON b.id = bg.book_id AND b.deleted = 0
     GROUP BY g.id
     ORDER BY bookCount DESC
-  `).all();
+  `);
+  return _stmtDistinctGenresDb.all();
 }
 
 /* ── Prepared statement reset (called after active_books VIEW rebuild) ── */
@@ -1763,6 +1814,7 @@ export function resetDbPreparedStatements() {
   _stmtUpsertReadHistory = null;
   _stmtGetReaderBookmarks = null;
   _stmtAllReaderBm = null;
+  _stmtAllReaderAnnotations = null;
   _stmtAddReaderBm = null;
   _stmtDelReaderBm = null;
   _stmtGetEreaderEmail = null;
@@ -1973,6 +2025,71 @@ export function deleteReaderBookmark(id, username) {
   _stmtDelReaderBm.run(id, username);
 }
 
+/* ── Аннотации читалки (выделения и заметки) ──────────────────────── */
+db.exec(`CREATE TABLE IF NOT EXISTS reader_annotations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  cfi TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  color TEXT NOT NULL DEFAULT 'yellow',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_reader_annotations_user_book ON reader_annotations(username, book_id)`);
+
+let _stmtGetReaderAnnotations = null;
+export function getReaderAnnotations(username, bookId) {
+  _stmtGetReaderAnnotations ??= db.prepare('SELECT id, cfi, text, note, color, created_at AS createdAt FROM reader_annotations WHERE username = ? AND book_id = ? ORDER BY created_at');
+  return _stmtGetReaderAnnotations.all(username, bookId);
+}
+
+/** Последние аннотации пользователя по всем книгам (для страницы профиля). */
+let _stmtAllReaderAnnotations = null;
+export function getAllReaderAnnotations(username, limit = 10) {
+  _stmtAllReaderAnnotations ??= db.prepare(`
+    SELECT ra.id, ra.book_id AS bookId, ra.cfi, ra.text, ra.note, ra.color, ra.created_at AS createdAt,
+           b.title AS bookTitle, b.authors
+    FROM reader_annotations ra
+    JOIN active_books b ON b.id = ra.book_id
+    WHERE ra.username = ?
+    ORDER BY ra.created_at DESC
+    LIMIT ?
+  `);
+  return _stmtAllReaderAnnotations.all(username, limit);
+}
+
+let _stmtAddReaderAnnotation = null;
+export function addReaderAnnotation(username, bookId, cfi, text, note, color) {
+  _stmtAddReaderAnnotation ??= db.prepare('INSERT INTO reader_annotations (username, book_id, cfi, text, note, color) VALUES (?, ?, ?, ?, ?, ?)');
+  const info = _stmtAddReaderAnnotation.run(username, bookId, String(cfi), String(text || ''), String(note || ''), String(color || 'yellow'));
+  return info.lastInsertRowid;
+}
+
+let _stmtUpdReaderAnnotationNote = null;
+let _stmtUpdReaderAnnotationColor = null;
+let _stmtUpdReaderAnnotationBoth = null;
+export function updateReaderAnnotation(id, username, { note, color } = {}) {
+  const hasNote = note !== undefined;
+  const hasColor = color !== undefined;
+  if (hasNote && hasColor) {
+    _stmtUpdReaderAnnotationBoth ??= db.prepare('UPDATE reader_annotations SET note = ?, color = ? WHERE id = ? AND username = ?');
+    _stmtUpdReaderAnnotationBoth.run(String(note), String(color), id, username);
+  } else if (hasNote) {
+    _stmtUpdReaderAnnotationNote ??= db.prepare('UPDATE reader_annotations SET note = ? WHERE id = ? AND username = ?');
+    _stmtUpdReaderAnnotationNote.run(String(note), id, username);
+  } else if (hasColor) {
+    _stmtUpdReaderAnnotationColor ??= db.prepare('UPDATE reader_annotations SET color = ? WHERE id = ? AND username = ?');
+    _stmtUpdReaderAnnotationColor.run(String(color), id, username);
+  }
+}
+
+let _stmtDelReaderAnnotation = null;
+export function deleteReaderAnnotation(id, username) {
+  _stmtDelReaderAnnotation ??= db.prepare('DELETE FROM reader_annotations WHERE id = ? AND username = ?');
+  _stmtDelReaderAnnotation.run(id, username);
+}
+
 let _stmtGetEreaderEmail = null;
 export function getEreaderEmail(username) {
   _stmtGetEreaderEmail ??= db.prepare('SELECT ereader_email FROM users WHERE username = ?');
@@ -2106,6 +2223,7 @@ function _ensureUserStatsStmt() {
         (SELECT COUNT(*) FROM shelves WHERE username = ?) AS shelvesCount,
         (SELECT COUNT(*) FROM shelf_books sb JOIN shelves s ON s.id = sb.shelf_id WHERE s.username = ?) AS shelfBooksCount,
         (SELECT COUNT(*) FROM reader_bookmarks WHERE username = ?) AS readerBookmarksCount,
+        (SELECT COUNT(*) FROM reader_annotations WHERE username = ?) AS readerAnnotationsCount,
         (SELECT created_at FROM users WHERE username = ?) AS createdAt
     `);
   }
@@ -2113,7 +2231,7 @@ function _ensureUserStatsStmt() {
 }
 
 export function getUserStats(username) {
-  const row = _ensureUserStatsStmt().get(username, username, username, username, username, username, username, username, username, username);
+  const row = _ensureUserStatsStmt().get(username, username, username, username, username, username, username, username, username, username, username);
   return {
     readingCount: row?.readingCount || 0,
     bookmarkCount: row?.bookmarkCount || 0,
@@ -2124,6 +2242,7 @@ export function getUserStats(username) {
     shelvesCount: row?.shelvesCount || 0,
     shelfBooksCount: row?.shelfBooksCount || 0,
     readerBookmarksCount: row?.readerBookmarksCount || 0,
+    readerAnnotationsCount: row?.readerAnnotationsCount || 0,
     createdAt: row?.createdAt || null
   };
 }
@@ -2245,11 +2364,23 @@ export function isBookSuppressed(bookId) {
 export function getSuppressedBooks({ page = 1, pageSize = 50, filter = '' } = {}) {
   const offset = (page - 1) * pageSize;
   const normalizedFilter = String(filter || '').trim().toLowerCase();
+  const tokens = normalizedFilter.split(/\s+/).filter(Boolean);
+  const hasTokens = tokens.length > 0;
 
-  const filterWhere = normalizedFilter
-    ? 'WHERE lower_unicode(title) LIKE ? OR lower_unicode(authors) LIKE ?'
-    : '';
-  const filterParams = normalizedFilter ? ['%' + normalizedFilter + '%', '%' + normalizedFilter + '%'] : [];
+  let filterWhere, filterParams;
+  if (tokens.length === 1) {
+    const word = tokens[0];
+    filterWhere = `WHERE (lower_unicode(title) LIKE ? OR lower_unicode(authors) LIKE ?)`;
+    filterParams = [`%${word}%`, `%${word}%`];
+  } else if (tokens.length > 1) {
+    const titleClauses = tokens.map(() => `(' ' || lower_unicode(title) || ' ') LIKE ?`).join(' AND ');
+    const authorsClauses = tokens.map(() => `(' ' || COALESCE(lower_unicode(authors), '') || ' ') LIKE ?`).join(' AND ');
+    filterWhere = `WHERE (${titleClauses} OR ${authorsClauses})`;
+    filterParams = [...tokens.map(t => `% ${t}%`), ...tokens.map(t => `% ${t}%`)];
+  } else {
+    filterWhere = '';
+    filterParams = [];
+  }
 
   const totalBooksSql = `SELECT COUNT(*) AS count FROM suppressed_books ${filterWhere}`;
   const totalBooks = db.prepare(totalBooksSql).get(...filterParams)?.count || 0;
@@ -2279,11 +2410,11 @@ export function getSuppressedBooks({ page = 1, pageSize = 50, filter = '' } = {}
   const booksSql = `
     SELECT * FROM suppressed_books
     WHERE COALESCE(authors, '') IN (${placeholders})
-      ${normalizedFilter ? 'AND (lower_unicode(title) LIKE ? OR lower_unicode(authors) LIKE ?)' : ''}
+      ${hasTokens ? `AND ${filterWhere.replace(/^WHERE /, '')}` : ''}
     ORDER BY COALESCE(authors, '') ASC, title ASC
   `;
   const booksParams = [...authors];
-  if (normalizedFilter) booksParams.push(...filterParams);
+  if (hasTokens) booksParams.push(...filterParams);
   const rows = db.prepare(booksSql).all(...booksParams);
 
   const totalAuthorsSql = `SELECT COUNT(DISTINCT COALESCE(authors, '')) AS count FROM suppressed_books ${filterWhere}`;

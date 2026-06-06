@@ -2319,6 +2319,12 @@ button.download-format-link {
 .profile-tab-panel {
   min-width: 0;
 }
+/* Без min-width:0 grid-элементы (.table-row и его ячейки) раздуваются по
+   min-content содержимого (например длинного текста заметки) и вызывают
+   горизонтальное переполнение страницы профиля. */
+.profile-tab-panel .table-list { grid-template-columns: minmax(0, 1fr); }
+.profile-tab-panel .table-row { min-width: 0; }
+.profile-tab-panel .table-row > * { min-width: 0; }
 
 /* Профиль: двухколоночная сетка (если где-то останется в шаблонах) */
 .profile-page-layout {
@@ -2343,6 +2349,17 @@ button.download-format-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Текст заметки может быть длинным — держим его в одну строку с многоточием на
+   всех экранах (надёжно на flex/grid), иначе на мобильном он расползается в
+   «стену текста». Повышенная специфичность перекрывает базовые и мобильные
+   правила .profile-list-link. */
+.profile-list-item .profile-note-link {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 .profile-list-meta {
   flex-shrink: 0;
@@ -3757,6 +3774,12 @@ html[data-theme="light"] .alert-info {
 .admin-dup-group-author { min-width: 0; overflow-wrap: break-word; }
 .admin-dup-table-wrap { overflow-x: auto; padding: 0 14px 14px; }
 .admin-dup-table td { vertical-align: middle; }
+.admin-dup-set { padding: 10px 0 0; }
+.admin-dup-set + .admin-dup-set { border-top: 1px dashed var(--border); margin-top: 10px; }
+.admin-dup-set-title {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-weight: 600; font-size: 13px; color: var(--text); overflow-wrap: anywhere;
+}
 
 
 /* Inline button spinner */

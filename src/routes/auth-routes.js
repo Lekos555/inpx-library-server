@@ -12,7 +12,7 @@ import { getIndexStatus, getReadingHistory } from '../inpx.js';
 import {
   getUserByUsername, getSetting, createUser, changePassword,
   setEreaderEmail, getEreaderEmail, getUserStats,
-  getAllReaderBookmarks, decryptValue,
+  getAllReaderBookmarks, getAllReaderAnnotations, decryptValue,
 } from '../db.js';
 import { logSystemEvent } from '../services/system-events.js';
 import {
@@ -51,6 +51,7 @@ export function registerAuthRoutes(app, deps) {
       ereaderEmail: getEreaderEmail(user.username),
       recentBooks: getReadingHistory(user.username, 5),
       readerBookmarks: getAllReaderBookmarks(user.username, 10),
+      readerAnnotations: getAllReaderAnnotations(user.username, 10),
       flash,
       csrfToken
     };

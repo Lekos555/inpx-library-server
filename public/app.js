@@ -253,6 +253,7 @@ function syncProfilePageCounters() {
   if (!root) return;
   const reading = Math.max(0, parseInt(root.dataset.readingTotal, 10) || 0);
   const readerBm = Math.max(0, parseInt(root.dataset.readerBmTotal, 10) || 0);
+  const readerNotes = Math.max(0, parseInt(root.dataset.readerNotesTotal, 10) || 0);
 
   const link = document.querySelector('[data-profile-reading-all-link]');
   if (link) {
@@ -263,6 +264,9 @@ function syncProfilePageCounters() {
 
   const bmSpan = document.querySelector('[data-profile-reader-bm-count]');
   if (bmSpan) bmSpan.textContent = formatClientInt(readerBm);
+
+  const notesSpan = document.querySelector('[data-profile-reader-notes-count]');
+  if (notesSpan) notesSpan.textContent = formatClientInt(readerNotes);
 }
 
 function bumpProfileReadingTotal(delta) {
@@ -281,10 +285,18 @@ function bumpProfileReaderBmTotal(delta) {
   syncProfilePageCounters();
 }
 
+function bumpProfileReaderNotesTotal(delta) {
+  const root = document.querySelector('[data-profile-page-stats]');
+  if (!root) return;
+  const next = Math.max(0, (parseInt(root.dataset.readerNotesTotal, 10) || 0) + delta);
+  root.dataset.readerNotesTotal = String(next);
+  syncProfilePageCounters();
+}
+
 async function loadBookPageReview() {
   const mount = document.querySelector('[data-book-review-mount]');
   if (!mount) return;
-  const id = mount.dataset.bookReviewFor;
+  const id = mount.dataset.bookReviewFor ? decodeURIComponent(mount.dataset.bookReviewFor).replace(/\uFFFD/g, '\0') : null;
   const heading = mount.dataset.reviewHeading || '';
   if (!id) {
     mount.remove();
@@ -851,7 +863,8 @@ function attachReadBookActions() {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const bookId = btn.dataset.readButton;
+      const rawAttr = btn.dataset.readButton;
+      const bookId = rawAttr ? decodeURIComponent(rawAttr).replace(/\uFFFD/g, '\0') : null;
       try {
         const csrfMeta = document.querySelector('meta[name="csrf-token"]');
         const headers = {};
@@ -1156,7 +1169,7 @@ async function attachBookmarkActions() {
     button.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const bookId = button.dataset.bookmarkButton;
+      const bookId = button.dataset.bookmarkButton ? decodeURIComponent(button.dataset.bookmarkButton).replace(/\uFFFD/g, '\0') : null;
       const removing =
         isFavoriteBookListRemoveButton(button) ||
         button.dataset.activeFavorite === 'true' ||
@@ -2210,39 +2223,28 @@ async function pollOperationsDashboard() {
           }).join('');
         }
       }
-      /* Тот же градиент severity, что и на сервере. Используется и для полосок
-         (линейная заливка), и для donut-индикатора диска (solid цвет stroke). */
-      const monitorSeverityColor = (pct) => {
+      /* Тот же градиент severity, что и на сервере: зелёный → жёлтый (0–70%) → красный (70–100%).
+         Используется и для полосок (линейная заливка), и для donut-индикатора диска (solid stroke). */
+      const monitorSeverityRgb = (pct) => {
         const p = Math.max(0, Math.min(100, Number(pct) || 0));
         const c0 = { r: 63, g: 185, b: 94 };
         const c1 = { r: 226, g: 187, b: 79 };
         const c2 = { r: 217, g: 80, b: 80 };
         const lerp = (a, b, t) => Math.round(a + (b - a) * t);
-        let out;
         if (p <= 70) {
           const t = p / 70;
-          out = { r: lerp(c0.r, c1.r, t), g: lerp(c0.g, c1.g, t), b: lerp(c0.b, c1.b, t) };
-        } else {
-          const t = (p - 70) / 30;
-          out = { r: lerp(c1.r, c2.r, t), g: lerp(c1.g, c2.g, t), b: lerp(c1.b, c2.b, t) };
+          return { r: lerp(c0.r, c1.r, t), g: lerp(c0.g, c1.g, t), b: lerp(c0.b, c1.b, t) };
         }
+        const t = (p - 70) / 30;
+        return { r: lerp(c1.r, c2.r, t), g: lerp(c1.g, c2.g, t), b: lerp(c1.b, c2.b, t) };
+      };
+      const monitorSeverityColor = (pct) => {
+        const out = monitorSeverityRgb(pct);
         return `rgb(${out.r}, ${out.g}, ${out.b})`;
       };
       const monitorBarGradient = (pct) => {
-        const p = Math.max(0, Math.min(100, Number(pct) || 0));
-        const c0 = { r: 63, g: 185, b: 94 };
-        const c1 = { r: 226, g: 187, b: 79 };
-        const c2 = { r: 217, g: 80, b: 80 };
-        const lerp = (a, b, t) => Math.round(a + (b - a) * t);
-        let out;
-        if (p <= 70) {
-          const t = p / 70;
-          out = { r: lerp(c0.r, c1.r, t), g: lerp(c0.g, c1.g, t), b: lerp(c0.b, c1.b, t) };
-        } else {
-          const t = (p - 70) / 30;
-          out = { r: lerp(c1.r, c2.r, t), g: lerp(c1.g, c2.g, t), b: lerp(c1.b, c2.b, t) };
-        }
-        return `linear-gradient(90deg, rgb(${c0.r}, ${c0.g}, ${c0.b}) 0%, rgb(${out.r}, ${out.g}, ${out.b}) 100%)`;
+        const out = monitorSeverityRgb(pct);
+        return `linear-gradient(90deg, rgb(63, 185, 94) 0%, rgb(${out.r}, ${out.g}, ${out.b}) 100%)`;
       };
       for (const [field, pct] of Object.entries(monitorBars)) {
         const bar = document.querySelector(`[data-operations-field="${field}"]`);
@@ -2903,7 +2905,7 @@ function attachLoadMore() {
         for (const card of newCards) grid.appendChild(card);
 
         const MAX_VISIBLE_CARDS = 500;
-        const allCards = grid.querySelectorAll('.book-card');
+        const allCards = grid.querySelectorAll('.card');
         if (allCards.length > MAX_VISIBLE_CARDS) {
           const excess = allCards.length - MAX_VISIBLE_CARDS;
           const toRemove = [...allCards].slice(0, excess);
@@ -3652,7 +3654,7 @@ async function openAddToShelfPicker(bookIds) {
           </div>
         `,
       {
-        beforeClose: () => {
+        beforeClose: async () => {
           const root = document.querySelector('.modal-overlay');
           if (!root) return true;
           const dirty = [...root.querySelectorAll('[data-shelf-toggle]')].some((cb) => {
@@ -3660,7 +3662,7 @@ async function openAddToShelfPicker(bookIds) {
             return cb.checked !== (initialShelfState.get(id) ?? false);
           });
           if (!dirty) return true;
-          return window.confirm(uiT('app.closeWithoutSave'));
+          return confirmAction(uiT('app.closeWithoutSave'), { danger: false });
         }
       }
     );
@@ -3807,7 +3809,7 @@ async function openAddToShelfPicker(bookIds) {
 function attachAddToShelfButtons() {
   for (const btn of document.querySelectorAll('[data-add-to-shelf]')) {
     btn.addEventListener('click', async () => {
-      const bookId = btn.dataset.addToShelf;
+      const bookId = btn.dataset.addToShelf ? decodeURIComponent(btn.dataset.addToShelf).replace(/\uFFFD/g, '\0') : null;
       if (!bookId) return;
       await openAddToShelfPicker([bookId]);
     });
@@ -3817,7 +3819,7 @@ function attachAddToShelfButtons() {
 function attachSendToEreader() {
   for (const btn of document.querySelectorAll('[data-send-to-ereader]')) {
     btn.addEventListener('click', async () => {
-      const bookId = btn.dataset.sendToEreader;
+      const bookId = btn.dataset.sendToEreader ? decodeURIComponent(btn.dataset.sendToEreader).replace(/\uFFFD/g, '\0') : null;
       try {
         const emailRes = await fetch('/api/ereader-email', { credentials: 'same-origin' });
         if (!emailRes.ok) throw new Error('HTTP ' + emailRes.status);
@@ -4260,6 +4262,34 @@ function attachProfileRemoveActions() {
             })();
           }
         });
+      } catch {
+        showToast(uiT('app.networkError'), 'error');
+      }
+    });
+  }
+  for (const btn of document.querySelectorAll('[data-remove-annotation]')) {
+    btn.addEventListener('click', async () => {
+      const aid = btn.dataset.removeAnnotation;
+      const row = btn.closest('.profile-list-item');
+      const rawBookId = row?.dataset.annotationBookId || '';
+      const bookId = rawBookId ? decodeURIComponent(rawBookId).replace(/\uFFFD/g, '\0') : '';
+      const labelText = (row?.querySelector('a')?.textContent || '').trim();
+      const msg = labelText ? uiTp('app.deleteAnnotationConfirm', { label: labelText }) : uiT('app.deleteAnnotationConfirmShort');
+      if (!await confirmAction(msg, { danger: true })) return;
+      if (!bookId) {
+        showToast(uiT('app.annotationDeleteFail'), 'error');
+        return;
+      }
+      try {
+        const r = await fetch(`/api/books/${encodeURIComponent(bookId)}/annotations/${encodeURIComponent(aid)}`, { method: 'DELETE', credentials: 'same-origin' });
+        if (await handleAuthRequired(r)) return;
+        if (!r.ok) {
+          showToast(uiT('app.annotationDeleteFail'), 'error');
+          return;
+        }
+        if (row) row.remove();
+        bumpProfileReaderNotesTotal(-1);
+        showToast(uiT('app.annotationDeleted'), 'success');
       } catch {
         showToast(uiT('app.networkError'), 'error');
       }
@@ -5019,562 +5049,6 @@ function attachDirtyFormTracking() {
   });
 }
 
-// --- Duplicates page: async loading ---
-(function initDuplicatesPage() {
-  const container = document.querySelector('[data-duplicates-page]');
-  if (!container) return;
-
-  function fmtSize(bytes) {
-    const n = Number(bytes) || 0;
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
-  let currentPage = Number(container.getAttribute('data-page') || 1);
-  const params = new URLSearchParams(window.location.search);
-  if (params.has('page')) currentPage = Math.max(1, parseInt(params.get('page'), 10) || 1);
-
-  let suppPage = 1;
-  let sharedFilter = '';
-  let lastSuppData = null;
-
-  let dupBusy = false;
-
-  /** POST JSON to API, show inline spinner on triggering button, reload data on success. */
-  async function dupAction(url, body, confirmMsg, danger, triggerBtn) {
-    if (dupBusy) return;
-    if (confirmMsg && !(await confirmAction(confirmMsg, { danger }))) return;
-    dupBusy = true;
-    let prevHtml = '';
-    if (triggerBtn) {
-      prevHtml = triggerBtn.innerHTML;
-      triggerBtn.disabled = true;
-      triggerBtn.innerHTML = '<span class="btn-spinner"></span>' + escapeHtml(uiT('app.running') || 'Выполняется…');
-    }
-    try {
-      const csrf = getCsrfTokenFromPage();
-      const headers = { 'Content-Type': 'application/json' };
-      if (csrf) headers['X-CSRF-Token'] = csrf;
-      const resp = await fetch(url, { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(body || {}) });
-      const data = await resp.json().catch(() => ({}));
-      if (data.message) showToast(data.message, data.ok ? 'success' : 'error');
-      else if (!data.ok) showToast(data.error || 'Error', 'error');
-    } catch (err) {
-      showToast(err.message || 'Error', 'error');
-    } finally {
-      dupBusy = false;
-      if (triggerBtn) {
-        triggerBtn.disabled = false;
-        triggerBtn.innerHTML = prevHtml;
-      }
-    }
-    /* После любой мутации (удаление / автоочистка / восстановление) данные устарели —
-       сбрасываем sessionStorage-кеш, чтобы reload-запрос точно перетёр результаты. */
-    invalidateDupCache();
-    invalidateSuppCache();
-    loadDuplicates(currentPage);
-    loadSuppressed(true);
-  }
-
-  function renderAutoCleanPanel(preview) {
-    if (!preview || preview.willDelete <= 0) return '';
-    return '<div class="admin-card admin-dup-auto-clean" style="margin-bottom:20px;border-left:4px solid var(--accent-color)">'
-      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.autoCleanTitle')) + '</div>'
-      + '<p style="margin:8px 0">' + escapeHtml(uiTp('admin.duplicates.autoCleanDesc', { groups: preview.totalGroups, total: preview.totalBooks, delete: preview.willDelete })) + '</p>'
-      + '<p class="muted" style="font-size:.85em;margin:4px 0">' + escapeHtml(uiT('admin.duplicates.autoCleanStrategy')) + '</p>'
-      + '<div style="margin-top:12px">'
-      + '<button type="button" class="button-danger" data-dup-auto-clean data-n="' + preview.willDelete + '">'
-      + escapeHtml(uiTp('admin.duplicates.autoCleanBtn', { n: preview.willDelete }))
-      + '</button></div></div>';
-  }
-
-  function renderGroups(groups) {
-    if (!groups || !groups.length) {
-      return '<p class="muted" style="margin:24px 0">' + escapeHtml(uiT('admin.duplicates.empty')) + '</p>';
-    }
-    return groups.map(function(group) {
-      var items = group.items || [];
-      var rows = items.map(function(book) {
-        return '<tr>'
-          + '<td>' + escapeHtml(book.title || book.id) + '</td>'
-          + '<td><span class="admin-chip" style="font-size:.8em">' + escapeHtml((book.ext || '').toUpperCase()) + '</span></td>'
-          + '<td><button type="button" class="button-danger admin-compact-btn" data-dup-delete="' + escapeHtml(book.id) + '" data-title="' + escapeHtml(book.title) + '" style="font-size:.8em;padding:3px 8px">' + escapeHtml(uiT('admin.duplicates.delete')) + '</button></td></tr>';
-      }).join('');
-      return '<details class="admin-dup-group">'
-        + '<summary class="admin-dup-group-summary">'
-        + '<strong class="admin-dup-group-title">' + escapeHtml(group.authors || uiT('book.authorUnknown')) + '</strong>'
-        + '<span class="admin-chip admin-dup-group-count">' + items.length + ' ' + escapeHtml(uiPlural('book', items.length)) + '</span>'
-        + '</summary>'
-        + '<div style="overflow-x:auto"><table class="admin-table" style="width:100%;margin:8px 0"><thead><tr>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thTitle')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thFormat')) + '</th>'
-        + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div></details>';
-    }).join('');
-  }
-
-  function renderPagination(total, pageSize, page) {
-    var totalPages = Math.ceil(total / pageSize) || 1;
-    if (totalPages <= 1) return '';
-    var html = '<nav class="pagination" style="margin-top:16px" aria-label="' + escapeHtml(uiT('pagination.label') || 'Pagination') + '">';
-    if (page > 1) html += '<a href="#" class="page-link page-link-prev" data-page="' + (page - 1) + '">' + escapeHtml(uiT('pagination.prev') || '\u2190') + '</a> ';
-
-    var windowStart = Math.max(1, page - 2);
-    var windowEnd = Math.min(totalPages, page + 2);
-
-    if (windowStart > 1) {
-      html += '<a href="#" class="page-link" data-page="1">1</a> ';
-      if (windowStart > 2) html += '<span class="page-ellipsis muted">\u2026</span> ';
-    }
-
-    for (var i = windowStart; i <= windowEnd; i++) {
-      if (i === page) {
-        html += '<span class="page-link page-link-active">' + i + '</span> ';
-      } else {
-        html += '<a href="#" class="page-link" data-page="' + i + '">' + i + '</a> ';
-      }
-    }
-
-    if (windowEnd < totalPages) {
-      if (windowEnd < totalPages - 1) html += '<span class="page-ellipsis muted">\u2026</span> ';
-      html += '<a href="#" class="page-link" data-page="' + totalPages + '">' + totalPages + '</a> ';
-    }
-
-    if (page < totalPages) html += '<a href="#" class="page-link page-link-next" data-page="' + (page + 1) + '">' + escapeHtml(uiT('pagination.next') || '\u2192') + '</a>';
-    html += '</nav>';
-    return html;
-  }
-
-  function reasonLabel(reason) {
-    if (reason === 'auto_clean') return uiT('admin.duplicates.reasonAutoClean');
-    return uiT('admin.duplicates.reasonUser');
-  }
-
-  function renderSuppPagination(total, pageSize, page) {
-    const totalPages = Math.ceil(total / pageSize) || 1;
-    if (totalPages <= 1) return '';
-    let html = '<nav class="pagination" style="margin-top:12px" aria-label="' + escapeHtml(uiT('pagination.label') || 'Pagination') + '">';
-    if (page > 1) html += '<a href="#" class="page-link page-link-prev" data-page="' + (page - 1) + '">' + escapeHtml(uiT('pagination.prev') || '←') + '</a> ';
-
-    // Оконная пагинация: текущая ± 2, плюс границы
-    const windowStart = Math.max(1, page - 2);
-    const windowEnd = Math.min(totalPages, page + 2);
-
-    if (windowStart > 1) {
-      html += '<a href="#" class="page-link" data-page="1">1</a> ';
-      if (windowStart > 2) html += '<span class="page-ellipsis muted">\u2026</span> ';
-    }
-
-    for (let i = windowStart; i <= windowEnd; i++) {
-      if (i === page) {
-        html += '<span class="page-link page-link-active">' + i + '</span> ';
-      } else {
-        html += '<a href="#" class="page-link" data-page="' + i + '">' + i + '</a> ';
-      }
-    }
-
-    if (windowEnd < totalPages) {
-      if (windowEnd < totalPages - 1) html += '<span class="page-ellipsis muted">\u2026</span> ';
-      html += '<a href="#" class="page-link" data-page="' + totalPages + '">' + totalPages + '</a> ';
-    }
-
-    if (page < totalPages) html += '<a href="#" class="page-link page-link-next" data-page="' + (page + 1) + '">' + escapeHtml(uiT('pagination.next') || '→') + '</a>';
-    html += '</nav>';
-    return html;
-  }
-
-  function renderSuppressedContent(sdata) {
-    if (!sdata || (!sdata.total && (!sdata.rows || !sdata.rows.length))) {
-      return '<p class="muted">' + escapeHtml(uiT('admin.duplicates.suppressedEmpty')) + '</p>';
-    }
-
-    // Group by author and sort alphabetically
-    const groups = {};
-    for (let i = 0; i < sdata.rows.length; i++) {
-      const row = sdata.rows[i];
-      const authorKey = row.authors || uiT('book.authorUnknown');
-      if (!groups[authorKey]) groups[authorKey] = [];
-      groups[authorKey].push(row);
-    }
-    const authorNames = Object.keys(groups).sort(function(a, b) { return a.localeCompare(b); });
-
-    const groupsHtml = authorNames.map(function(author) {
-      const items = groups[author];
-      const itemRows = items.map(function(s) {
-        return '<tr>'
-          + '<td>' + escapeHtml(s.title || s.book_id) + '</td>'
-          + '<td><span class="admin-chip" style="font-size:.8em">' + escapeHtml(reasonLabel(s.reason)) + '</span></td>'
-          + '<td><button type="button" class="button" data-dup-unsuppress="' + escapeHtml(s.book_id) + '" style="font-size:.8em;padding:3px 8px">' + escapeHtml(uiT('admin.duplicates.unsuppress')) + '</button></td></tr>';
-      }).join('');
-      return '<details class="admin-dup-group">'
-        + '<summary class="admin-dup-group-summary">'
-        + '<strong class="admin-dup-group-title">' + escapeHtml(author) + '</strong>'
-        + '<span class="admin-chip admin-dup-group-count">' + items.length + ' ' + escapeHtml(uiPlural('book', items.length)) + '</span>'
-        + '</summary>'
-        + '<div style="overflow-x:auto"><table class="admin-table" style="width:100%;margin:8px 0"><thead><tr>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thTitle')) + '</th>'
-        + '<th>' + escapeHtml(uiT('admin.duplicates.thFormat')) + '</th>'
-        + '<th></th></tr></thead><tbody>' + itemRows + '</tbody></table></div></details>';
-    }).join('');
-
-    const pagHtml = renderSuppPagination(sdata.total, sdata.pageSize, sdata.page);
-
-    const totalBooks = sdata.totalBooks || sdata.total;
-    const unsuppressAllBtn = totalBooks > 1
-      ? '<button type="button" class="button-danger" data-dup-unsuppress-all data-n="' + totalBooks + '" style="font-size:.9em;padding:5px 16px;margin-top:12px">' + escapeHtml(uiT('admin.duplicates.unsuppressAll')) + '</button>'
-      : '';
-
-    return groupsHtml + pagHtml + unsuppressAllBtn;
-  }
-
-  function renderSharedFilter(filter) {
-    const hasFilter = Boolean(filter);
-    return '<form class="search-form browse-filter" id="shared-filter-form" style="margin-bottom:16px;max-width:460px;">'
-      + '<input type="text" name="q" id="shared-filter" placeholder="' + escapeHtml(uiT('admin.duplicates.filterPlaceholder')) + '" value="' + escapeHtml(filter || '') + '">'
-      + '<div class="actions">'
-      + '<button type="submit" class="button">' + escapeHtml(uiT('admin.duplicates.filterBtn')) + '</button>'
-      + (hasFilter ? '<button type="button" class="button" id="shared-filter-reset">' + escapeHtml(uiT('browse.reset') || 'Сбросить') + '</button>' : '')
-      + '</div></form>';
-  }
-
-  function renderSuppressedSection(sdata) {
-    const totalBooks = sdata?.totalBooks ?? sdata?.total ?? 0;
-
-    return '<div id="supp-section" class="admin-card" style="margin-top:20px">'
-      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div>'
-      + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.suppressedHint')) + '</div>'
-      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.suppressedCount', { n: totalBooks })) + '</div>'
-      + '<div id="supp-content">' + renderSuppressedContent(sdata) + '</div>'
-      + '</div>';
-  }
-
-  function wireActions() {
-    resultsEl.querySelectorAll('[data-dup-delete]').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        var id = btn.getAttribute('data-dup-delete');
-        var title = btn.getAttribute('data-title') || id;
-        dupAction('/api/admin/duplicates/delete', { bookId: id }, uiTp('admin.duplicates.deleteConfirm', { title: title }), true, btn);
-      });
-    });
-    resultsEl.querySelectorAll('[data-dup-auto-clean]').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        var n = Number(btn.getAttribute('data-n') || 0);
-        dupAction('/api/admin/duplicates/auto-clean', {}, uiTp('admin.duplicates.autoCleanConfirm', { n: n }), true, btn);
-      });
-    });
-    // Pagination
-    resultsEl.querySelectorAll('.page-link[data-page]').forEach(function(link) {
-      link.addEventListener('click', function(e) {
-        e.preventDefault();
-        currentPage = Number(link.getAttribute('data-page') || 1);
-        loadDuplicates(currentPage, true);
-      });
-    });
-  }
-
-  function wireSuppressedActions() {
-    const section = document.getElementById('supp-section');
-    if (!section) return;
-
-    section.querySelectorAll('[data-dup-unsuppress]').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        dupAction('/api/admin/duplicates/unsuppress', { bookId: btn.getAttribute('data-dup-unsuppress') }, null, false, btn);
-      });
-    });
-    section.querySelectorAll('[data-dup-unsuppress-all]').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        const n = Number(btn.getAttribute('data-n') || 0);
-        dupAction('/api/admin/duplicates/unsuppress-all', {}, uiTp('admin.duplicates.unsuppressAllConfirm', { n: n }), true, btn);
-      });
-    });
-    // Suppressed pagination
-    section.querySelectorAll('.page-link[data-page]').forEach(function(link) {
-      link.addEventListener('click', function(e) {
-        e.preventDefault();
-        suppPage = Number(link.getAttribute('data-page') || 1);
-        loadSuppressed();
-      });
-    });
-  }
-
-  var filterWrap = document.getElementById('dup-filter-wrap');
-  var suppWrap = document.getElementById('supp-wrap');
-
-  function wireSharedFilter() {
-    const filterForm = filterWrap.querySelector('#shared-filter-form');
-    const filterInput = filterWrap.querySelector('#shared-filter');
-    const filterReset = filterWrap.querySelector('#shared-filter-reset');
-    if (!filterForm || !filterInput) return;
-
-    const applyFilter = function() {
-      const query = String(filterInput.value || '').trim().toLowerCase();
-      if (sharedFilter === query) return;
-      sharedFilter = query;
-      currentPage = 1;
-      suppPage = 1;
-      loadDuplicates(currentPage, true);
-      loadSuppressed(true);
-    };
-
-    if (!filterForm.dataset.wired) {
-      filterForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        applyFilter();
-      });
-
-      let filterTimer = null;
-      filterInput.addEventListener('input', function() {
-        clearTimeout(filterTimer);
-        filterTimer = setTimeout(applyFilter, 250);
-      });
-
-      filterForm.dataset.wired = '1';
-    }
-
-    if (filterReset && !filterReset.dataset.wired) {
-      filterReset.addEventListener('click', function() {
-        filterInput.value = '';
-        if (sharedFilter === '') return;
-        sharedFilter = '';
-        currentPage = 1;
-        suppPage = 1;
-        loadDuplicates(currentPage, true);
-        loadSuppressed(true);
-      });
-      filterReset.dataset.wired = '1';
-    }
-  }
-
-  var resultsEl = document.getElementById('dup-results');
-
-  /* Кеш результатов в sessionStorage: при возврате на страницу пользователь
-     видит прошлый список МГНОВЕННО, а свежий запрос идёт фоном и заменяет
-     UI когда придёт. Кеш живёт пока открыта вкладка; на действиях
-     удаления/автоочистки чистится принудительно (см. dupAction → invalidateCache). */
-  var DUP_CACHE_KEY_PREFIX = 'inpx-dup-cache-v1:';
-  var DUP_CACHE_MAX_AGE_MS = 30 * 60 * 1000; // не показываем кеш старше 30 минут
-  function dupCacheKey(page, filter) { return DUP_CACHE_KEY_PREFIX + 'page-' + page + ':f-' + (filter || ''); }
-  function readDupCache(page, filter) {
-    try {
-      var raw = sessionStorage.getItem(dupCacheKey(page, filter));
-      if (!raw) return null;
-      var obj = JSON.parse(raw);
-      if (!obj || !obj.ts) return null;
-      if (Date.now() - obj.ts > DUP_CACHE_MAX_AGE_MS) return null;
-      return obj;
-    } catch (e) { return null; }
-  }
-  function writeDupCache(page, filter, data) {
-    try {
-      sessionStorage.setItem(dupCacheKey(page, filter), JSON.stringify({ ts: Date.now(), data: data }));
-      trimCache(DUP_CACHE_KEY_PREFIX, 20);
-    } catch (e) { /* квота переполнилась или storage недоступен — игнорируем */ }
-  }
-  function invalidateDupCache() {
-    try {
-      var keys = [];
-      for (var i = 0; i < sessionStorage.length; i++) {
-        var k = sessionStorage.key(i);
-        if (k && k.indexOf(DUP_CACHE_KEY_PREFIX) === 0) keys.push(k);
-      }
-      keys.forEach(function(k) { sessionStorage.removeItem(k); });
-    } catch (e) {}
-  }
-
-  var SUPP_CACHE_KEY_PREFIX = 'inpx-supp-cache-v1:';
-  var SUPP_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
-  function suppCacheKey(page, filter) { return SUPP_CACHE_KEY_PREFIX + 'page-' + page + ':f-' + (filter || ''); }
-  function readSuppCache(page, filter) {
-    try {
-      var raw = sessionStorage.getItem(suppCacheKey(page, filter));
-      if (!raw) return null;
-      var obj = JSON.parse(raw);
-      if (!obj || !obj.ts) return null;
-      if (Date.now() - obj.ts > SUPP_CACHE_MAX_AGE_MS) return null;
-      return obj;
-    } catch (e) { return null; }
-  }
-  function writeSuppCache(page, filter, data) {
-    try {
-      sessionStorage.setItem(suppCacheKey(page, filter), JSON.stringify({ ts: Date.now(), data: data }));
-      trimCache(SUPP_CACHE_KEY_PREFIX, 20);
-    } catch (e) {}
-  }
-  function invalidateSuppCache() {
-    try {
-      var keys = [];
-      for (var i = 0; i < sessionStorage.length; i++) {
-        var k = sessionStorage.key(i);
-        if (k && k.indexOf(SUPP_CACHE_KEY_PREFIX) === 0) keys.push(k);
-      }
-      keys.forEach(function(k) { sessionStorage.removeItem(k); });
-    } catch (e) {}
-  }
-
-  function trimCache(prefix, maxKeys) {
-    try {
-      var keys = [];
-      for (var i = 0; i < sessionStorage.length; i++) {
-        var k = sessionStorage.key(i);
-        if (k && k.indexOf(prefix) === 0) keys.push(k);
-      }
-      if (keys.length <= maxKeys) return;
-      keys.sort(function(a, b) {
-        var ta = JSON.parse(sessionStorage.getItem(a) || '{}').ts || 0;
-        var tb = JSON.parse(sessionStorage.getItem(b) || '{}').ts || 0;
-        return tb - ta; // старые в конце
-      });
-      for (var j = maxKeys; j < keys.length; j++) {
-        sessionStorage.removeItem(keys[j]);
-      }
-    } catch (e) {}
-  }
-
-  function renderDupResults(data, isStale) {
-    var staleBadge = isStale
-      ? '<div class="muted" style="font-size:.85em;margin:0 0 8px 0;display:flex;align-items:center;gap:8px"><span class="btn-spinner" style="width:12px;height:12px"></span>' + escapeHtml(uiT('admin.duplicates.refreshing')) + '</div>'
-      : '';
-    var html = staleBadge
-      + renderAutoCleanPanel(data.preview)
-      + '<div class="admin-card">'
-      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.cardTitle')) + '</div>'
-      + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.cardSubtitle')) + '</div>'
-      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.totalGroups', { n: data.total })) + '</div>'
-      + renderGroups(data.groups)
-      + renderPagination(data.total, data.pageSize, data.page)
-      + '</div>';
-    resultsEl.innerHTML = html;
-    wireActions();
-  }
-
-  var _dupAbort = null;
-
-  function showDupProgress() {
-    /* Поиск дубликатов — это один большой SQL GROUP BY, реального прогресса от сервера нет;
-       показываем неопределённую полоску прогресса (как для фаз индексации без измерения). */
-    resultsEl.innerHTML =
-      '<div class="admin-card" style="padding:24px;">'
-        + '<div style="font-size:1.05em;font-weight:500;margin-bottom:6px;">' + escapeHtml(uiT('admin.duplicates.searching')) + '</div>'
-        + '<div class="muted" style="font-size:.9em;margin-bottom:12px;">' + escapeHtml(uiT('admin.duplicates.searchingHint')) + '</div>'
-        + '<div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden">'
-        + '<div class="progress-indeterminate" style="height:100%;width:100%;background:var(--accent);"></div>'
-        + '</div>'
-      + '</div>';
-  }
-
-  function showSuppProgress() {
-    if (!suppWrap) return;
-    suppWrap.innerHTML =
-      '<div class="admin-card" style="margin-top:20px;padding:20px;">'
-        + '<div class="muted" style="font-size:.9em;display:flex;align-items:center;gap:8px">'
-        + '<span class="btn-spinner" style="width:12px;height:12px"></span>'
-        + escapeHtml(uiT('app.loading') || 'Загрузка…') + '</div>'
-      + '</div>';
-  }
-
-  function loadDuplicates(page, skipProgress) {
-    if (_dupAbort) { _dupAbort.abort(); _dupAbort = null; }
-
-    /* Шаг 1: если есть кеш — рендерим прошлый результат МГНОВЕННО.
-       Иначе показываем полоску прогресса (только при первой загрузке). */
-    var cached = readDupCache(page, sharedFilter);
-    var shownFromCache = false;
-    if (cached && cached.data && cached.data.ok) {
-      renderDupResults(cached.data, !skipProgress);
-      shownFromCache = true;
-    } else if (!skipProgress) {
-      showDupProgress();
-    } else {
-      resultsEl.innerHTML = ''; // при смене фильтра без кеша не показываем старые данные
-    }
-
-    /* Шаг 2: тянем свежие данные фоном, отменяем устаревший запрос. */
-    var requestFilter = sharedFilter;
-    var requestPage = page;
-    _dupAbort = new AbortController();
-    fetch('/api/admin/duplicates?page=' + page + (sharedFilter ? '&filter=' + encodeURIComponent(sharedFilter) : ''), { signal: _dupAbort.signal })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (requestFilter !== sharedFilter || requestPage !== currentPage) return; // устаревший ответ
-        if (!data || !data.ok) {
-          if (!shownFromCache) {
-            resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error loading duplicates</p></div>';
-          }
-          return;
-        }
-        renderDupResults(data, false);
-        writeDupCache(page, sharedFilter, data);
-      })
-      .catch(function(err) {
-        if (err && err.name === 'AbortError') return;
-        if (requestFilter !== sharedFilter || requestPage !== currentPage) return;
-        if (!shownFromCache) {
-          resultsEl.innerHTML = '<div class="admin-card"><p class="muted">Error: ' + escapeHtml(String(err)) + '</p></div>';
-        }
-        /* Если кеш уже отрисован — оставляем его, не ломаем UI ошибкой. */
-      })
-      .finally(function() {
-        if (_dupAbort && _dupAbort.signal.aborted === false) _dupAbort = null;
-      });
-  }
-
-  function renderSuppSection(sdata) {
-    if (!suppWrap) return;
-    suppWrap.innerHTML = renderSuppressedSection(sdata || { total: 0, rows: [] });
-    wireSuppressedActions();
-  }
-
-  var _suppAbort = null;
-
-  function loadSuppressed(skipProgress) {
-    if (_suppAbort) { _suppAbort.abort(); _suppAbort = null; }
-
-    var cached = readSuppCache(suppPage, sharedFilter);
-    var shownFromCache = false;
-    if (cached && cached.data && cached.data.ok) {
-      lastSuppData = cached.data;
-      renderSuppSection(lastSuppData);
-      shownFromCache = true;
-    } else if (!skipProgress) {
-      showSuppProgress();
-    } else {
-      if (suppWrap) suppWrap.innerHTML = ''; // при смене фильтра без кеша не показываем старые данные
-    }
-
-    var requestFilter = sharedFilter;
-    var requestPage = suppPage;
-    _suppAbort = new AbortController();
-    const url = '/api/admin/suppressed?page=' + suppPage + (sharedFilter ? '&filter=' + encodeURIComponent(sharedFilter) : '');
-    fetch(url, { signal: _suppAbort.signal })
-      .then(function(r) { return r.json(); })
-      .then(function(sdata) {
-        if (requestFilter !== sharedFilter || requestPage !== suppPage) return; // устаревший ответ
-        if (!sdata || !sdata.ok) return;
-        lastSuppData = sdata;
-        renderSuppSection(lastSuppData);
-        writeSuppCache(suppPage, sharedFilter, lastSuppData);
-      })
-      .catch(function(err) {
-        if (err && err.name === 'AbortError') return;
-        console.error('loadSuppressed error', err);
-      })
-      .finally(function() {
-        if (_suppAbort && _suppAbort.signal.aborted === false) _suppAbort = null;
-      });
-  }
-
-  /* Рендерим фильтр один раз в статичный контейнер. */
-  if (filterWrap) {
-    filterWrap.innerHTML = renderSharedFilter(sharedFilter);
-    wireSharedFilter();
-  }
-
-  /* Автоматический запуск при заходе: либо мгновенный рендер из кеша,
-     либо полоска прогресса + фоновый запрос. */
-  loadDuplicates(currentPage);
-  loadSuppressed();
-})();
-
 /* ── Форма расписания сканирования: переключение видимости полей по выбранному режиму
    и периодический поллинг /api/admin/scan-schedule, чтобы чип «Следующий запуск»
    и история запусков были живыми без перезагрузки страницы. ── */
@@ -5666,6 +5140,352 @@ function attachDirtyFormTracking() {
   /* Первый отложенный refresh — чтобы подтянуть свежее значение nextRunAt
      после перезагрузки страницы (а вдруг таймер сработал между рендером и DOM). */
   setTimeout(refresh, 1500);
+})();
+
+/* ── Страница дубликатов в админке ──────────────────────────────────────────
+   Точки монтирования задаёт renderAdminDuplicates (src/templates/admin.js):
+     #dup-filter-wrap — поле поиска,
+     #dup-results     — панель автоочистки + группы дубликатов + пагинация,
+     #supp-wrap       — список подавленных книг.
+   Данные тянутся из /api/admin/duplicates и /api/admin/suppressed. ── */
+(function initDuplicatesPage() {
+  const container = document.querySelector('[data-duplicates-page]');
+  if (!container) return;
+  const resultsWrap = container.querySelector('#dup-results');
+  const suppWrap = container.querySelector('#supp-wrap');
+  const filterWrap = container.querySelector('#dup-filter-wrap');
+  if (!resultsWrap || !suppWrap || !filterWrap) return;
+
+  let currentPage = Math.max(1, parseInt(container.getAttribute('data-page'), 10) || 1);
+  let currentFilter = '';
+  let dupBusy = false;
+  let suppPage = 1;
+  let dupReqToken = 0;     // последовательность запросов дубликатов: игнорируем устаревшие ответы
+  let suppReqToken = 0;    // то же для подавленных книг
+  let filterTimer = 0;     // debounce живого поиска
+  let firstLoadDup = true; // первая загрузка рисует крупный индикатор, далее — мягкий
+  let firstLoadSupp = true;
+
+  function fmtSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  /* POST JSON на API, показываем спиннер на нажатой кнопке, перезагружаем данные при успехе. */
+  async function dupAction(url, body, confirmMsg, danger, triggerBtn) {
+    if (dupBusy) return;
+    if (confirmMsg && !(await confirmAction(confirmMsg, { danger }))) return;
+    dupBusy = true;
+    let prevHtml = '';
+    if (triggerBtn) {
+      prevHtml = triggerBtn.innerHTML;
+      triggerBtn.disabled = true;
+      triggerBtn.innerHTML = '<span class="btn-spinner"></span>' + escapeHtml(uiT('app.running') || '…');
+    }
+    try {
+      const csrf = getCsrfTokenFromPage();
+      const headers = { 'Content-Type': 'application/json' };
+      if (csrf) headers['X-CSRF-Token'] = csrf;
+      const resp = await fetch(url, { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(body || {}) });
+      const data = await resp.json().catch(() => ({}));
+      if (data.message) showToast(data.message, data.ok ? 'success' : 'error');
+      else if (!data.ok) showToast(data.error || 'Error', 'error');
+    } catch (err) {
+      showToast(err.message || 'Error', 'error');
+    } finally {
+      dupBusy = false;
+      if (triggerBtn) {
+        triggerBtn.disabled = false;
+        triggerBtn.innerHTML = prevHtml;
+      }
+    }
+    loadDuplicates(currentPage);
+    loadSuppressed(suppPage);
+  }
+
+  function renderAutoCleanPanel(preview) {
+    if (!preview || preview.willDelete <= 0) return '';
+    return '<div class="admin-card admin-dup-auto-clean" style="margin-bottom:20px;border-left:4px solid var(--accent-color)">'
+      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.autoCleanTitle')) + '</div>'
+      + '<p style="margin:8px 0">' + escapeHtml(uiTp('admin.duplicates.autoCleanDesc', { groups: preview.totalGroups, total: preview.totalBooks, delete: preview.willDelete })) + '</p>'
+      + '<p class="muted" style="font-size:.85em;margin:4px 0">' + escapeHtml(uiT('admin.duplicates.autoCleanStrategy')) + '</p>'
+      + '<div style="margin-top:12px">'
+      + '<button type="button" class="button-danger" data-dup-auto-clean data-n="' + preview.willDelete + '">'
+      + escapeHtml(uiTp('admin.duplicates.autoCleanBtn', { n: preview.willDelete }))
+      + '</button></div></div>';
+  }
+
+  /* Двухуровневая группировка: автор (заголовок <details>) → наборы дубликатов
+     по названию книги (внутри). Сервер уже отдаёт строки, отсортированные по
+     authors → title_sort, поэтому подгруппы формируются простым проходом. */
+  function renderGroups(groups) {
+    if (!groups || !groups.length) {
+      return '<p class="muted" style="margin:24px 0">' + escapeHtml(uiT('admin.duplicates.empty')) + '</p>';
+    }
+    const thFormat = escapeHtml(uiT('admin.duplicates.thFormat'));
+    const thSize = escapeHtml(uiT('admin.duplicates.thSize'));
+    const thLang = escapeHtml(uiT('admin.duplicates.thLang'));
+    const thFile = escapeHtml(uiT('admin.duplicates.thFile'));
+    return groups.map(function(group, gi) {
+      const sets = [];
+      let cur = null;
+      group.items.forEach(function(book) {
+        const key = book.title_sort || book.title || '';
+        if (!cur || cur.key !== key) {
+          cur = { key: key, title: book.title || book.title_sort || '', items: [] };
+          sets.push(cur);
+        }
+        cur.items.push(book);
+      });
+      const totalCopies = group.items.length;
+      const setsHtml = sets.map(function(set) {
+        const rows = set.items.map(function(book) {
+          return '<tr>'
+            + '<td data-label="' + thFormat + '"><a href="/book/' + encodeURIComponent(book.id) + '" class="admin-chip admin-compact-btn">' + escapeHtml((book.ext || '').toUpperCase()) + '</a></td>'
+            + '<td data-label="' + thSize + '" style="white-space:nowrap">' + escapeHtml(fmtSize(book.size)) + '</td>'
+            + '<td data-label="' + thLang + '">' + escapeHtml(book.lang || '') + '</td>'
+            + '<td data-label="' + thFile + '" class="muted" style="font-size:.85em;word-break:break-all">' + escapeHtml(book.archive_name || book.file_name || '') + '</td>'
+            + '<td data-label=""><button type="button" class="button-danger admin-compact-btn" data-dup-delete="' + escapeHtml(book.id) + '" data-title="' + escapeHtml(book.title) + '">' + escapeHtml(uiT('admin.duplicates.delete')) + '</button></td></tr>';
+        }).join('');
+        return '<div class="admin-dup-set">'
+          + '<div class="admin-dup-set-title"><span>' + escapeHtml(set.title) + '</span>'
+          + '<span class="admin-chip" style="font-size:.78em">' + set.items.length + ' ' + escapeHtml(uiPlural('copy', set.items.length)) + '</span></div>'
+          + '<table class="admin-table admin-dup-table" style="width:100%;margin:6px 0 0"><thead><tr>'
+          + '<th>' + thFormat + '</th>'
+          + '<th>' + thSize + '</th>'
+          + '<th>' + thLang + '</th>'
+          + '<th>' + thFile + '</th>'
+          + '<th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      }).join('');
+      return '<details class="admin-dup-group">'
+        + '<summary class="admin-dup-group-summary">'
+        + '<strong class="admin-dup-group-title">' + escapeHtml(group.authors || uiT('book.authorUnknown')) + '</strong>'
+        + '<span class="admin-chip admin-dup-group-count">' + totalCopies + ' ' + escapeHtml(uiPlural('copy', totalCopies)) + '</span>'
+        + '</summary>'
+        + '<div class="admin-dup-table-wrap">' + setsHtml + '</div></details>';
+    }).join('');
+  }
+
+  function pageBtn(i, page, attr) {
+    if (i === page) return '<span class="page-link page-link-active" aria-current="page">' + i + '</span> ';
+    return '<button type="button" class="page-link" ' + attr + '="' + i + '">' + i + '</button> ';
+  }
+
+  /* Оконная пагинация: prev/next + первая/последняя страница и окно вокруг текущей,
+     чтобы список кнопок оставался коротким даже на тысячах групп. attr задаёт
+     data-атрибут кнопок (data-dup-page для дубликатов, data-supp-page для подавленных). */
+  function renderPagination(total, pageSize, page, attr) {
+    attr = attr || 'data-dup-page';
+    const totalPages = Math.ceil(total / pageSize) || 1;
+    if (totalPages <= 1) return '';
+    let html = '<div class="pagination" style="margin-top:16px">';
+    if (page > 1) html += '<button type="button" class="page-link page-link-prev" ' + attr + '="' + (page - 1) + '" aria-label="prev">\u2039</button> ';
+    const win = 2;
+    const from = Math.max(1, page - win);
+    const to = Math.min(totalPages, page + win);
+    if (from > 1) {
+      html += pageBtn(1, page, attr);
+      if (from > 2) html += '<span class="muted" style="padding:0 4px">\u2026</span> ';
+    }
+    for (let i = from; i <= to; i++) html += pageBtn(i, page, attr);
+    if (to < totalPages) {
+      if (to < totalPages - 1) html += '<span class="muted" style="padding:0 4px">\u2026</span> ';
+      html += pageBtn(totalPages, page, attr);
+    }
+    if (page < totalPages) html += '<button type="button" class="page-link page-link-next" ' + attr + '="' + (page + 1) + '" aria-label="next">\u203a</button> ';
+    html += '</div>';
+    return html;
+  }
+
+  function reasonLabel(reason) {
+    if (reason === 'auto_clean') return uiT('admin.duplicates.reasonAutoClean');
+    return uiT('admin.duplicates.reasonUser');
+  }
+
+  /* Секция подавленных книг: тоже группируется по авторам (раскрывающиеся блоки)
+     и пагинируется независимо от дубликатов (data-supp-page). Фильтр общий. */
+  function renderSuppressedSection(sdata) {
+    const totalBooks = Number(sdata && sdata.totalBooks) || 0;
+    if (!totalBooks) {
+      return '<div class="admin-card" style="margin-top:20px"><div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div><p class="muted">' + escapeHtml(uiT('admin.duplicates.suppressedEmpty')) + '</p></div>';
+    }
+    const thTitle = escapeHtml(uiT('admin.duplicates.thTitle'));
+    const groups = [];
+    let cur = null;
+    (sdata.rows || []).forEach(function(s) {
+      const a = s.authors || '';
+      if (!cur || cur.key !== a) { cur = { key: a, author: a, items: [] }; groups.push(cur); }
+      cur.items.push(s);
+    });
+    const groupsHtml = groups.map(function(group, gi) {
+      const rows = group.items.map(function(s) {
+        return '<tr>'
+          + '<td data-label="' + thTitle + '">' + escapeHtml(s.title || s.book_id) + '</td>'
+          + '<td data-label=""><span class="admin-chip" style="font-size:.8em">' + escapeHtml(reasonLabel(s.reason)) + '</span></td>'
+          + '<td data-label="" style="text-align:right;white-space:nowrap"><button type="button" class="button admin-compact-btn" data-dup-unsuppress="' + escapeHtml(s.book_id) + '">' + escapeHtml(uiT('admin.duplicates.unsuppress')) + '</button></td></tr>';
+      }).join('');
+      return '<details class="admin-dup-group">'
+        + '<summary class="admin-dup-group-summary">'
+        + '<strong class="admin-dup-group-title">' + escapeHtml(group.author || uiT('book.authorUnknown')) + '</strong>'
+        + '<span class="admin-chip admin-dup-group-count">' + group.items.length + ' ' + escapeHtml(uiPlural('copy', group.items.length)) + '</span>'
+        + '</summary>'
+        + '<div class="admin-dup-table-wrap"><table class="admin-table admin-dup-table" style="width:100%;margin:6px 0 0"><tbody>' + rows + '</tbody></table></div></details>';
+    }).join('');
+    const unsuppressAllBtn = totalBooks > 1
+      ? '<button type="button" class="button-danger" data-dup-unsuppress-all data-n="' + totalBooks + '" style="font-size:.9em;padding:5px 16px;margin-top:12px">' + escapeHtml(uiT('admin.duplicates.unsuppressAll')) + '</button>'
+      : '';
+    return '<div class="admin-card" style="margin-top:20px">'
+      + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.suppressedTitle')) + '</div>'
+      + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.suppressedHint')) + '</div>'
+      + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.suppressedCount', { n: totalBooks })) + '</div>'
+      + groupsHtml
+      + renderPagination(Number(sdata.total) || 0, Number(sdata.pageSize) || 50, Number(sdata.page) || suppPage, 'data-supp-page')
+      + unsuppressAllBtn
+      + '</div>';
+  }
+
+  function wireDupActions() {
+    resultsWrap.querySelectorAll('[data-dup-delete]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const id = btn.getAttribute('data-dup-delete');
+        const title = btn.getAttribute('data-title') || id;
+        dupAction('/api/admin/duplicates/delete', { bookId: id }, uiTp('admin.duplicates.deleteConfirm', { title: title }), true, btn);
+      });
+    });
+    resultsWrap.querySelectorAll('[data-dup-auto-clean]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const n = Number(btn.getAttribute('data-n') || 0);
+        dupAction('/api/admin/duplicates/auto-clean', {}, uiTp('admin.duplicates.autoCleanConfirm', { n: n }), true, btn);
+      });
+    });
+    resultsWrap.querySelectorAll('[data-dup-page]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const p = Math.max(1, parseInt(btn.getAttribute('data-dup-page'), 10) || 1);
+        loadDuplicates(p);
+        resultsWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  }
+
+  function wireSuppActions() {
+    suppWrap.querySelectorAll('[data-dup-unsuppress]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        dupAction('/api/admin/duplicates/unsuppress', { bookId: btn.getAttribute('data-dup-unsuppress') }, null, false, btn);
+      });
+    });
+    suppWrap.querySelectorAll('[data-dup-unsuppress-all]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const n = Number(btn.getAttribute('data-n') || 0);
+        dupAction('/api/admin/duplicates/unsuppress-all', {}, uiTp('admin.duplicates.unsuppressAllConfirm', { n: n }), true, btn);
+      });
+    });
+    suppWrap.querySelectorAll('[data-supp-page]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const p = Math.max(1, parseInt(btn.getAttribute('data-supp-page'), 10) || 1);
+        loadSuppressed(p);
+        suppWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  }
+
+  /* Живой поиск: фильтрация по мере ввода с debounce, без перезагрузки страницы.
+     Поле ввода рендерится один раз и не пересоздаётся при обновлении данных,
+     чтобы не терять фокус и позицию курсора. */
+  function renderFilterBox() {
+    filterWrap.innerHTML = '<div class="admin-card" style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<input type="search" data-dup-filter-input placeholder="' + escapeHtml(uiT('admin.duplicates.filterPlaceholder')) + '" value="' + escapeHtml(currentFilter) + '" style="flex:1;min-width:200px">'
+      + '<span data-dup-filter-spinner class="btn-spinner" style="display:none"></span>'
+      + '</div>';
+    const input = filterWrap.querySelector('[data-dup-filter-input]');
+    input.addEventListener('input', function() {
+      const val = String(input.value || '').trim();
+      if (filterTimer) clearTimeout(filterTimer);
+      const delay = val.length === 0 ? 0 : 300;
+      filterTimer = setTimeout(function() {
+        filterTimer = 0;
+        if (val === currentFilter) return;
+        currentFilter = val;
+        loadDuplicates(1);
+        loadSuppressed(1);
+      }, delay);
+    });
+  }
+
+  function dim(el, on) {
+    el.style.opacity = on ? '0.55' : '';
+    el.style.pointerEvents = on ? 'none' : '';
+  }
+  function spinner(on) {
+    const sp = filterWrap.querySelector('[data-dup-filter-spinner]');
+    if (sp) sp.style.display = on ? 'inline-block' : 'none';
+  }
+
+  function loadDuplicates(page) {
+    currentPage = Math.max(1, page || 1);
+    container.setAttribute('data-page', String(currentPage));
+    const token = ++dupReqToken;
+    if (firstLoadDup) {
+      resultsWrap.innerHTML = '<div class="admin-card"><div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.searching'))
+        + '</div><p class="muted">' + escapeHtml(uiT('admin.duplicates.searchingHint')) + '</p></div>';
+    } else {
+      spinner(true); dim(resultsWrap, true);
+    }
+    const q = 'page=' + currentPage + (currentFilter ? '&filter=' + encodeURIComponent(currentFilter) : '');
+    fetch('/api/admin/duplicates?' + q, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (token !== dupReqToken) return; // устаревший ответ — игнорируем
+        firstLoadDup = false;
+        spinner(false); dim(resultsWrap, false);
+        if (!data || !data.ok) {
+          resultsWrap.innerHTML = '<div class="admin-card"><p class="muted">' + escapeHtml((data && data.error) || 'Error loading duplicates') + '</p></div>';
+          return;
+        }
+        resultsWrap.innerHTML = renderAutoCleanPanel(data.preview)
+          + '<div class="admin-card">'
+          + '<div class="admin-card-title">' + escapeHtml(uiT('admin.duplicates.cardTitle')) + '</div>'
+          + '<div class="admin-card-subtitle">' + escapeHtml(uiT('admin.duplicates.cardSubtitle')) + '</div>'
+          + '<div class="list-context-hint" style="margin:12px 0">' + escapeHtml(uiTp('admin.duplicates.totalGroups', { n: data.total })) + '</div>'
+          + renderGroups(data.groups)
+          + renderPagination(data.total, data.pageSize, data.page, 'data-dup-page')
+          + '</div>';
+        wireDupActions();
+      })
+      .catch(function(err) {
+        if (token !== dupReqToken) return;
+        firstLoadDup = false;
+        spinner(false); dim(resultsWrap, false);
+        resultsWrap.innerHTML = '<div class="admin-card"><p class="muted">Error: ' + escapeHtml(String(err)) + '</p></div>';
+      });
+  }
+
+  function loadSuppressed(page) {
+    suppPage = Math.max(1, page || 1);
+    const token = ++suppReqToken;
+    if (!firstLoadSupp) dim(suppWrap, true);
+    const q = 'page=' + suppPage + (currentFilter ? '&filter=' + encodeURIComponent(currentFilter) : '');
+    fetch('/api/admin/suppressed?' + q, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(sdata) {
+        if (token !== suppReqToken) return;
+        firstLoadSupp = false;
+        dim(suppWrap, false);
+        suppWrap.innerHTML = renderSuppressedSection(sdata && sdata.ok ? sdata : { totalBooks: 0, rows: [] });
+        wireSuppActions();
+      })
+      .catch(function() {
+        if (token !== suppReqToken) return;
+        firstLoadSupp = false;
+        dim(suppWrap, false);
+        suppWrap.innerHTML = '';
+      });
+  }
+
+  renderFilterBox();
+  loadDuplicates(currentPage);
+  loadSuppressed(suppPage);
 })();
 
 // PWA: Service Worker registered by pageShell with versioned URL

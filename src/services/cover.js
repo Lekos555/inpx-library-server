@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import sharp from 'sharp';
 import { config } from '../config.js';
 import { getSetting } from '../db.js';
+import { getSharp } from './sharp-loader.js';
 
 // --- Sharp concurrency limiter ---
 
@@ -87,6 +87,14 @@ export async function normalizeBookImageForClient(img) {
   const sourceType = detectImageMimeFromBuffer(img?.data) || String(img?.contentType || '').toLowerCase();
   if (ALLOWED_BOOK_IMAGE_TYPES.has(sourceType)) {
     return { contentType: sourceType, data: img.data };
+  }
+  const sharp = await getSharp();
+  if (!sharp) {
+    /* Обработка отключена (нет sharp/libvips) — отдаём как есть, если это изображение */
+    if (sourceType && sourceType.startsWith('image/')) {
+      return { contentType: sourceType, data: img.data };
+    }
+    return null;
   }
   await acquireSharpSlot();
   try {

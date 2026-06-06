@@ -123,6 +123,9 @@ export const config = {
   /** Если true, `/health` не отдаёт порт и лишние поля (для публичного мониторинга за прокси). */
   healthMinimal: parseBoolean(process.env.HEALTH_MINIMAL, false),
 
+  /** Включена ли обработка обложек через sharp/libvips (ресайз/конвертация в webp). */
+  coverProcessingEnabled: resolveCoverProcessing(),
+
   // ── Cover thumbnails ─────────────────────────────
   coverMaxWidth: parseEnvInt('COVER_MAX_WIDTH', process.env.COVER_MAX_WIDTH, 220, { min: 32, max: 1200 }),
   coverMaxHeight: parseEnvInt('COVER_MAX_HEIGHT', process.env.COVER_MAX_HEIGHT, 320, { min: 32, max: 1600 }),
@@ -160,4 +163,31 @@ function resolvePerfProfile() {
   console.log(`[perf] profile: ${profileLabel} (RAM: ${totalMemMb} MB, cache: ${sqliteCacheSizeMb} MB, mmap: ${sqliteMmapSizeMb} MB)`);
 
   return { perfProfile: profileLabel, sqliteCacheSizeMb, sqliteMmapSizeMb, totalMemMb };
+}
+
+/**
+ * Определяет, можно ли использовать sharp/libvips для обработки обложек.
+ * Нативный libvips собран с baseline SSE4.2; на старых x86 CPU без этих
+ * инструкций (например Intel Atom Cedarview D2xxx) он падает с SIGILL прямо
+ * при первом вызове, роняя весь процесс. Авто-détection отключает обработку,
+ * чтобы сервер стабильно стартовал. Override: COVER_PROCESSING=1/0.
+ */
+function resolveCoverProcessing() {
+  const raw = process.env.COVER_PROCESSING;
+  if (raw !== undefined && String(raw).trim() !== '') {
+    return parseBoolean(raw, true);
+  }
+  if (process.platform === 'linux' && (process.arch === 'x64' || process.arch === 'ia32')) {
+    try {
+      const cpuinfo = fs.readFileSync('/proc/cpuinfo', 'utf8');
+      const flagsLine = cpuinfo.split('\n').find((l) => l.startsWith('flags'));
+      if (flagsLine && !/\bsse4_2\b/.test(flagsLine)) {
+        console.warn('[perf] CPU без SSE4.2 — обработка обложек (sharp/libvips) отключена во избежание SIGILL. Override: COVER_PROCESSING=1');
+        return false;
+      }
+    } catch {
+      /* /proc/cpuinfo недоступен — считаем, что инструкции поддерживаются */
+    }
+  }
+  return true;
 }

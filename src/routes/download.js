@@ -145,6 +145,7 @@ async function streamBatchZipArchive(req, res, next, { bookIds, archiveName, for
     res.type('application/zip');
 
     const archive = archiver('zip', { store: true, forceZip64: false, forceLocalTime: true });
+    let archiveFinalized = false;
     archive.on('error', () => {
       archive.destroy();  // Explicitly destroy to prevent stream leak
       batchDownloadLocks.delete(lockKey);
@@ -153,7 +154,7 @@ async function streamBatchZipArchive(req, res, next, { bookIds, archiveName, for
       }
     });
     res.on('close', () => {
-      if (!archive.finalized) {
+      if (!archiveFinalized) {
         archive.destroy();
       }
       batchDownloadLocks.delete(lockKey);
@@ -255,6 +256,7 @@ async function streamBatchZipArchive(req, res, next, { bookIds, archiveName, for
     }
 
     await archive.finalize();
+    archiveFinalized = true;
     const elapsedMs = Date.now() - startedAt;
     if (String(process.env.DEBUG_BATCH || '') === '1') {
       logSystemEvent('info', 'operations', 'batch download timing', {

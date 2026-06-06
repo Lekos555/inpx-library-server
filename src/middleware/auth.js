@@ -7,7 +7,7 @@ import { verifyPassword } from '../auth.js';
 import { parseSession, csrfTokenForSession, verifyCsrfToken } from '../services/session.js';
 import { trackUser } from '../services/online-tracker.js';
 import { logSystemEvent } from '../services/system-events.js';
-import { CSRF_EXEMPT_PATHS, DUMMY_PASSWORD_HASH } from '../constants.js';
+import { CSRF_EXEMPT_PATHS, DUMMY_PASSWORD_HASH, SESSION_USER_CACHE_TTL_MS, SESSION_USER_CACHE_MAX } from '../constants.js';
 import { t } from '../i18n.js';
 import { ApiErrorCode } from '../api-errors.js';
 
@@ -77,7 +77,6 @@ function sendOpdsAuthChallenge(res) {
   return res.status(401).send(t('api.auth.unauthorized'));
 }
 
-const SESSION_USER_CACHE_TTL_MS = 20_000;
 const sessionUserCache = new Map();
 
 function getCachedUser(username) {
@@ -99,9 +98,12 @@ function setCachedUser(username, user) {
     user,
     expiresAt: Date.now() + SESSION_USER_CACHE_TTL_MS
   });
-  if (sessionUserCache.size > 2000) {
-    const oldest = sessionUserCache.keys().next().value;
-    if (oldest !== undefined) sessionUserCache.delete(oldest);
+  if (sessionUserCache.size > SESSION_USER_CACHE_MAX) {
+    let evicted = 0;
+    for (const k of sessionUserCache.keys()) {
+      sessionUserCache.delete(k);
+      if (++evicted >= 100) break;
+    }
   }
 }
 

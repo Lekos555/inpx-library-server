@@ -9,6 +9,7 @@ import {
 } from '../db.js';
 import {
   getBookById, getBooksByIds, getReadingHistory, getBookmarks, getFavoriteAuthors, getFavoriteSeries,
+  getFavoriteAuthorsLight, getFavoriteSeriesLight,
   isBookmarked, toggleBookmark, addBookmarksIfMissing,
   toggleFavoriteAuthor, toggleFavoriteSeries, getAllBookIdsByFacet,
   toggleReadBook, addReadBooksIfMissing, isSeriesFullyRead, removeReadBooksForSeries

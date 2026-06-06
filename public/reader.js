@@ -1,4 +1,5 @@
 import '/foliate/view.js';
+import { Overlayer } from '/foliate/overlayer.js';
 import {
   FootnoteHandler,
   footnoteTargetFragmentFromHref,
@@ -157,6 +158,11 @@ import {
   let ttsMediaSessionHandlers = false;
   let tocData = [];
   let bookmarksData = [];
+  let annotationsData = [];
+  let searchSeq = 0;
+  let searchDebounce = null;
+  const docIndexMap = new WeakMap();
+  let activeSel = null;
   let chromeVisible = false;
   let chromeTimer = null;
   let activePanelTab = 'toc';
@@ -716,6 +722,307 @@ import {
     $('bm-add-btn')?.addEventListener('click', addBookmark);
   }
 
+  /* ===== Book search (full-text) ===== */
+  function runBookSearch(query) {
+    const c = $('search-content');
+    if (!c) return;
+    const q = String(query || '').trim();
+    if (!view?.book) return;
+    if (q.length < 2) {
+      try { view.clearSearch?.(); } catch { /* */ }
+      c.innerHTML = '<div class="bm-empty">' + esc(q ? rt('readerJs.searchMinChars') : rt('readerJs.searchHint')) + '</div>';
+      return;
+    }
+    const seq = ++searchSeq;
+    c.innerHTML = '<div class="bm-empty">' + esc(rt('readerJs.searching')) + '</div>';
+    (async () => {
+      const groups = [];
+      let total = 0;
+      try {
+        for await (const r of view.search({ query: q })) {
+          if (seq !== searchSeq) return;
+          if (r === 'done') break;
+          if (r && r.subitems) {
+            groups.push(r);
+            total += r.subitems.length;
+            renderSearchResults(c, groups, total, seq, false);
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      if (seq !== searchSeq) return;
+      renderSearchResults(c, groups, total, seq, true);
+    })();
+  }
+
+  function renderExcerpt(ex) {
+    if (!ex) return '';
+    if (typeof ex === 'string') return esc(ex);
+    return '<span class="search-ctx">' + esc(ex.pre || '') + '</span>' +
+      '<mark>' + esc(ex.match || '') + '</mark>' +
+      '<span class="search-ctx">' + esc(ex.post || '') + '</span>';
+  }
+
+  function renderSearchResults(c, groups, total, seq, done) {
+    if (seq !== searchSeq || !c) return;
+    if (!total) {
+      c.innerHTML = '<div class="bm-empty">' + esc(done ? rt('readerJs.searchNoResults') : rt('readerJs.searching')) + '</div>';
+      return;
+    }
+    let h = '<div class="bm-section-title">' + esc(rtp('readerJs.searchResults', { n: total, word: rPlural('result', total) })) + '</div>';
+    groups.forEach(g => {
+      if (g.label) h += '<div class="search-group">' + esc(g.label) + '</div>';
+      (g.subitems || []).forEach(it => {
+        h += '<button class="search-item" type="button" data-search-cfi="' + esc(it.cfi) + '">' + renderExcerpt(it.excerpt) + '</button>';
+      });
+    });
+    c.innerHTML = h;
+    c.querySelectorAll('[data-search-cfi]').forEach(el => el.addEventListener('click', () => {
+      const cfi = el.dataset.searchCfi;
+      if (view && cfi) view.goTo(cfi).catch(console.error);
+      closePanel();
+    }));
+  }
+
+  /* ===== Annotations (highlights & notes) ===== */
+  const HL_FILL = {
+    yellow: 'rgba(255,214,10,.45)',
+    green: 'rgba(52,211,153,.45)',
+    blue: 'rgba(96,165,250,.45)',
+    pink: 'rgba(244,114,182,.5)'
+  };
+  function hlFill(color) { return HL_FILL[color] || HL_FILL.yellow; }
+  let pendingNote = null;
+
+  async function loadAnnotations() {
+    try { const d = await api('GET', '/annotations'); annotationsData = Array.isArray(d) ? d : []; } catch { annotationsData = []; }
+  }
+
+  function drawAnnotation(a) {
+    if (!view || !a?.cfi) return;
+    try { view.addAnnotation({ value: a.cfi, color: a.color }); } catch { /* */ }
+  }
+  function applyAllAnnotations() { annotationsData.forEach(drawAnnotation); }
+
+  function hideSelMenu() {
+    const m = $('reader-sel-menu');
+    if (m) { m.classList.remove('is-open'); m.setAttribute('aria-hidden', 'true'); }
+  }
+  function rectToPage(rect, doc) {
+    const win = doc?.defaultView;
+    const iframe = win?.frameElement;
+    if (!iframe || !rect) return { left: rect?.left || 0, top: rect?.top || 0, right: rect?.right || 0, bottom: rect?.bottom || 0, cx: (rect?.left || 0) + (rect?.width || 0) / 2 };
+    const fr = iframe.getBoundingClientRect();
+    return {
+      left: fr.left + rect.left, top: fr.top + rect.top,
+      right: fr.left + rect.right, bottom: fr.top + rect.bottom,
+      cx: fr.left + rect.left + rect.width / 2
+    };
+  }
+  function showSelMenuAt(pageRect, isExisting) {
+    const m = $('reader-sel-menu');
+    if (!m) return;
+    const rem = m.querySelector('#rsm-remove');
+    if (rem) rem.hidden = !isExisting;
+    m.classList.add('is-open');
+    m.setAttribute('aria-hidden', 'false');
+    const mw = m.offsetWidth || 240;
+    const mh = m.offsetHeight || 44;
+    let left = pageRect.cx - mw / 2;
+    left = Math.max(8, Math.min(innerWidth - mw - 8, left));
+    let top = pageRect.top - mh - 10;
+    if (top < 8) top = Math.min(innerHeight - mh - 8, pageRect.bottom + 10);
+    m.style.left = left + 'px';
+    m.style.top = top + 'px';
+  }
+  function maybeShowSelMenu(doc) {
+    if (panelOverlay.classList.contains('is-open') || isFootnoteOverlayOpen()) { hideSelMenu(); return; }
+    const sel = doc.getSelection?.();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) {
+      if (!activeSel?.existing) { hideSelMenu(); activeSel = null; }
+      return;
+    }
+    const text = sel.toString().replace(/\s+/g, ' ').trim();
+    if (!text) { hideSelMenu(); return; }
+    const range = sel.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) { hideSelMenu(); return; }
+    const index = docIndexMap.get(doc);
+    if (index == null) { hideSelMenu(); return; }
+    activeSel = { doc, index, range: range.cloneRange(), text, existing: null };
+    showSelMenuAt(rectToPage(rect, doc), false);
+  }
+  function openSelMenuForExisting(a, range) {
+    if (panelOverlay.classList.contains('is-open')) return;
+    const doc = range?.startContainer?.ownerDocument || range?.commonAncestorContainer?.ownerDocument;
+    activeSel = { doc, index: doc ? docIndexMap.get(doc) : null, range, text: a.text, existing: a };
+    const rect = range?.getBoundingClientRect?.();
+    if (rect) showSelMenuAt(rectToPage(rect, doc), true);
+  }
+
+  async function createHighlightFromSel(color) {
+    if (!activeSel || !view) { hideSelMenu(); return; }
+    if (activeSel.existing) { recolorAnnotation(activeSel.existing, color); return; }
+    if (activeSel.index == null) { hideSelMenu(); return; }
+    const cfi = view.getCFI(activeSel.index, activeSel.range);
+    const text = activeSel.text;
+    if (!cfi) { hideSelMenu(); return; }
+    drawAnnotation({ cfi, color });
+    hideSelMenu();
+    try { view.deselect?.(); } catch { /* */ }
+    try {
+      const r = await api('POST', '/annotations', { cfi, text, color, note: '' });
+      annotationsData.push({ id: r.id, cfi, text, color, note: '', createdAt: new Date().toISOString() });
+      toast(rt('readerJs.highlightAdded'));
+      if (activePanelTab === 'notes') renderNotesTab();
+    } catch (e) { console.error(e); }
+    activeSel = null;
+  }
+  async function recolorAnnotation(a, color) {
+    a.color = color;
+    drawAnnotation(a);
+    hideSelMenu();
+    activeSel = null;
+    try { await api('PATCH', '/annotations/' + a.id, { color }); if (activePanelTab === 'notes') renderNotesTab(); } catch (e) { console.error(e); }
+  }
+  async function copySelText() {
+    const text = activeSel?.text || activeSel?.existing?.text || '';
+    hideSelMenu();
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); toast(rt('readerJs.copied')); }
+    catch { toast(rt('readerJs.copyFailed')); }
+  }
+  async function removeActiveAnnotation() {
+    const a = activeSel?.existing;
+    hideSelMenu();
+    activeSel = null;
+    if (!a) return;
+    try { view.deleteAnnotation?.({ value: a.cfi }); } catch { /* */ }
+    annotationsData = annotationsData.filter(x => x.id !== a.id);
+    if (activePanelTab === 'notes') renderNotesTab();
+    try { await api('DELETE', '/annotations/' + a.id); } catch (e) { console.error(e); }
+    toast(rt('readerJs.annotationRemoved'));
+  }
+
+  function openNoteEditor() {
+    const ed = $('reader-note-editor');
+    if (!ed || !activeSel) return;
+    if (activeSel.existing) {
+      pendingNote = { mode: 'existing', a: activeSel.existing };
+      $('rne-quote').textContent = activeSel.existing.text || '';
+      $('rne-text').value = activeSel.existing.note || '';
+    } else {
+      if (activeSel.index == null || !view) return;
+      const cfi = view.getCFI(activeSel.index, activeSel.range);
+      if (!cfi) return;
+      pendingNote = { mode: 'new', cfi, text: activeSel.text, color: 'yellow' };
+      $('rne-quote').textContent = activeSel.text || '';
+      $('rne-text').value = '';
+    }
+    hideSelMenu();
+    ed.classList.add('is-open');
+    ed.setAttribute('aria-hidden', 'false');
+    setTimeout(() => { try { $('rne-text').focus(); } catch { /* */ } }, 60);
+  }
+  function closeNoteEditor() {
+    const ed = $('reader-note-editor');
+    ed?.classList.remove('is-open');
+    ed?.setAttribute('aria-hidden', 'true');
+    pendingNote = null;
+  }
+  async function saveNoteEditor() {
+    if (!pendingNote) { closeNoteEditor(); return; }
+    const note = ($('rne-text')?.value || '').trim();
+    if (pendingNote.mode === 'new') {
+      const { cfi, text, color } = pendingNote;
+      drawAnnotation({ cfi, color });
+      try { view.deselect?.(); } catch { /* */ }
+      try {
+        const r = await api('POST', '/annotations', { cfi, text, color, note });
+        annotationsData.push({ id: r.id, cfi, text, color, note, createdAt: new Date().toISOString() });
+        toast(rt('readerJs.noteSaved'));
+      } catch (e) { console.error(e); }
+    } else {
+      const a = pendingNote.a;
+      a.note = note;
+      try { await api('PATCH', '/annotations/' + a.id, { note }); toast(rt('readerJs.noteSaved')); } catch (e) { console.error(e); }
+    }
+    activeSel = null;
+    closeNoteEditor();
+    if (activePanelTab === 'notes') renderNotesTab();
+  }
+
+  function renderNotesTab() {
+    const c = $('notes-content');
+    if (!c) return;
+    if (!annotationsData.length) {
+      c.innerHTML = '<div class="bm-empty">' + esc(rt('readerJs.noNotes')) + '<div class="bm-empty-hint">' + esc(rt('readerJs.notesHint')) + '</div></div>';
+      return;
+    }
+    const n = annotationsData.length;
+    let h = '<div class="bm-section-title">' + esc(rtp('readerJs.savedNotes', { n, word: rPlural('note', n) })) + '</div>';
+    annotationsData.forEach(a => {
+      h += '<div class="note-item note-color-' + esc(a.color) + '">' +
+        '<button class="note-item-body" type="button" data-note-go="' + a.id + '">' +
+        '<div class="note-quote">' + esc(a.text || '') + '</div>' +
+        (a.note ? '<div class="note-text">' + esc(a.note) + '</div>' : '') +
+        '<div class="bm-item-date">' + esc(fmtDate(a.createdAt)) + '</div></button>' +
+        '<button class="bm-item-del" type="button" data-note-del="' + a.id + '" title="' + esc(rt('readerJs.delete')) + '">&times;</button></div>';
+    });
+    c.innerHTML = h;
+    c.querySelectorAll('[data-note-go]').forEach(el => el.addEventListener('click', () => {
+      const a = annotationsData.find(x => x.id === Number(el.dataset.noteGo));
+      if (a && view) { view.goTo(a.cfi).catch(console.error); closePanel(); }
+    }));
+    c.querySelectorAll('[data-note-del]').forEach(el => el.addEventListener('click', () => removeAnnotationById(Number(el.dataset.noteDel))));
+  }
+  async function removeAnnotationById(id) {
+    const a = annotationsData.find(x => x.id === id);
+    if (!a) return;
+    try { view.deleteAnnotation?.({ value: a.cfi }); } catch { /* */ }
+    annotationsData = annotationsData.filter(x => x.id !== id);
+    renderNotesTab();
+    try { await api('DELETE', '/annotations/' + id); } catch (e) { console.error(e); }
+  }
+
+  function initAnnotations() {
+    const m = $('reader-sel-menu');
+    m?.querySelectorAll('.rsm-color').forEach(b => b.addEventListener('click', () => createHighlightFromSel(b.dataset.color)));
+    $('rsm-note')?.addEventListener('click', openNoteEditor);
+    $('rsm-copy')?.addEventListener('click', copySelText);
+    $('rsm-remove')?.addEventListener('click', removeActiveAnnotation);
+    $('rne-cancel')?.addEventListener('click', closeNoteEditor);
+    $('rne-save')?.addEventListener('click', saveNoteEditor);
+    $('reader-note-editor')?.addEventListener('click', e => { if (e.target?.id === 'reader-note-editor') closeNoteEditor(); });
+    document.addEventListener('pointerdown', e => {
+      const sm = $('reader-sel-menu');
+      if (sm && sm.classList.contains('is-open') && !sm.contains(e.target)) { hideSelMenu(); if (!activeSel?.existing) activeSel = null; }
+    }, true);
+  }
+
+  function wireViewAnnotations() {
+    if (!view) return;
+    view.addEventListener('draw-annotation', ({ detail }) => {
+      const color = detail?.annotation?.color;
+      if (color === 'underline') detail.draw(Overlayer.underline, { color: '#f43f5e' });
+      else detail.draw(Overlayer.highlight, { color: hlFill(color) });
+    });
+    view.addEventListener('show-annotation', ({ detail }) => {
+      const a = annotationsData.find(x => x.cfi === detail.value);
+      if (a) openSelMenuForExisting(a, detail.range);
+    });
+    view.addEventListener('create-overlay', () => applyAllAnnotations());
+  }
+
+  function wireSelection(doc) {
+    let selTimer = null;
+    doc.addEventListener('selectionchange', () => {
+      clearTimeout(selTimer);
+      selTimer = setTimeout(() => maybeShowSelMenu(doc), 250);
+    });
+  }
+
   /* ===== TOC ===== */
   function updateTocHighlight() { document.querySelectorAll('.toc-item').forEach(el => el.classList.toggle('is-active', !!currentTocHref && el.dataset.tocHref === currentTocHref)); }
   function getTocIdx() { return tocData.findIndex(i => i.href === currentTocHref); }
@@ -745,10 +1052,12 @@ import {
     return {
       settings: { kicker: rt('readerJs.panelSettings'), title: rt('readerJs.panelSettingsTitle') },
       toc: { kicker: rt('readerJs.panelTocKicker'), title: rt('readerJs.panelTocTitle') },
-      bookmarks: { kicker: rt('readerJs.panelBmKicker'), title: rt('readerJs.panelBmTitle') }
+      bookmarks: { kicker: rt('readerJs.panelBmKicker'), title: rt('readerJs.panelBmTitle') },
+      search: { kicker: rt('readerJs.panelSearchKicker'), title: rt('readerJs.panelSearchTitle') },
+      notes: { kicker: rt('readerJs.panelNotesKicker'), title: rt('readerJs.panelNotesTitle') }
     }[tab] || { kicker: '', title: '' };
   }
-  const triggerMap = { settings: $('btn-settings'), toc: $('btn-toc') };
+  const triggerMap = { settings: $('btn-settings'), toc: $('btn-toc'), search: $('btn-search') };
 
   function refreshTriggers() {
     Object.entries(triggerMap).forEach(([k, el]) => {
@@ -760,6 +1069,7 @@ import {
   let panelHistoryPushed = false;
   function openPanel(tab) {
     const t = tab || 'toc';
+    hideSelMenu();
     if (panelOverlay.classList.contains('is-open') && activePanelTab === t) { closePanel(); return; }
     const wasOpen = panelOverlay.classList.contains('is-open');
     panelOverlay.classList.add('is-open'); setChromeVisible(true); switchTab(t); refreshTriggers();
@@ -770,6 +1080,7 @@ import {
     refreshTriggers();
     clearTimeout(chromeTimer);
     setChromeVisible(false);
+    if (activePanelTab === 'search') { try { view?.clearSearch?.(); } catch { /* */ } }
   }
   function closePanel() {
     if (!panelOverlay.classList.contains('is-open')) return;
@@ -792,6 +1103,11 @@ import {
           console.warn(e);
         }
       });
+    }
+    if (tab === 'notes') renderNotesTab();
+    if (tab === 'search') {
+      const inp = $('book-search-input');
+      if (inp) setTimeout(() => { try { inp.focus(); } catch { /* */ } }, 60);
     }
   }
   panelOverlay.addEventListener('click', e => { if (e.target === panelOverlay) closePanel(); });
@@ -1447,10 +1763,22 @@ import {
 
   $('btn-settings')?.addEventListener('click', () => openPanel('settings'));
   $('btn-toc')?.addEventListener('click', () => openPanel('toc'));
+  $('btn-search')?.addEventListener('click', () => openPanel('search'));
   $('btn-bookmark-add')?.addEventListener('click', addBookmark);
   tocSearchInput?.addEventListener('input', renderTocTab);
   tocPrevBtn?.addEventListener('click', () => goTocIdx(getTocIdx() - 1));
   tocNextBtn?.addEventListener('click', () => goTocIdx(getTocIdx() + 1));
+  const bookSearchInput = $('book-search-input');
+  if (bookSearchInput) {
+    bookSearchInput.addEventListener('input', () => {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => runBookSearch(bookSearchInput.value), 350);
+    });
+    bookSearchInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchDebounce); runBookSearch(bookSearchInput.value); }
+    });
+  }
+  initAnnotations();
   initSettings();
   refreshSettingsUI();
   refreshTriggers();
@@ -1466,7 +1794,14 @@ import {
       }
       return;
     }
-    if (e.key === 'Escape') { closePanel(); return; }
+    if (e.key === 'Escape') {
+      const ed = $('reader-note-editor');
+      if (ed && ed.classList.contains('is-open')) { closeNoteEditor(); return; }
+      const sm = $('reader-sel-menu');
+      if (sm && sm.classList.contains('is-open')) { hideSelMenu(); activeSel = null; return; }
+      closePanel();
+      return;
+    }
     if (panelOverlay.classList.contains('is-open')) return;
     const k = e.key;
     if (k === 'd' || k === 'D') { toggleDayNightTheme(); return; }
@@ -1474,6 +1809,7 @@ import {
     if (k === 'f' || k === 'F') { toggleFullscreen(); return; }
     if (k === 's' || k === 'S') { openPanel('settings'); return; }
     if (k === 't' || k === 'T') { openPanel('toc'); return; }
+    if (k === '/') { e.preventDefault(); openPanel('search'); return; }
     if (k === 'v' || k === 'V') {
       e.preventDefault();
       if (e.shiftKey && ttsChainActive) {
@@ -2051,11 +2387,14 @@ import {
     view.renderer.setAttribute('max-inline-size', S.layout === 'dual' ? Math.floor(innerWidth / 2) + 'px' : S.maxWidth + 'px');
     view.renderer.setAttribute('max-column-count', S.layout === 'dual' ? '2' : '1');
 
-    view.addEventListener('load', ({ detail: { doc } }) => {
+    view.addEventListener('load', ({ detail: { doc, index } }) => {
       if (!ttsAdvancingSection) stopReaderTts();
+      if (doc && index != null) docIndexMap.set(doc, index);
       wireDoc(doc);
+      wireSelection(doc);
     });
 
+    wireViewAnnotations();
     wireFootnotes();
 
     view.addEventListener('relocate', ({ detail }) => {
@@ -2066,6 +2405,8 @@ import {
       const why = detail.reason;
       if (why === 'snap' || why === 'page' || why === 'navigation') {
         try { view.deselect?.(); } catch { /* */ }
+        hideSelMenu();
+        activeSel = null;
       }
     });
 
@@ -2105,7 +2446,9 @@ import {
   (async () => {
     try {
       await loadBookmarks(); renderBmTab();
+      await loadAnnotations();
       await loadBook();
+      applyAllAnnotations();
     } catch (e) {
       console.error(e);
       showError(e.message || rt('readerJs.loadBookFail'));

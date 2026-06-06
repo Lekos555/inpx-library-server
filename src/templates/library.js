@@ -305,9 +305,9 @@ export function renderBook({
     <section class="book-detail-shell">
       <div class="book-detail-main card-detail-panel">
         ${isAuthenticated ? `<div class="book-detail-corner-actions">
-          <button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${escapeHtml(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button>
-          <button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${escapeHtml(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button>
-          <button class="button" type="button" data-add-to-shelf="${escapeHtml(book.id)}">${escapeHtml(t('book.toShelf'))}</button>
+          <button class="button book-detail-read-action ${isRead ? 'is-active' : ''}" type="button" data-read-button="${encodeURIComponent(book.id)}">${isRead ? escapeHtml(t('book.markedRead')) : escapeHtml(t('book.markRead'))}</button>
+          <button class="button book-detail-bookmark-action ${bookmarked ? 'is-active' : ''}" type="button" data-bookmark-button="${encodeURIComponent(book.id)}" ${bookmarked ? 'data-active-favorite="true"' : ''}>${bookmarked ? escapeHtml(t('book.inFavorite')) : escapeHtml(t('book.addFavorite'))}</button>
+          <button class="button" type="button" data-add-to-shelf="${encodeURIComponent(book.id)}">${escapeHtml(t('book.toShelf'))}</button>
         </div>` : ''}
         <div class="book-detail-cover">
           <div class="cover ${hasRealCover ? '' : 'cover-fallback-active'}">
@@ -332,7 +332,7 @@ export function renderBook({
               ? `<div class="book-detail-annotation book-detail-annotation--html">${sanitizeHtml(details.annotation)}</div>`
               : `<p class="book-detail-annotation">${escapeHtml(details.annotation || t('book.noAnnotation'))}</p>`
           }
-          <div class="book-detail-review-mount" data-book-review-mount data-book-review-for="${escapeHtml(String(book.id))}" data-review-heading="${escapeHtml(t('book.review'))}" hidden aria-hidden="true"></div>
+          <div class="book-detail-review-mount" data-book-review-mount data-book-review-for="${encodeURIComponent(String(book.id))}" data-review-heading="${escapeHtml(t('book.review'))}" hidden aria-hidden="true"></div>
           ${
             illustrationUrls.length
               ? `<section class="book-detail-side-block book-detail-illustrations"><details class="book-detail-disclosure book-detail-illustrations-disclosure"><summary><span class="book-detail-disclosure-title">${escapeHtml(t('book.illustrations'))}</span><span class="book-detail-disclosure-note">${formatLocaleInt(illustrationUrls.length)}</span></summary><div class="book-detail-illustrations-strip">${illustrationUrls.map((it, idx) => `<a href="${escapeHtml(it.url)}" data-illustration-link data-illustration-index="${idx}"><img src="${escapeHtml(it.url)}" alt="" loading="lazy"></a>`).join('')}</div></details></section>`
@@ -341,7 +341,7 @@ export function renderBook({
           <div class="actions actions-primary">
             ${renderDownloadMenu(book, { accent: true, user })}
             <a href="/read/${encodeURIComponent(book.id)}" class="button" target="_blank" rel="noopener noreferrer">${escapeHtml(t('book.read'))}</a>
-            ${isAuthenticated ? `<button class="button" type="button" data-send-to-ereader="${escapeHtml(book.id)}">${escapeHtml(t('book.toEmail'))}</button>` : ''}
+            ${isAuthenticated ? `<button class="button" type="button" data-send-to-ereader="${encodeURIComponent(book.id)}">${escapeHtml(t('book.toEmail'))}</button>` : ''}
           </div>
         </div>
         ${user?.role === 'admin' ? `<details class="book-edit-disclosure book-edit-disclosure--inline">
@@ -986,6 +986,7 @@ ${csrfToken ? `<meta name="csrf-token" content="${escapeHtml(csrfToken)}">` : ''
     <button class="tb-btn" type="button" id="btn-fullscreen" title="${escapeHtml(t('reader.fullscreen'))}" aria-label="${escapeHtml(t('reader.fullscreen'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg></button>
     <button class="tb-btn" type="button" id="btn-day-night" title="${escapeHtml(t('reader.nightMode'))}" aria-label="${escapeHtml(t('reader.dayModeToggle'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></button>
     <button class="tb-btn" type="button" id="btn-bookmark-add" title="${escapeHtml(t('reader.bookmark'))}" aria-label="${escapeHtml(t('reader.addBookmark'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg></button>
+    <button class="tb-btn" type="button" id="btn-search" title="${escapeHtml(t('reader.search'))}" aria-label="${escapeHtml(t('reader.searchBook'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></button>
     <button class="tb-btn" type="button" id="btn-toc" title="${escapeHtml(t('reader.toc'))}" aria-label="${escapeHtml(t('reader.tocNav'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M3 6h18M3 18h18"/></svg></button>
     <button class="tb-btn" type="button" id="btn-settings" title="${escapeHtml(t('reader.settings'))}" aria-label="${escapeHtml(t('reader.settingsReading'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
   </div>
@@ -1019,6 +1020,30 @@ ${csrfToken ? `<meta name="csrf-token" content="${escapeHtml(csrfToken)}">` : ''
   <span class="book-page-num" id="book-page-right"></span>
 </div>
 
+<div class="reader-sel-menu" id="reader-sel-menu" role="menu" aria-hidden="true">
+  <div class="rsm-colors">
+    <button type="button" class="rsm-color" data-color="yellow" title="${escapeHtml(t('readerJs.highlight'))}" aria-label="${escapeHtml(t('readerJs.highlight'))}"></button>
+    <button type="button" class="rsm-color" data-color="green" title="${escapeHtml(t('readerJs.highlight'))}" aria-label="${escapeHtml(t('readerJs.highlight'))}"></button>
+    <button type="button" class="rsm-color" data-color="blue" title="${escapeHtml(t('readerJs.highlight'))}" aria-label="${escapeHtml(t('readerJs.highlight'))}"></button>
+    <button type="button" class="rsm-color" data-color="pink" title="${escapeHtml(t('readerJs.highlight'))}" aria-label="${escapeHtml(t('readerJs.highlight'))}"></button>
+  </div>
+  <span class="rsm-sep"></span>
+  <button type="button" class="rsm-btn" id="rsm-note" title="${escapeHtml(t('readerJs.addNote'))}">${escapeHtml(t('readerJs.addNote'))}</button>
+  <button type="button" class="rsm-btn" id="rsm-copy" title="${escapeHtml(t('readerJs.copy'))}">${escapeHtml(t('readerJs.copy'))}</button>
+  <button type="button" class="rsm-btn rsm-btn-danger" id="rsm-remove" title="${escapeHtml(t('readerJs.remove'))}" hidden>${escapeHtml(t('readerJs.remove'))}</button>
+</div>
+
+<div class="reader-note-editor" id="reader-note-editor" aria-hidden="true">
+  <div class="rne-card">
+    <div class="rne-quote" id="rne-quote"></div>
+    <textarea id="rne-text" class="rne-text" rows="4" placeholder="${escapeHtml(t('readerJs.notePlaceholder'))}"></textarea>
+    <div class="rne-actions">
+      <button type="button" class="rne-btn" id="rne-cancel">${escapeHtml(t('readerJs.cancel'))}</button>
+      <button type="button" class="rne-btn rne-btn-primary" id="rne-save">${escapeHtml(t('readerJs.save'))}</button>
+    </div>
+  </div>
+</div>
+
 <div class="panel-overlay" id="panel-overlay">
   <div class="panel">
     <div class="panel-header">
@@ -1030,7 +1055,9 @@ ${csrfToken ? `<meta name="csrf-token" content="${escapeHtml(csrfToken)}">` : ''
     </div>
     <div class="panel-tabs">
       <button class="panel-tab is-active" data-tab="toc">${escapeHtml(t('reader.panelToc'))}</button>
+      <button class="panel-tab" data-tab="search">${escapeHtml(t('reader.panelSearch'))}</button>
       <button class="panel-tab" data-tab="bookmarks">${escapeHtml(t('reader.panelBookmarks'))}</button>
+      <button class="panel-tab" data-tab="notes">${escapeHtml(t('reader.panelNotes'))}</button>
       <button class="panel-tab" data-tab="settings">${escapeHtml(t('reader.panelSettings'))}</button>
     </div>
     <div class="panel-body" data-panel-tab="toc">
@@ -1043,8 +1070,17 @@ ${csrfToken ? `<meta name="csrf-token" content="${escapeHtml(csrfToken)}">` : ''
       </div>
       <div id="toc-content"><div class="bm-empty">${escapeHtml(t('reader.loading'))}</div></div>
     </div>
+    <div class="panel-body" data-panel-tab="search" style="visibility:hidden;position:absolute;pointer-events:none">
+      <div class="toc-tools">
+        <input type="search" id="book-search-input" name="bookSearch" class="toc-search-input" placeholder="${escapeHtml(t('readerJs.searchPlaceholder'))}" autocomplete="off" enterkeyhint="search">
+      </div>
+      <div id="search-content"><div class="bm-empty">${escapeHtml(t('readerJs.searchHint'))}</div></div>
+    </div>
     <div class="panel-body" data-panel-tab="bookmarks" style="visibility:hidden;position:absolute;pointer-events:none">
       <div id="bookmarks-content"><div class="bm-empty">${escapeHtml(t('reader.loading'))}</div></div>
+    </div>
+    <div class="panel-body" data-panel-tab="notes" style="visibility:hidden;position:absolute;pointer-events:none">
+      <div id="notes-content"><div class="bm-empty">${escapeHtml(t('reader.loading'))}</div></div>
     </div>
     <div class="panel-body" data-panel-tab="settings" style="visibility:hidden;position:absolute;pointer-events:none">
       <div class="rs-group">
@@ -1147,13 +1183,14 @@ ${csrfToken ? `<meta name="csrf-token" content="${escapeHtml(csrfToken)}">` : ''
 </html>`;
 }
 
-export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmail = '', recentBooks = [], readerBookmarks = [], flash = '', csrfToken = '' }) {
+export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmail = '', recentBooks = [], readerBookmarks = [], readerAnnotations = [], flash = '', csrfToken = '' }) {
   const fmtDate = (d) => formatLocaleDateLong(d);
 
   const readingTotal = Math.max(0, Math.floor(Number(userStats.readingCount) || 0));
   const readBooksTotal = Math.max(0, Math.floor(Number(userStats.readBooksCount) || 0));
   const readSeriesTotal = Math.max(0, Math.floor(Number(userStats.readSeriesCount) || 0));
   const readerBmTotal = Math.max(0, Math.floor(Number(userStats.readerBookmarksCount) || 0));
+  const readerNotesTotal = Math.max(0, Math.floor(Number(userStats.readerAnnotationsCount) || 0));
   const bookmarkBooks = Math.max(0, Math.floor(Number(userStats.bookmarkCount) || 0));
   const favAuthors = Math.max(0, Math.floor(Number(userStats.favoriteAuthorsCount) || 0));
   const favSeries = Math.max(0, Math.floor(Number(userStats.favoriteSeriesCount) || 0));
@@ -1179,7 +1216,7 @@ export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmai
       <div class="muted">${escapeHtml(fmtDate(userStats.createdAt))} · ${escapeHtml(user.role === 'admin' ? t('profile.admin') : t('profile.user'))}</div>
     </div>
     <div class="profile-shell" data-profile-root data-profile-initial-tab="${initialTab}">
-    <div hidden data-profile-page-stats data-reading-total="${readingTotal}" data-reader-bm-total="${readerBmTotal}"></div>
+    <div hidden data-profile-page-stats data-reading-total="${readingTotal}" data-reader-bm-total="${readerBmTotal}" data-reader-notes-total="${readerNotesTotal}"></div>
     <div class="view-switcher profile-tablist" role="tablist" aria-label="${escapeHtml(t('profile.tablistAria'))}">
       <button type="button" class="button profile-tab view-switcher-link${tabActivityActive ? ' is-active' : ''}" role="tab" id="profile-tab-activity" aria-controls="profile-panel-activity" aria-selected="${tabActivityActive ? 'true' : 'false'}" tabindex="${tabActivityActive ? '0' : '-1'}" data-profile-tab="activity">${escapeHtml(t('profile.tabActivity'))}</button>
       <button type="button" class="button profile-tab view-switcher-link${tabActivityActive ? '' : ' is-active'}" role="tab" id="profile-tab-settings" aria-controls="profile-panel-settings" aria-selected="${tabActivityActive ? 'false' : 'true'}" tabindex="${tabActivityActive ? '-1' : '0'}" data-profile-tab="settings">${escapeHtml(t('profile.tabSettings'))}</button>
@@ -1228,6 +1265,20 @@ export function renderProfile({ user, stats, indexStatus, userStats, ereaderEmai
                   <span class="muted profile-list-meta">${escapeHtml(bm.bookTitle !== bm.label && bm.label ? bm.bookTitle : '')}</span>
                   <button type="button" class="profile-remove-btn" data-remove-bookmark="${escapeHtml(String(bm.id))}" title="${escapeHtml(t('profile.removeTitle'))}">&times;</button>
                 </div>`).join('')}</div>` : `<div class="muted" style="padding:4px 0;margin-top:6px;">${escapeHtml(t('profile.noBookmarks'))}</div>`}
+            </div>
+          </div>
+          <div class="table-row table-row-stack">
+            <div>
+              <strong>${escapeHtml(t('profile.readerNotes'))}</strong> <span class="muted" style="font-size:.85em;">(<span data-profile-reader-notes-count>${formatLocaleInt(readerNotesTotal)}</span>)</span>
+              ${readerAnnotations.length ? `<div style="margin-top:6px;">${readerAnnotations.map((an) => {
+                const primary = String(an.note || an.text || an.bookTitle || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+                return `
+                <div class="profile-list-item" data-profile-annotation="${escapeHtml(String(an.id))}" data-annotation-book-id="${encodeURIComponent(String(an.bookId))}">
+                  <a class="profile-list-link profile-note-link" href="/read/${encodeURIComponent(an.bookId)}?pos=${encodeURIComponent(an.cfi)}" title="${escapeHtml(primary)}" target="_blank" rel="noopener noreferrer">${escapeHtml(primary)}</a>
+                  <span class="muted profile-list-meta">${escapeHtml(an.bookTitle || '')}</span>
+                  <button type="button" class="profile-remove-btn" data-remove-annotation="${escapeHtml(String(an.id))}" title="${escapeHtml(t('profile.removeTitle'))}">&times;</button>
+                </div>`;
+              }).join('')}</div>` : `<div class="muted" style="padding:4px 0;margin-top:6px;">${escapeHtml(t('profile.noNotes'))}</div>`}
             </div>
           </div>
       </div>

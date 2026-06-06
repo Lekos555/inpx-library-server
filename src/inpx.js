@@ -65,7 +65,7 @@ const MAX_INPX_LINE_CHARS = 256 * 1024;
  */
 const MAX_INP_ENTRY_BYTES = 80 * 1024 * 1024;
 const HEAP_WARNING_THRESHOLD_MB = 600;
-const FACET_CACHE_TTL_MS = 120_000; // 20s → 120s:减少分面/系列/作者页面查询
+const FACET_CACHE_TTL_MS = 120_000; // 20с → 120с: меньше запросов на страницах фасетов/серий/авторов
 /** COUNT дедупа по фасету не зависит от страницы — кешируем отдельно, чтобы «далее» не гоняло тяжёлый подсчёт. */
 const FACET_DEDUP_TOTAL_TTL_MS = parseEnvTimeoutMs('FACET_DEDUP_TOTAL_TTL_MS', 300_000);
 /**
@@ -77,7 +77,7 @@ const FACET_DEDUP_TOTAL_TTL_MS = parseEnvTimeoutMs('FACET_DEDUP_TOTAL_TTL_MS', 3
 const FACET_SUMMARY_MAX_BOOKS = Math.max(0, Number.parseInt(String(process.env.FACET_SUMMARY_MAX_BOOKS || ''), 10) || 5_000);
 /** Summary (связанные панели) меняются редко — кэшируем дольше, чем страницы книг. */
 const FACET_SUMMARY_CACHE_TTL_MS = 600_000;
-const AUTHOR_GROUPED_CACHE_TTL_MS = 60_000; // 12s → 60s:减少作者分组页查询
+const AUTHOR_GROUPED_CACHE_TTL_MS = 60_000; // 12с → 60с: меньше запросов на странице группировки по авторам
 /** Макс. число строк на странице автора (лимит выборки из БД).
  * 50 000 → 10 000: выборка десятков тысяч строк из junction + view
  * с ORDER BY и LEFT JOIN создаёт многосекундную блокировку event loop. */
@@ -100,9 +100,10 @@ function resetInpxPreparedStatements() {
   _stmtGetBookById = null;
   _stmtGenresGroupedCount = null;
   _stmtGenresGroupedName = null;
-  _stmtDupGroups = null;
   _stmtDupSummary = null;
   _dupSummaryCache = null;
+  _stmtDupGroupsAll = null;
+  _dupGroupsCache = null;
   _stmtLibSections = null;
   _stmtContinueCount = null;
   _stmtContinueItems = null;
@@ -149,8 +150,14 @@ function readTimedCache(cache, key) {
 function writeTimedCache(cache, key, value, ttlMs, maxSize = 300) {
   cache.set(key, { value, expiresAt: Date.now() + ttlMs });
   if (cache.size > maxSize) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+    /* Удаляем пачку самых старых записей (≈10% maxSize), иначе при пиковой нагрузке
+       кэш постоянно держится на maxSize+1 и делает O(n) eviction на каждую вставку. */
+    const evictTarget = Math.max(1, Math.floor(maxSize / 10));
+    let evicted = 0;
+    for (const k of cache.keys()) {
+      cache.delete(k);
+      if (++evicted >= evictTarget) break;
+    }
   }
 }
 
@@ -188,12 +195,13 @@ let _dupSummaryCache = null;
 const DUP_SUMMARY_TTL_MS = 60_000;
 let _stmtDupSummary = null;
 
-/* Кеш групп дубликатов для пагинации: один проход, потом нарезка в памяти.
-   Кеш привязан к конкретному фильтру. */
+/* Кеш ВСЕХ групп дубликатов (без фильтра): один проход GROUP BY + join, затем
+   нарезка/фильтрация в памяти. Фильтр НЕ исполняется в SQL: lower_unicode() —
+   это JS-функция, и LIKE по ней вызывает JS на каждую строку таблицы, что на
+   больших библиотеках синхронно блокирует event loop. */
 let _dupGroupsCache = null;
 const DUP_GROUPS_TTL_MS = 30_000;
 let _stmtDupGroupsAll = null;
-let _stmtDupGroupsFiltered = null;
 function getDuplicatesSummary() {
   if (_dupSummaryCache && Date.now() < _dupSummaryCache.expiresAt) {
     return _dupSummaryCache.value;
@@ -1181,20 +1189,19 @@ export function getIndexStatus() {
   const catalogIndexedOnce = Boolean(indexedAt) && !indexState.error;
   const ready = indexState.ready || catalogIndexedOnce;
 
-  let legacyInpArchiveCount = 0;
-  try {
-    legacyInpArchiveCount = Object.keys(JSON.parse(getMeta('inp_sizes') || '{}')).length;
-  } catch {}
-
   const out = { ...indexState, ready, indexedAt };
 
-  if (
-    indexState.processedArchives === 0 &&
-    indexState.totalArchives === 0 &&
-    legacyInpArchiveCount > 0
-  ) {
-    out.totalArchives = legacyInpArchiveCount;
-    out.processedArchives = legacyInpArchiveCount;
+  /* Парсим потенциально крупный inp_sizes только в legacy-ветке (нет прогресса
+     из indexState), а не на каждом рендере страницы. */
+  if (indexState.processedArchives === 0 && indexState.totalArchives === 0) {
+    let legacyInpArchiveCount = 0;
+    try {
+      legacyInpArchiveCount = Object.keys(JSON.parse(getMeta('inp_sizes') || '{}')).length;
+    } catch {}
+    if (legacyInpArchiveCount > 0) {
+      out.totalArchives = legacyInpArchiveCount;
+      out.processedArchives = legacyInpArchiveCount;
+    }
   }
 
   return out;
@@ -2483,6 +2490,7 @@ function buildYearFilterSql(year = 0) {
 
 const DISTINCT_CACHE_TTL = 60_000; // 60 seconds
 
+let _stmtDistinctLangs = null;
 let _distinctLangsCache = null;
 let _distinctLangsCacheTime = 0;
 
@@ -2491,11 +2499,13 @@ export function getDistinctLanguages() {
   if (_distinctLangsCache && now - _distinctLangsCacheTime < DISTINCT_CACHE_TTL) {
     return _distinctLangsCache;
   }
-  _distinctLangsCache = db.prepare(`SELECT DISTINCT lang FROM books WHERE lang != '' AND deleted = 0 ORDER BY lang`).all().map(r => r.lang);
+  _stmtDistinctLangs ??= db.prepare(`SELECT DISTINCT lang FROM books WHERE lang != '' AND deleted = 0 ORDER BY lang`);
+  _distinctLangsCache = _stmtDistinctLangs.all().map(r => r.lang);
   _distinctLangsCacheTime = now;
   return _distinctLangsCache;
 }
 
+let _stmtDistinctFormats = null;
 let _distinctFormatsCache = null;
 let _distinctFormatsCacheTime = 0;
 
@@ -2504,7 +2514,8 @@ export function getDistinctFormats() {
   if (_distinctFormatsCache && now - _distinctFormatsCacheTime < DISTINCT_CACHE_TTL) {
     return _distinctFormatsCache;
   }
-  _distinctFormatsCache = db.prepare(`SELECT DISTINCT ext FROM books WHERE ext != '' AND deleted = 0 ORDER BY ext`).all().map(r => r.ext);
+  _stmtDistinctFormats ??= db.prepare(`SELECT DISTINCT ext FROM books WHERE ext != '' AND deleted = 0 ORDER BY ext`);
+  _distinctFormatsCache = _stmtDistinctFormats.all().map(r => r.ext);
   _distinctFormatsCacheTime = now;
   return _distinctFormatsCache;
 }
@@ -2850,7 +2861,15 @@ export function searchCatalog({ query = '', page = 1, pageSize = 24, field = 'bo
 }
 
 let _stmtGetBookById = null;
+
+/** Заменяет replacement character (вставленный HTML-парсером вместо null byte)
+    обратно на оригинальный null byte, чтобы поиск по ID работал корректно. */
+function normalizeBookId(id) {
+  return String(id || '').replace(/\uFFFD/g, '\0');
+}
+
 export function getBookById(id) {
+  const normalizedId = normalizeBookId(id);
   _stmtGetBookById ??= db.prepare(`
     SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo, b.file_name AS fileName,
            b.archive_name AS archiveName, b.size, b.lib_id AS libId, b.ext, b.date, b.lang, b.keywords,
@@ -2860,7 +2879,7 @@ export function getBookById(id) {
     LEFT JOIN sources s ON s.id = b.source_id
     WHERE b.id = ?
   `);
-  const row = _stmtGetBookById.get(id);
+  const row = _stmtGetBookById.get(normalizedId);
   if (!row) return null;
   const sourceFlibusta = effectiveSourceFlibustaForBook(row);
   const book = mapBookListRow({ ...row, sourceFlibusta });
@@ -3065,43 +3084,55 @@ export function getBookDuplicateCandidates(_bookId, _limit = 8) {
 }
 
 // ─── Duplicate detection ─────────────────────────────────────────
+
+/* Фильтрация групп дубликатов в памяти. Один токен или несколько — все токены
+   должны присутствовать (AND) в названии ЛИБО в авторе. Фильтр работает на уровне
+   набора дубликатов (общий title_sort внутри автора): набор включается целиком,
+   если хотя бы одна его книга совпала. Чистый JS, без обращений к БД. */
+function filterDuplicateGroups(allGroups, normalizedFilter) {
+  const tokens = normalizedFilter.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return allGroups;
+  const matchAll = (text) => {
+    const s = String(text || '').toLowerCase();
+    for (const tok of tokens) {
+      if (s.indexOf(tok) === -1) return false;
+    }
+    return true;
+  };
+  const out = [];
+  for (const g of allGroups) {
+    let keptItems = null;
+    let curKey = null;
+    let curSet = null;
+    let curMatch = false;
+    const flush = () => {
+      if (curSet && curMatch) {
+        if (!keptItems) keptItems = [];
+        for (const it of curSet) keptItems.push(it);
+      }
+    };
+    for (const it of g.items) {
+      const k = it.title_sort || '';
+      if (k !== curKey) { flush(); curKey = k; curSet = []; curMatch = false; }
+      curSet.push(it);
+      if (!curMatch && (matchAll(it.title) || matchAll(it.authors))) curMatch = true;
+    }
+    flush();
+    if (keptItems && keptItems.length) {
+      out.push({ key: g.key, title: g.title, authors: g.authors, items: keptItems });
+    }
+  }
+  return out;
+}
+
 export function getDuplicateGroups({ page = 1, pageSize = 50, filter = '' } = {}) {
   const normalizedFilter = String(filter || '').trim().toLowerCase();
-  if (_dupGroupsCache && _dupGroupsCache.filter === normalizedFilter && Date.now() < _dupGroupsCache.expiresAt) {
-    const allGroups = _dupGroupsCache.value.groups;
-    const total = _dupGroupsCache.value.total;
-    const start = (page - 1) * pageSize;
-    return { total, groups: allGroups.slice(start, start + pageSize) };
-  }
 
-  let rows;
-  if (normalizedFilter) {
-    const like = '%' + normalizedFilter + '%';
-    _stmtDupGroupsFiltered ??= db.prepare(`
-      WITH dup_keys AS (
-        SELECT title_sort, COALESCE(authors, '') AS authors
-        FROM active_books
-        WHERE title_sort IS NOT NULL AND title_sort != ''
-        GROUP BY title_sort, authors
-        HAVING COUNT(*) > 1
-      ),
-      matched_keys AS (
-        SELECT dk.title_sort, dk.authors
-        FROM dup_keys dk
-        WHERE EXISTS (
-          SELECT 1 FROM active_books b2
-          WHERE b2.title_sort = dk.title_sort
-            AND COALESCE(b2.authors, '') = dk.authors
-            AND (lower_unicode(b2.title) LIKE ? OR lower_unicode(b2.authors) LIKE ?)
-        )
-      )
-      SELECT b.id, b.title, b.authors, b.ext, b.lang, b.size, b.file_name, b.archive_name,
-             b.title_sort, b.source_id
-      FROM active_books b
-      JOIN matched_keys mk ON b.title_sort = mk.title_sort AND COALESCE(b.authors, '') = mk.authors
-      ORDER BY COALESCE(b.authors, '') ASC, b.title_sort ASC, b.ext ASC, b.id ASC
-    `);
-    rows = _stmtDupGroupsFiltered.all(like, like);
+  // Все группы (без фильтра) считаем один раз и кешируем. Сам фильтр применяем
+  // в памяти ниже — это исключает дорогие JS-вызовы lower_unicode() в SQL.
+  let allGroups;
+  if (_dupGroupsCache && Date.now() < _dupGroupsCache.expiresAt) {
+    allGroups = _dupGroupsCache.value;
   } else {
     _stmtDupGroupsAll ??= db.prepare(`
       WITH dup_keys AS (
@@ -3117,29 +3148,24 @@ export function getDuplicateGroups({ page = 1, pageSize = 50, filter = '' } = {}
       JOIN dup_keys dk ON dk.title_sort = b.title_sort AND dk.authors = COALESCE(b.authors, '')
       ORDER BY COALESCE(b.authors, '') ASC, b.title_sort ASC, b.ext ASC, b.id ASC
     `);
-    rows = _stmtDupGroupsAll.all();
-  }
-
-  const allGroups = [];
-  let current = null;
-  for (const row of rows) {
-    const author = row.authors || '';
-    if (!current || current.key !== author) {
-      current = { key: author, title: author, authors: author, items: [] };
-      allGroups.push(current);
+    const rows = _stmtDupGroupsAll.all();
+    allGroups = [];
+    let current = null;
+    for (const row of rows) {
+      const author = row.authors || '';
+      if (!current || current.key !== author) {
+        current = { key: author, title: author, authors: author, items: [] };
+        allGroups.push(current);
+      }
+      current.items.push(row);
     }
-    current.items.push(row);
+    _dupGroupsCache = { value: allGroups, expiresAt: Date.now() + DUP_GROUPS_TTL_MS };
   }
 
-  const total = allGroups.length;
-  _dupGroupsCache = {
-    filter: normalizedFilter,
-    value: { total, groups: allGroups },
-    expiresAt: Date.now() + DUP_GROUPS_TTL_MS
-  };
-
+  const filtered = normalizedFilter ? filterDuplicateGroups(allGroups, normalizedFilter) : allGroups;
+  const total = filtered.length;
   const start = (page - 1) * pageSize;
-  return { total, groups: allGroups.slice(start, start + pageSize) };
+  return { total, groups: filtered.slice(start, start + pageSize) };
 }
 
 export function softDeleteBook(bookId) {
@@ -4153,8 +4179,9 @@ export async function getAuthorBooksGroupedCoalesced(authorName, sort = 'title',
   return again || result;
 }
 
+let _stmtAuthorFlibustaSourceId = null;
 export function getAuthorFlibustaSourceId(authorName) {
-  const row = db.prepare(`
+  _stmtAuthorFlibustaSourceId ??= db.prepare(`
     SELECT b.source_id AS sourceId
     FROM book_authors ba
     JOIN authors a ON a.id = ba.author_id
@@ -4163,7 +4190,8 @@ export function getAuthorFlibustaSourceId(authorName) {
     WHERE a.name = ?
     ORDER BY COALESCE(s.flibusta_sidecar, 0) DESC, b.id
     LIMIT 1
-  `).get(authorName);
+  `);
+  const row = _stmtAuthorFlibustaSourceId.get(authorName);
   return row?.sourceId != null ? row.sourceId : null;
 }
 
@@ -5081,26 +5109,30 @@ export function getFavoriteSeries(username, limit = 20, sort = 'name', order = '
 }
 
 /* Лёгкие версии — только имя и displayName, без подсчёта bookCount через JOIN на active_books */
+let _stmtFavAuthorsLight = null;
 export function getFavoriteAuthorsLight(username, limit = 20) {
-  return db.prepare(`
+  _stmtFavAuthorsLight ??= db.prepare(`
     SELECT a.name, COALESCE(a.display_name, a.name) AS displayName
     FROM favorite_authors fa
     JOIN authors a ON a.id = fa.author_id
     WHERE fa.username = ?
     ORDER BY COALESCE(a.display_name, a.name) COLLATE NOCASE ASC
     LIMIT ?
-  `).all(username, limit);
+  `);
+  return _stmtFavAuthorsLight.all(username, limit);
 }
 
+let _stmtFavSeriesLight = null;
 export function getFavoriteSeriesLight(username, limit = 20) {
-  return db.prepare(`
+  _stmtFavSeriesLight ??= db.prepare(`
     SELECT s.name, COALESCE(s.display_name, s.name) AS displayName
     FROM favorite_series fs
     JOIN series_catalog s ON s.id = fs.series_id
     WHERE fs.username = ?
     ORDER BY COALESCE(s.display_name, s.name) COLLATE NOCASE ASC
     LIMIT ?
-  `).all(username, limit);
+  `);
+  return _stmtFavSeriesLight.all(username, limit);
 }
 
 let _stmtIsFavAuthor = null;

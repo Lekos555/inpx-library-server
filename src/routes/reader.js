@@ -5,6 +5,7 @@ import { asyncHandler } from '../utils/async-handler.js';
 import {
   getReadingPosition, setReadingPosition,
   getReaderBookmarks, addReaderBookmark, deleteReaderBookmark,
+  getReaderAnnotations, addReaderAnnotation, updateReaderAnnotation, deleteReaderAnnotation,
   upsertReadingHistoryEntry, deleteReadingHistoryEntry
 } from '../db.js';
 import { invalidateUserPageCaches, clearPageDataCache } from '../services/cache.js';
@@ -92,6 +93,68 @@ export function registerReaderRoutes(app) {
       return apiFail(res, 400, ApiErrorCode.BOOKMARK_INVALID_ID, t('api.bookmark.invalidId'));
     }
     deleteReaderBookmark(bmId, req.user.username);
+    res.json({ ok: true });
+  }));
+
+  /* ── Reader annotations (выделения и заметки) ──────────────────── */
+
+  const ANNOTATION_COLORS = new Set(['yellow', 'green', 'blue', 'pink', 'underline']);
+
+  app.get('/api/books/:id/annotations', requireApiAuth, asyncHandler(async (req, res) => {
+    res.json(getReaderAnnotations(req.user.username, req.params.id));
+  }));
+
+  app.post('/api/books/:id/annotations', requireApiAuth, asyncHandler(async (req, res) => {
+    const cfi = String(req.body?.cfi ?? '');
+    const text = String(req.body?.text ?? '');
+    const note = String(req.body?.note ?? '');
+    const color = String(req.body?.color ?? 'yellow');
+    if (!cfi || cfi.length > 2000) {
+      return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.annotation.cfiRequired'));
+    }
+    if (text.length > 8000 || note.length > 8000) {
+      return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.annotation.textTooLong'));
+    }
+    if (!ANNOTATION_COLORS.has(color)) {
+      return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.annotation.invalidColor'));
+    }
+    if (!getBookById(req.params.id)) {
+      return apiFail(res, 404, ApiErrorCode.BOOK_NOT_FOUND, t('book.notFound'));
+    }
+    const id = addReaderAnnotation(req.user.username, req.params.id, cfi, text, note, color);
+    res.json({ ok: true, id: Number(id) });
+  }));
+
+  app.patch('/api/books/:id/annotations/:aid', requireApiAuth, asyncHandler(async (req, res) => {
+    const aid = Number(req.params.aid);
+    if (!Number.isInteger(aid) || aid < 1) {
+      return apiFail(res, 400, ApiErrorCode.BOOKMARK_INVALID_ID, t('api.bookmark.invalidId'));
+    }
+    const patch = {};
+    if (req.body?.note !== undefined) {
+      const note = String(req.body.note);
+      if (note.length > 8000) {
+        return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.annotation.textTooLong'));
+      }
+      patch.note = note;
+    }
+    if (req.body?.color !== undefined) {
+      const color = String(req.body.color);
+      if (!ANNOTATION_COLORS.has(color)) {
+        return apiFail(res, 400, ApiErrorCode.VALIDATION, t('api.annotation.invalidColor'));
+      }
+      patch.color = color;
+    }
+    updateReaderAnnotation(aid, req.user.username, patch);
+    res.json({ ok: true });
+  }));
+
+  app.delete('/api/books/:id/annotations/:aid', requireApiAuth, asyncHandler(async (req, res) => {
+    const aid = Number(req.params.aid);
+    if (!Number.isInteger(aid) || aid < 1) {
+      return apiFail(res, 400, ApiErrorCode.BOOKMARK_INVALID_ID, t('api.bookmark.invalidId'));
+    }
+    deleteReaderAnnotation(aid, req.user.username);
     res.json({ ok: true });
   }));
 
