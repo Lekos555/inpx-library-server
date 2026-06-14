@@ -9,6 +9,11 @@ import {
   formatGenreLabel
 } from './shared.js';
 import { getGenreGroups } from '../genre-map.js';
+import {
+  TELEGRAM_DEFAULT_PROFILE_DESCRIPTION,
+  TELEGRAM_DEFAULT_PROFILE_SHORT,
+  TELEGRAM_DEFAULT_WELCOME,
+} from '../telegram-bot-defaults.js';
 export function renderOperations({ user, stats = {}, indexStatus = {}, operations = {}, siteName = '', homeSubtitle = '', defaultLocale = 'auto', csrfToken = '' }) {
   /* Сплошной цвет по тому же градиенту (для одиночных элементов — donut, иконки и т.п.).
      0-70% → зелёный → жёлтый; 70-100% → жёлтый → красный. */
@@ -1133,3 +1138,60 @@ export function renderAdminSmtp({ user, stats, indexStatus, smtp = {}, flash = '
   return pageShell({ title: t('admin.smtp.title'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('admin.smtp.title') }], mode: 'admin', currentPath: '/admin/smtp', csrfToken });
 }
 
+export function renderAdminTelegram({ user, stats, indexStatus, tg = {}, botRunning = false, flash = '', csrfToken = '' }) {
+  const statusColor = botRunning ? 'var(--green,#3fb95e)' : 'var(--muted,#888)';
+  const statusLabel = botRunning ? escapeHtml(t('admin.telegram.statusRunning')) : escapeHtml(t('admin.telegram.statusStopped'));
+  const tokenSaved = Boolean(tg.token);
+  const profileDescription = tg.profileDescription || TELEGRAM_DEFAULT_PROFILE_DESCRIPTION;
+  const profileShortDescription = tg.profileShortDescription || TELEGRAM_DEFAULT_PROFILE_SHORT;
+  const welcomeMessage = tg.welcomeMessage || TELEGRAM_DEFAULT_WELCOME;
+  const content = `
+    ${flash ? renderAlert('success', flash) : ''}
+    <div class="admin-card">
+      <div class="admin-card-title">${escapeHtml(t('admin.telegram.cardTitle'))}</div>
+      <div class="admin-card-subtitle">${escapeHtml(t('admin.telegram.cardSubtitle'))}</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:18px;">
+        <span style="width:10px;height:10px;border-radius:50%;background:${statusColor};display:inline-block;flex-shrink:0;"></span>
+        <span class="muted" style="font-size:13px;">${statusLabel}</span>
+      </div>
+      <form method="POST" action="/admin/telegram" data-track-dirty>
+        ${csrfHiddenField(csrfToken)}
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.token'))}</label>
+          <input type="password" name="token" value="" placeholder="${tokenSaved ? escapeHtml(t('admin.telegram.tokenSavedPlaceholder')) : '123456789:AAxxxxxx...'}" autocomplete="new-password">
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.tokenHint'))} <a href="https://t.me/BotFather" target="_blank" rel="noopener" style="color:var(--accent);">@BotFather</a>${tokenSaved ? ` · ${escapeHtml(t('admin.telegram.tokenSavedHint'))}` : ''}</span>
+        </div>
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.allowedUsers'))}</label>
+          <input type="text" name="allowedUsers" value="${escapeHtml(tg.allowedUsers || '')}" placeholder="123456789, 987654321">
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.allowedUsersHint'))}</span>
+        </div>
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.profileDescription'))}</label>
+          <textarea name="profileDescription" rows="6">${escapeHtml(profileDescription)}</textarea>
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.profileDescriptionHint'))}</span>
+        </div>
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.profileShortDescription'))}</label>
+          <input type="text" name="profileShortDescription" value="${escapeHtml(profileShortDescription)}" maxlength="120">
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.profileShortDescriptionHint'))}</span>
+        </div>
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.welcomeMessage'))}</label>
+          <textarea name="welcomeMessage" rows="8">${escapeHtml(welcomeMessage)}</textarea>
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.welcomeMessageHint'))}</span>
+        </div>
+        <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;margin-top:4px;">
+          <label class="admin-checkbox-label" style="text-transform:none;letter-spacing:0;">
+            <input type="checkbox" name="enabled" value="1" ${tg.enabled !== false ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px;">
+            ${escapeHtml(t('admin.telegram.enabled'))}
+          </label>
+        </div>
+        <div class="admin-actions-row" style="margin-top:6px;">
+          <button type="submit">${escapeHtml(t('admin.save'))}</button>
+          <button type="submit" name="test" value="1">${escapeHtml(t('admin.telegram.test'))}</button>
+        </div>
+      </form>
+    </div>`;
+  return pageShell({ title: t('admin.telegram.title'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('admin.telegram.title') }], mode: 'admin', currentPath: '/admin/telegram', csrfToken });
+}

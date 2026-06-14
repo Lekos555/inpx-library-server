@@ -44,6 +44,13 @@ if (numWorkers > 1 && cluster.isPrimary) {
     cluster.fork();
   }
 
+  cluster.on('message', (worker, msg) => {
+    if (msg?.type === 'telegram-update-forward' && msg.update) {
+      const w1 = Object.values(cluster.workers || {}).find((w) => w.id === 1);
+      w1?.send({ type: 'telegram-update', update: msg.update });
+    }
+  });
+
   const RESTART_WINDOW_MS = 60_000;
   const MAX_RESTARTS_IN_WINDOW = 5;
   let _recentRestarts = [];

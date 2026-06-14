@@ -22,7 +22,7 @@ import {
 import {
   setSetting, getSetting, encryptValue, decryptValue, getSources, getSourceById,
   addSource, updateSource, deleteSourceProgressive, forceDetachSourceRowUnsafe,
-  getSmtpSettings, setSmtpSettings, hasAdminUser, listUsers, countAdminUsers,
+  getSmtpSettings, setSmtpSettings, getTelegramSettings, setTelegramSettings, resolveTelegramTokenForAdmin, hasAdminUser, listUsers, countAdminUsers,
   getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser,
   db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView, refreshCatalogBookCounts,
   getSuppressedBooks, unsuppressBook, unsuppressAll, getScheduleLog
@@ -80,9 +80,11 @@ export function registerAdminRoutes(app, deps) {
     gracefulExit,
     setAllowAnonymousDownload,
     setSiteName,
+    restartTelegramBot,
+    isTelegramBotRunning,
     templates: {
       renderOperations, renderAdminUsers, renderAdminUpdate, renderAdminSmtp,
-      renderAdminEvents, renderAdminSources, renderAdminDuplicates, renderAdminContent
+      renderAdminTelegram, renderAdminEvents, renderAdminSources, renderAdminDuplicates, renderAdminContent
     }
   } = deps;
 
@@ -564,6 +566,54 @@ export function registerAdminRoutes(app, deps) {
     }
     setSmtpSettings(settings);
     res.redirect('/admin/smtp?flash=' + encodeURIComponent(t('admin.smtp.flashSaved')));
+  });
+
+  app.get('/admin/telegram', requireAdminWeb, (req, res) => {
+    res.send(renderAdminTelegram({
+      user: req.user, stats: getCachedStats(), indexStatus: getIndexStatus(),
+      tg: getTelegramSettings(), botRunning: isTelegramBotRunning(),
+      flash: String(req.query.flash || ''), csrfToken: req.csrfToken || ''
+    }));
+  });
+
+  app.post('/admin/telegram', requireAdminWeb, async (req, res) => {
+    const rawToken = String(req.body.token ?? '').trim();
+    const allowedUsers = String(req.body.allowedUsers ?? '').trim();
+    const welcomeMessage = String(req.body.welcomeMessage ?? '').trim().slice(0, 4096);
+    const profileDescription = String(req.body.profileDescription ?? '').trim().slice(0, 512);
+    const profileShortDescription = String(req.body.profileShortDescription ?? '').trim().slice(0, 120);
+    const enabled = req.body.enabled === '1';
+    const isTest = req.body.test === '1';
+
+    const token = resolveTelegramTokenForAdmin(rawToken);
+
+    if (isTest) {
+      if (!token) {
+        return res.redirect('/admin/telegram?flash=' + encodeURIComponent(t('admin.telegram.flashNoToken')));
+      }
+      try {
+        const resp = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+        const data = await resp.json();
+        if (!data.ok) throw new Error(data.description || 'Telegram API error');
+        const username = data.result?.username ?? '?';
+        return res.redirect('/admin/telegram?flash=' + encodeURIComponent(tp('admin.telegram.flashTestOk', { username })));
+      } catch (err) {
+        return res.redirect('/admin/telegram?flash=' + encodeURIComponent(tp('admin.telegram.flashTestErr', { message: err.message })));
+      }
+    }
+
+    setTelegramSettings({
+      ...(rawToken ? { token: rawToken } : {}),
+      allowedUsers,
+      welcomeMessage,
+      profileDescription,
+      profileShortDescription,
+      enabled,
+    });
+    restartTelegramBot().catch((err) => {
+      logSystemEvent('warn', 'telegram-bot', 'ошибка перезапуска из админки', { error: err.message });
+    });
+    res.redirect('/admin/telegram?flash=' + encodeURIComponent(t('admin.telegram.flashSaved')));
   });
 
   app.get('/admin/events', requireAdminWeb, (req, res) => {

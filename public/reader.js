@@ -100,12 +100,15 @@ import {
   async function acquireReaderWakeLock() {
     if (!('wakeLock' in navigator)) return;
     if (wakeLock) return;
+    /* Во время TTS экран можно погасить — удерживаем сессию через audio keepalive. */
+    if (ttsChainActive && !ttsPausedByUser) return;
     try {
       wakeLock = await navigator.wakeLock.request('screen');
       wakeLock.addEventListener('release', () => {
         wakeLock = null;
-        /* После снятия ОС (звонок, смена фокуса) пробуем снова, пока вкладка на виду. */
-        if (document.visibilityState === 'visible') void acquireReaderWakeLock();
+        if (document.visibilityState === 'visible' && !(ttsChainActive && !ttsPausedByUser)) {
+          void acquireReaderWakeLock();
+        }
       });
     } catch {
       /* Нет активного жеста пользователя, запрет ОС или API недоступен */
@@ -117,15 +120,63 @@ import {
     } catch { /* */ }
     wakeLock = null;
   }
+  function clearTtsBackgroundMaintain() {
+    if (ttsBgMaintainTimer != null) {
+      clearInterval(ttsBgMaintainTimer);
+      ttsBgMaintainTimer = null;
+    }
+  }
+
+  function maintainTtsInBackground() {
+    clearTtsBackgroundMaintain();
+    if (!ttsChainActive || ttsPausedByUser) return;
+    const tick = () => {
+      if (!ttsChainActive || ttsPausedByUser) {
+        clearTtsBackgroundMaintain();
+        return;
+      }
+      if (document.visibilityState === 'visible') {
+        clearTtsBackgroundMaintain();
+        return;
+      }
+      void startTtsKeepalivePlayback();
+      syncTtsMediaSessionPlayback();
+      try {
+        if (speechSynthesis.paused) speechSynthesis.resume();
+      } catch { /* */ }
+      const idle = Date.now() - lastTtsSpeechAt;
+      if (idle > 2800 && !speechSynthesis.speaking && !speechSynthesis.pending) {
+        try { ttsKickSpeak?.(); } catch (e) { console.warn('[reader TTS bg]', e); }
+        lastTtsSpeechAt = Date.now();
+      }
+    };
+    tick();
+    ttsBgMaintainTimer = setInterval(tick, 1500);
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
-      void acquireReaderWakeLock();
-      if (ttsChainActive && !ttsPausedByUser) void startTtsKeepalivePlayback();
+      clearTtsBackgroundMaintain();
+      if (!(ttsChainActive && !ttsPausedByUser)) void acquireReaderWakeLock();
+      if (ttsChainActive && !ttsPausedByUser) {
+        void startTtsKeepalivePlayback();
+        try { speechSynthesis.resume(); } catch { /* */ }
+      }
+    } else if (ttsChainActive && !ttsPausedByUser) {
+      releaseReaderWakeLock();
+      maintainTtsInBackground();
     } else {
       releaseReaderWakeLock();
     }
   });
-  window.addEventListener('pagehide', releaseReaderWakeLock);
+  window.addEventListener('pagehide', () => {
+    if (ttsChainActive && !ttsPausedByUser) {
+      void startTtsKeepalivePlayback();
+      maintainTtsInBackground();
+    } else {
+      releaseReaderWakeLock();
+    }
+  });
   window.addEventListener('pageshow', (e) => {
     if (e.persisted) void acquireReaderWakeLock();
   });
@@ -133,6 +184,7 @@ import {
   document.body.addEventListener(
     'touchstart',
     () => {
+      if (ttsChainActive && !ttsPausedByUser) return;
       void acquireReaderWakeLock();
     },
     { capture: true, passive: true }
@@ -156,6 +208,9 @@ import {
   let ttsKeepaliveUrl = null;
   let ttsKeepaliveEl = null;
   let ttsMediaSessionHandlers = false;
+  let ttsBgMaintainTimer = null;
+  let ttsKickSpeak = null;
+  let lastTtsSpeechAt = 0;
   let tocData = [];
   let bookmarksData = [];
   let annotationsData = [];
@@ -212,9 +267,11 @@ import {
     if (!ttsKeepaliveUrl) ttsKeepaliveUrl = createSilentWavKeepaliveUrl();
     const a = document.createElement('audio');
     a.setAttribute('playsinline', '');
+    a.setAttribute('webkit-playsinline', 'true');
+    a.playsInline = true;
     a.setAttribute('aria-hidden', 'true');
     a.loop = true;
-    a.volume = 0.03;
+    a.volume = 0.04;
     a.src = ttsKeepaliveUrl;
     a.preload = 'auto';
     document.body.appendChild(a);
@@ -299,7 +356,7 @@ import {
   let bookPageLayoutKeyCached = '';
 
   function bookPageLayoutKey() {
-    return [S.font, S.fontSize, S.lineHeight, S.maxWidth, S.layout, innerWidth, innerHeight].join('|');
+    return [S.font, S.fontSize, S.lineHeight, S.maxWidth, S.pageMargin, S.columnGap, layoutMode(), innerWidth, innerHeight].join('|');
   }
 
   function invalidateBookPageCache() {
@@ -317,19 +374,143 @@ import {
 
   /* ===== Settings ===== */
   const defaults = {
-    theme: 'sepia', font: 'serif', fontSize: 18, lineHeight: 1.6, maxWidth: 99999, layout: 'dual', textColor: '', bgColor: '',
+    theme: 'sepia', font: 'serif', fontSize: 18, lineHeight: 1.6,
+    pageMargin: 32, columnGap: 7, maxWidth: 99999, layout: 'paginated', textColor: '', bgColor: '',
     ttsRate: 1, ttsVoice: ''
   };
-  const fontMap = {
-    serif: 'Georgia, "Times New Roman", serif',
-    palatino: '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif',
-    times: '"Times New Roman", Times, "Liberation Serif", "Noto Serif", serif',
-    charter: 'Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif',
-    sans: '-apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif',
-    verdana: 'Verdana, Geneva, "DejaVu Sans", sans-serif',
-    arial: 'Arial, Helvetica, "Helvetica Neue", sans-serif',
-    mono: '"Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace',
+  const SYSTEM_FONTS = {
+    serif: { label: 'Georgia', stack: 'Georgia, "Times New Roman", serif' },
+    palatino: { label: 'Palatino', stack: '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif' },
+    times: { label: 'Times New Roman', stack: '"Times New Roman", Times, "Liberation Serif", "Noto Serif", serif' },
+    charter: { label: 'Charter', stack: 'Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif' },
+    sans: { label: 'System UI', stack: '-apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif' },
+    verdana: { label: 'Verdana', stack: 'Verdana, Geneva, "DejaVu Sans", sans-serif' },
+    arial: { label: 'Arial', stack: 'Arial, Helvetica, "Helvetica Neue", sans-serif' },
+    mono: { label: 'Monospace', stack: '"Cascadia Code", "Fira Code", Consolas, "Liberation Mono", monospace' },
   };
+  const GOOGLE_FONTS = {
+    'gf-pt-serif': { label: 'PT Serif', family: 'PT Serif', weights: '400;700', stack: '"PT Serif", Georgia, serif' },
+    'gf-pt-sans': { label: 'PT Sans', family: 'PT Sans', weights: '400;700', stack: '"PT Sans", system-ui, sans-serif' },
+    'gf-literata': { label: 'Literata', family: 'Literata', weights: '400;700', stack: '"Literata", Georgia, serif' },
+    'gf-merriweather': { label: 'Merriweather', family: 'Merriweather', weights: '400;700', stack: '"Merriweather", Georgia, serif' },
+    'gf-noto-serif': { label: 'Noto Serif', family: 'Noto Serif', weights: '400;700', stack: '"Noto Serif", Georgia, serif' },
+    'gf-eb-garamond': { label: 'EB Garamond', family: 'EB Garamond', weights: '400;700', stack: '"EB Garamond", Georgia, serif' },
+    'gf-spectral': { label: 'Spectral', family: 'Spectral', weights: '400;700', stack: '"Spectral", Georgia, serif' },
+    'gf-ibm-plex-serif': { label: 'IBM Plex Serif', family: 'IBM Plex Serif', weights: '400;700', stack: '"IBM Plex Serif", Georgia, serif' },
+    'gf-roboto': { label: 'Roboto', family: 'Roboto', weights: '400;700', stack: '"Roboto", system-ui, sans-serif' },
+    'gf-fira-sans': { label: 'Fira Sans', family: 'Fira Sans', weights: '400;700', stack: '"Fira Sans", system-ui, sans-serif' },
+    'gf-ibm-plex-sans': { label: 'IBM Plex Sans', family: 'IBM Plex Sans', weights: '400;700', stack: '"IBM Plex Sans", system-ui, sans-serif' },
+    'gf-commissioner': { label: 'Commissioner', family: 'Commissioner', weights: '400;700', stack: '"Commissioner", system-ui, sans-serif' },
+  };
+  const fontMap = Object.fromEntries([
+    ...Object.entries(SYSTEM_FONTS).map(([k, v]) => [k, v.stack]),
+    ...Object.entries(GOOGLE_FONTS).map(([k, v]) => [k, v.stack]),
+  ]);
+  const loadedGoogleFonts = new Set();
+  function googleFontCssUrl(def) {
+    const family = def.family.trim().replace(/\s+/g, '+');
+    return `https://fonts.googleapis.com/css2?family=${family}:wght@${def.weights || '400;700'}&display=swap`;
+  }
+  function ensureGoogleFont(key) {
+    const def = GOOGLE_FONTS[key];
+    if (!def || loadedGoogleFonts.has(key)) return;
+    loadedGoogleFonts.add(key);
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = googleFontCssUrl(def);
+    document.head.appendChild(link);
+  }
+  function ensureGoogleFontInDoc(doc, key) {
+    const def = GOOGLE_FONTS[key];
+    if (!def || !doc?.head) return Promise.resolve();
+    const id = `reader-gf-${key}`;
+    const existing = doc.getElementById(id);
+    if (existing) {
+      return existing.dataset.loaded === '1'
+        ? (doc.fonts?.ready ?? Promise.resolve())
+        : new Promise(resolve => {
+          existing.addEventListener('load', () => resolve(doc.fonts?.ready), { once: true });
+          existing.addEventListener('error', () => resolve(), { once: true });
+        });
+    }
+    return new Promise(resolve => {
+      const link = doc.createElement('link');
+      link.id = id;
+      link.rel = 'stylesheet';
+      link.href = googleFontCssUrl(def);
+      link.addEventListener('load', () => {
+        link.dataset.loaded = '1';
+        resolve(doc.fonts?.ready);
+      }, { once: true });
+      link.addEventListener('error', () => resolve(), { once: true });
+      doc.head.appendChild(link);
+    });
+  }
+  function syncReaderGoogleFont(doc) {
+    const key = S.font;
+    if (!GOOGLE_FONTS[key]) return Promise.resolve();
+    ensureGoogleFont(key);
+    const bookDoc = doc || view?.renderer?.getContents?.()?.[0]?.doc;
+    if (!bookDoc) return Promise.resolve();
+    return ensureGoogleFontInDoc(bookDoc, key);
+  }
+  function populateFontSelect() {
+    const sel = $('rs-font-family');
+    if (!sel) return;
+    const cur = S.font;
+    sel.replaceChildren();
+    const addGroup = (label, entries) => {
+      const og = document.createElement('optgroup');
+      og.label = label;
+      for (const [key, def] of entries) {
+        const o = document.createElement('option');
+        o.value = key;
+        o.textContent = def.label;
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+    };
+    addGroup(rt('reader.fontSystem'), Object.entries(SYSTEM_FONTS));
+    addGroup(rt('reader.fontGoogle'), Object.entries(GOOGLE_FONTS));
+    if (!(cur in fontMap)) S.font = defaults.font;
+    sel.value = S.font;
+  }
+  function readerSideMarginPx() {
+    return Math.max(0, Math.min(80, Number(S.pageMargin) || 0));
+  }
+  function readerViewportWidth() {
+    return readerBody?.clientWidth ?? innerWidth;
+  }
+  function readerContentWidth() {
+    return Math.max(320, readerViewportWidth() - 2 * readerSideMarginPx());
+  }
+  function resolveMaxInlineSizePx() {
+    const w = readerContentWidth();
+    if (layoutMode() === 'dual') return Math.floor(w / 2);
+    if (Number(S.maxWidth) >= 9000) return w;
+    return Math.max(320, Math.min(Number(S.maxWidth) || 720, w));
+  }
+  function layoutMode() {
+    if (mobileMq.matches && innerWidth <= 640 && S.layout === 'dual') return 'paginated';
+    return S.layout;
+  }
+
+  function applyRendererLayout() {
+    if (!view?.renderer) return;
+    invalidateBookPageCache();
+    const side = readerSideMarginPx();
+    const gap = Math.max(0, Math.min(20, Number(S.columnGap) || 0));
+    const mode = layoutMode();
+    view.style.boxSizing = 'border-box';
+    view.style.paddingInline = side ? `${side}px` : '';
+    view.renderer.setAttribute('margin', '0px');
+    view.renderer.setAttribute('gap', `${gap}%`);
+    view.renderer.setAttribute('max-inline-size', `${resolveMaxInlineSizePx()}px`);
+    view.renderer.setAttribute('max-column-count', mode === 'dual' ? '2' : '1');
+  }
+  function isFullWidth() {
+    return Number(S.maxWidth) >= 9000;
+  }
   let S = {};
   function loadSettings() {
     try { S = JSON.parse(localStorage.getItem('reader-settings') || '{}'); } catch { S = {}; }
@@ -338,6 +519,12 @@ import {
     if (S.textColor && !/^#[0-9A-Fa-f]{6}$/.test(String(S.textColor).trim())) S.textColor = '';
     if (S.bgColor && !/^#[0-9A-Fa-f]{6}$/.test(String(S.bgColor).trim())) S.bgColor = '';
     if (!(S.font in fontMap)) S.font = defaults.font;
+    const pm = Number(S.pageMargin);
+    S.pageMargin = Number.isFinite(pm) ? Math.min(80, Math.max(0, Math.round(pm))) : defaults.pageMargin;
+    const cg = Number(S.columnGap);
+    S.columnGap = Number.isFinite(cg) ? Math.min(20, Math.max(0, Math.round(cg))) : defaults.columnGap;
+    const mw = Number(S.maxWidth);
+    S.maxWidth = Number.isFinite(mw) ? mw : defaults.maxWidth;
     const tr = Number(S.ttsRate);
     S.ttsRate = Number.isFinite(tr) ? Math.min(2, Math.max(0.5, tr)) : defaults.ttsRate;
     if (typeof S.ttsVoice !== 'string') S.ttsVoice = defaults.ttsVoice;
@@ -351,9 +538,9 @@ import {
     night: { bg: '#0d0d0d', fg: '#888',    link: '#5a8ab8' },
   };
   const presets = {
-    compact:  { fontSize: 16, lineHeight: 1.45, maxWidth: 99999 },
-    balanced: { fontSize: 18, lineHeight: 1.6,  maxWidth: 99999 },
-    relaxed:  { fontSize: 21, lineHeight: 1.8,  maxWidth: 99999 },
+    compact:  { fontSize: 16, lineHeight: 1.45, pageMargin: 20, maxWidth: 680 },
+    balanced: { fontSize: 18, lineHeight: 1.6,  pageMargin: 32, maxWidth: 720 },
+    relaxed:  { fontSize: 21, lineHeight: 1.8,  pageMargin: 48, maxWidth: 800 },
   };
 
   function getEffectiveTextColor() {
@@ -375,10 +562,15 @@ import {
     const fg = getEffectiveTextColor();
     const bg = getEffectiveBgColor();
     const ff = fontMap[S.font] || fontMap.serif;
-    return `
+    const mono = fontMap.mono;
+    const text = `
       @namespace epub "http://www.idpf.org/2007/ops";
       html { color: ${fg} !important; background: ${bg} !important; }
-      body { color: ${fg} !important; background: ${bg} !important; font-family: ${ff} !important; font-size: ${S.fontSize}px !important; }
+      body, p, div, span, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, dd, dt, em, strong, i, b, u, a, section, article {
+        font-family: ${ff} !important;
+      }
+      body { color: ${fg} !important; background: ${bg} !important; font-size: ${S.fontSize}px !important; }
+      pre, code, kbd, samp { font-family: ${mono} !important; }
       p,li,blockquote,dd,div { line-height: ${S.lineHeight} !important; }
       p,li,blockquote,dd { text-align: justify; hyphens: auto; -webkit-hyphens: auto; -webkit-hyphenate-limit-before: 3; -webkit-hyphenate-limit-after: 2; -webkit-hyphenate-limit-lines: 2; hanging-punctuation: allow-end last; widows: 2; }
       [align="left"]{text-align:left} [align="right"]{text-align:right} [align="center"]{text-align:center} [align="justify"]{text-align:justify}
@@ -386,6 +578,13 @@ import {
       aside[epub|type~="endnote"],aside[epub|type~="footnote"],aside[epub|type~="note"],aside[epub|type~="rearnote"] { display: none; }
       a { color: ${c.link}; }
     `;
+    const gf = GOOGLE_FONTS[S.font];
+    if (gf) return [`@import url("${googleFontCssUrl(gf)}");`, text];
+    return text;
+  }
+  function applyBookStyles() {
+    if (!view?.renderer) return;
+    view.renderer.setStyles?.(getBookCSS());
   }
 
   function isNightReaderTheme() {
@@ -533,10 +732,10 @@ import {
     if (readerBody) readerBody.style.background = bg;
     saveSettings();
     if (view?.renderer) {
-      view.renderer.setStyles?.(getBookCSS());
       view.renderer.setAttribute('flow', S.layout === 'scrolled' ? 'scrolled' : 'paginated');
-      view.renderer.setAttribute('max-inline-size', S.layout === 'dual' ? Math.floor(innerWidth / 2) + 'px' : S.maxWidth + 'px');
-      view.renderer.setAttribute('max-column-count', S.layout === 'dual' ? '2' : '1');
+      applyRendererLayout();
+      applyBookStyles();
+      syncReaderGoogleFont().then(() => applyBookStyles());
     }
     updateDayNightButton();
     if (view?.lastLocation) updateBookPageDisplay(view.lastLocation);
@@ -563,7 +762,8 @@ import {
   function api(method, path, body) {
     const opts = { method, credentials: 'same-origin', headers: {} };
     if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-    return fetch('/api/books/' + encodeURIComponent(bookId) + path, opts).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    const base = globalThis.apiBookPath ? globalThis.apiBookPath(bookId) : `/api/books/${encodeURIComponent(bookId)}`;
+    return fetch(base + path, opts).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
   function esc(s) { const d = document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML; }
   let toastTimer = null;
@@ -577,27 +777,55 @@ import {
    * scheduleChromeHide — продлевает автоскрытие, если chrome уже виден (и панель закрыта). */
   const CHROME_AUTOHIDE_MS = () => (isTouch.matches ? 14000 : 9000);
 
+  const mobileMq = window.matchMedia('(max-width: 640px)');
+
+  function syncPanelMobileMode(tab = activePanelTab) {
+    if (!panelOverlay) return;
+    panelOverlay.classList.toggle('panel-mobile', mobileMq.matches);
+    panelOverlay.classList.toggle('panel-settings-mode', mobileMq.matches && tab === 'settings');
+  }
+
+  function touchToPageY(clientY, doc_) {
+    const iframe = doc_?.defaultView?.frameElement;
+    if (!iframe) return clientY;
+    return iframe.getBoundingClientRect().top + clientY;
+  }
+
+  function panelBlocksBookTap(pageY) {
+    if (!panelOverlay.classList.contains('is-open')) return false;
+    if (!mobileMq.matches) return false;
+    const panel = panelOverlay.querySelector('.panel');
+    if (!panel) return false;
+    return pageY >= panel.getBoundingClientRect().top - 8;
+  }
+
+  function syncPanelChrome(tab = activePanelTab) {
+    if (!panelOverlay.classList.contains('is-open')) return;
+    if (mobileMq.matches) {
+      setChromeVisible(false);
+      return;
+    }
+    setChromeVisible(true);
+  }
+
   function setChromeVisible(show) {
     chromeVisible = show;
-    document.body.classList.toggle('chrome-hidden', !(show || panelOverlay.classList.contains('is-open')));
+    const panelOpen = panelOverlay.classList.contains('is-open');
+    const settingsPreview = panelOpen && panelOverlay.classList.contains('panel-settings-mode');
+    const hideChrome = !(show || (panelOpen && !settingsPreview));
+    document.body.classList.toggle('chrome-hidden', hideChrome);
   }
   /** Сбросить таймер скрытия, не показывая панели силой (если уже скрыты — ничего не делаем). */
   function scheduleChromeHide() {
     clearTimeout(chromeTimer);
-    if (panelOverlay.classList.contains('is-open')) {
-      setChromeVisible(true);
-      return;
-    }
+    if (panelOverlay.classList.contains('is-open')) return;
     if (!chromeVisible) return;
     chromeTimer = setTimeout(() => setChromeVisible(false), CHROME_AUTOHIDE_MS());
   }
   /** Тап по центру поля: скрыто → показать и снова автоскрытие; уже видно → скрыть. */
   function toggleChromeFromCenterTap() {
     clearTimeout(chromeTimer);
-    if (panelOverlay.classList.contains('is-open')) {
-      setChromeVisible(true);
-      return;
-    }
+    if (panelOverlay.classList.contains('is-open')) return;
     if (document.body.classList.contains('chrome-hidden')) {
       setChromeVisible(true);
       chromeTimer = setTimeout(() => setChromeVisible(false), CHROME_AUTOHIDE_MS());
@@ -829,10 +1057,15 @@ import {
     m.setAttribute('aria-hidden', 'false');
     const mw = m.offsetWidth || 240;
     const mh = m.offsetHeight || 44;
+    const host = readerBody?.getBoundingClientRect?.();
+    const minX = (host?.left ?? 0) + 8;
+    const maxX = (host?.right ?? innerWidth) - mw - 8;
+    const minY = (host?.top ?? 0) + 8;
+    const maxY = (host?.bottom ?? innerHeight) - mh - 8;
     let left = pageRect.cx - mw / 2;
-    left = Math.max(8, Math.min(innerWidth - mw - 8, left));
+    left = Math.max(minX, Math.min(maxX, left));
     let top = pageRect.top - mh - 10;
-    if (top < 8) top = Math.min(innerHeight - mh - 8, pageRect.bottom + 10);
+    if (top < minY) top = Math.min(maxY, pageRect.bottom + 10);
     m.style.left = left + 'px';
     m.style.top = top + 'px';
   }
@@ -1072,11 +1305,14 @@ import {
     hideSelMenu();
     if (panelOverlay.classList.contains('is-open') && activePanelTab === t) { closePanel(); return; }
     const wasOpen = panelOverlay.classList.contains('is-open');
-    panelOverlay.classList.add('is-open'); setChromeVisible(true); switchTab(t); refreshTriggers();
+    panelOverlay.classList.add('is-open');
+    switchTab(t);
+    syncPanelChrome(t);
+    refreshTriggers();
     if (!wasOpen && !panelHistoryPushed) { history.pushState({ readerPanel: true }, ''); panelHistoryPushed = true; }
   }
   function closePanelDirect() {
-    panelOverlay.classList.remove('is-open');
+    panelOverlay.classList.remove('is-open', 'panel-mobile', 'panel-settings-mode');
     refreshTriggers();
     clearTimeout(chromeTimer);
     setChromeVisible(false);
@@ -1089,12 +1325,14 @@ import {
   }
   function switchTab(tab) {
     activePanelTab = tab;
+    syncPanelMobileMode(tab);
     panelTabs.forEach(t => t.classList.toggle('is-active', t.dataset.tab === tab));
-    panelBodies.forEach(b => { const on = b.dataset.panelTab === tab; b.style.visibility = on ? '' : 'hidden'; b.style.position = on ? '' : 'absolute'; b.style.pointerEvents = on ? '' : 'none'; });
+    panelBodies.forEach(b => { b.hidden = b.dataset.panelTab !== tab; });
     const pm = getPanelMeta(tab);
     if (panelKickerEl) panelKickerEl.textContent = pm.kicker;
     if (panelTitleEl) panelTitleEl.textContent = pm.title;
     refreshTriggers();
+    syncPanelChrome(tab);
     if (tab === 'settings') {
       void ensureTtsVoices().then(() => {
         try {
@@ -1110,9 +1348,17 @@ import {
       if (inp) setTimeout(() => { try { inp.focus(); } catch { /* */ } }, 60);
     }
   }
-  panelOverlay.addEventListener('click', e => { if (e.target === panelOverlay) closePanel(); });
+  panelOverlay.addEventListener('click', e => {
+    if (!mobileMq.matches && e.target === panelOverlay) closePanel();
+  });
+  $('panel-backdrop')?.addEventListener('click', closePanel);
   $('panel-close')?.addEventListener('click', closePanel);
   panelTabs.forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+  mobileMq.addEventListener('change', () => {
+    if (!panelOverlay.classList.contains('is-open')) return;
+    syncPanelMobileMode();
+    syncPanelChrome();
+  });
 
   /* Back gesture / back button closes panel instead of leaving */
   window.addEventListener('popstate', () => {
@@ -1123,6 +1369,83 @@ import {
   });
 
   /* ===== Settings controls ===== */
+  function setRangeFromClientX(slider, clientX) {
+    const rect = slider.getBoundingClientRect();
+    if (!rect.width) return;
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const min = Number(slider.min);
+    const max = Number(slider.max);
+    const step = Number(slider.step) || 1;
+    let val = min + pct * (max - min);
+    val = min + Math.round((val - min) / step) * step;
+    val = Math.max(min, Math.min(max, val));
+    const stepText = String(step);
+    const decimals = stepText.includes('.') ? (stepText.split('.')[1]?.length || 0) : 0;
+    const str = decimals ? val.toFixed(decimals) : String(Math.round(val));
+    if (slider.value !== str) {
+      slider.value = str;
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  /** На таче: вертикальный свайп — прокрутка панели, не сброс ползунка. */
+  function guardRangeSliderTouchScroll(slider) {
+    if (!isTouch.matches) return;
+    let startX = 0;
+    let startY = 0;
+    let startVal = '';
+    let mode = 'idle'; // idle | pending | scroll | slide
+
+    slider.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      startVal = slider.value;
+      mode = 'pending';
+    }, { passive: true });
+
+    slider.addEventListener('input', () => {
+      if (mode === 'pending' || mode === 'scroll') slider.value = startVal;
+    });
+
+    slider.addEventListener('touchmove', (e) => {
+      if (mode !== 'pending' && mode !== 'slide') return;
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const adx = Math.abs(t.clientX - startX);
+      const ady = Math.abs(t.clientY - startY);
+      if (mode === 'pending') {
+        if (ady > 10 && ady > adx * 1.15) {
+          mode = 'scroll';
+          slider.value = startVal;
+          slider.style.pointerEvents = 'none';
+          return;
+        }
+        if (adx > 8 && adx >= ady) mode = 'slide';
+        else return;
+      }
+      if (mode === 'slide') setRangeFromClientX(slider, t.clientX);
+    }, { passive: true });
+
+    const end = (e) => {
+      if (mode === 'pending' && e.changedTouches?.[0]) {
+        const t = e.changedTouches[0];
+        if (Math.hypot(t.clientX - startX, t.clientY - startY) < 14) {
+          setRangeFromClientX(slider, t.clientX);
+        } else {
+          slider.value = startVal;
+        }
+      } else if (mode === 'scroll') {
+        slider.value = startVal;
+      }
+      mode = 'idle';
+      slider.style.pointerEvents = '';
+    };
+    slider.addEventListener('touchend', end, { passive: true });
+    slider.addEventListener('touchcancel', end, { passive: true });
+  }
+
   function bindSeg(sel, prop) {
     document.querySelectorAll(sel).forEach(btn => btn.addEventListener('click', () => {
       S[prop] = btn.dataset['set' + prop[0].toUpperCase() + prop.slice(1)];
@@ -1132,6 +1455,7 @@ import {
   function initSettings() {
     bindSeg('[data-set-theme]', 'theme');
     bindSeg('[data-set-layout]', 'layout');
+    populateFontSelect();
     const fontSel = $('rs-font-family');
     if (fontSel) {
       fontSel.addEventListener('change', () => {
@@ -1179,6 +1503,22 @@ import {
     };
     wire('rs-font-size', 'rs-font-size-val', 'fontSize');
     wire('rs-line-height', 'rs-line-height-val', 'lineHeight', v => Number(v).toFixed(1));
+    wire('rs-page-margin', 'rs-page-margin-val', 'pageMargin', v => `${Math.round(v)} px`);
+    wire('rs-column-gap', 'rs-column-gap-val', 'columnGap', v => `${Math.round(v)}%`);
+    wire('rs-column-width', 'rs-column-width-val', 'maxWidth', v => `${Math.round(v)} px`);
+
+    const fullWidthEl = $('rs-full-width');
+    if (fullWidthEl) {
+      fullWidthEl.addEventListener('change', () => {
+        if (fullWidthEl.checked) {
+          S.maxWidth = 99999;
+        } else if (isFullWidth()) {
+          S.maxWidth = 720;
+        }
+        applySettings();
+        refreshSettingsUI();
+      });
+    }
 
     const ttsRateEl = $('rs-tts-rate');
     const ttsRateVal = $('rs-tts-rate-val');
@@ -1205,22 +1545,43 @@ import {
         }
       });
     }
+
+    document.querySelectorAll('.panel-body input[type="range"]').forEach(guardRangeSliderTouchScroll);
   }
 
   function refreshSettingsUI() {
     const toggle = (sel, attr, val) => document.querySelectorAll(sel).forEach(b => b.classList.toggle('is-active', b.dataset[attr] === val));
     toggle('[data-set-theme]', 'setTheme', S.theme);
     toggle('[data-set-layout]', 'setLayout', S.layout);
+    populateFontSelect();
     const fs = $('rs-font-family');
     if (fs) {
       if (!(S.font in fontMap)) S.font = defaults.font;
       fs.value = S.font;
     }
-    const ap = getActivePreset();
-    document.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('is-active', b.dataset.preset === ap));
     const sync = (id, v) => { const el = $(id); if (el) el.value !== undefined ? el.value = v : el.textContent = v; };
     sync('rs-font-size', S.fontSize); sync('rs-font-size-val', S.fontSize);
     sync('rs-line-height', S.lineHeight); sync('rs-line-height-val', Number(S.lineHeight).toFixed(1));
+    sync('rs-page-margin', S.pageMargin);
+    sync('rs-page-margin-val', `${S.pageMargin} px`);
+    sync('rs-column-gap', S.columnGap);
+    sync('rs-column-gap-val', `${S.columnGap}%`);
+    const cwSlider = $('rs-column-width');
+    const cwVal = $('rs-column-width-val');
+    const fullW = isFullWidth();
+    if (cwSlider) {
+      cwSlider.disabled = fullW;
+      cwSlider.value = fullW ? 720 : Math.min(920, Math.max(480, Number(S.maxWidth) || 720));
+    }
+    if (cwVal) cwVal.textContent = fullW ? rt('reader.fullWidth') : `${Math.round(S.maxWidth)} px`;
+    const fullWidthEl = $('rs-full-width');
+    if (fullWidthEl) fullWidthEl.checked = fullW;
+    const pagGroup = $('rs-layout-paginated');
+    const dualGroup = $('rs-layout-dual');
+    if (pagGroup) pagGroup.hidden = S.layout === 'dual';
+    if (dualGroup) dualGroup.hidden = S.layout !== 'dual';
+    const ap = getActivePreset();
+    document.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('is-active', b.dataset.preset === ap));
     const tcEl = $('rs-text-color');
     if (tcEl) {
       const c = themeColors[S.theme] || themeColors.dark;
@@ -1407,6 +1768,8 @@ import {
 
   function stopReaderTts() {
     ttsSpeakToken++;
+    clearTtsBackgroundMaintain();
+    ttsKickSpeak = null;
     ttsNav.skipBack = () => {};
     ttsNav.skipForward = () => {};
     if (ttsStopLongPressTimer != null) {
@@ -1484,6 +1847,8 @@ import {
     function finishTtsChain() {
       ttsChainActive = false;
       ttsPausedByUser = false;
+      ttsKickSpeak = null;
+      clearTtsBackgroundMaintain();
       ttsNav.skipBack = () => {};
       ttsNav.skipForward = () => {};
       updateTtsButtons();
@@ -1528,12 +1893,18 @@ import {
       u.lang = getReaderTtsLang();
       applyTtsUtteranceSettings(u);
       const token = ttsSpeakToken;
+      u.onstart = () => {
+        lastTtsSpeechAt = Date.now();
+        void startTtsKeepalivePlayback();
+      };
       u.onend = () => {
+        lastTtsSpeechAt = Date.now();
         if (!ttsChainActive || token !== ttsSpeakToken) return;
         idx++;
         speakStep();
       };
       u.onerror = () => {
+        lastTtsSpeechAt = Date.now();
         if (!ttsChainActive || token !== ttsSpeakToken) return;
         idx++;
         speakStep();
@@ -1586,6 +1957,7 @@ import {
       requestAnimationFrame(speakStep);
     };
 
+    ttsKickSpeak = speakStep;
     speakStep();
   }
 
@@ -1640,9 +2012,12 @@ import {
     initReaderMediaSessionHandlers();
     ttsChainActive = true;
     ttsPausedByUser = false;
+    lastTtsSpeechAt = Date.now();
+    releaseReaderWakeLock();
     setChromeVisible(true);
     updateTtsButtons();
     void startTtsKeepalivePlayback();
+    if (document.visibilityState === 'hidden') maintainTtsInBackground();
     runTtsUtteranceChain(firstSsml);
   }
 
@@ -1998,7 +2373,9 @@ import {
       shell.body.replaceChildren(fnView);
       try {
         fnView.renderer?.setAttribute?.('flow', 'scrolled');
-        fnView.renderer?.setStyles?.(getBookCSS());
+        syncReaderGoogleFont(fnView.renderer?.getContents?.()?.[0]?.doc).then(() => {
+          fnView.renderer?.setStyles?.(getBookCSS());
+        });
       } catch (err) {
         console.warn('[reader] footnote styles', err);
       }
@@ -2032,7 +2409,7 @@ import {
     let linkTapTouch = null;
     const isFlowPaginated = () => S.layout !== 'scrolled';
 
-    const TAP_EDGE = 0.28;
+    const TAP_EDGE = 0.22;
     /** Макс. сдвиг пальца для «тапа»; Foliate на touchmove листает при меньшем dx — см. touchmove cancel. */
     const TAP_SLOP_PX = 22;
     const TAP_MAX_MS = 700;
@@ -2130,9 +2507,9 @@ import {
       if (linkTapTouch) return;
       if (!isFlowPaginated()) return;
       if (isFootnoteOverlayOpen()) return;
-      if (panelOverlay.classList.contains('is-open')) return;
       if (!screenTapTrack || e.changedTouches.length !== 1) return;
       const t = e.changedTouches[0];
+      if (panelBlocksBookTap(touchToPageY(t.clientY, doc))) return;
       const dt = Date.now() - screenTapTrack.t;
       const adx = Math.abs(t.clientX - screenTapTrack.x);
       const ady = Math.abs(t.clientY - screenTapTrack.y);
@@ -2280,7 +2657,6 @@ import {
 
     const WHEEL_FLIP_PX = 28;
     doc.addEventListener('wheel', e => {
-      if (panelOverlay.classList.contains('is-open')) return;
       if (S.layout === 'scrolled') return;
       if (e.ctrlKey || e.metaKey) return;
       const dy = e.deltaY;
@@ -2310,7 +2686,7 @@ import {
     bookPagesEl?.classList.add('is-hidden');
     readerBody.innerHTML = '<div class="reader-error"><div class="reader-error-title">' + esc(rt('readerJs.errorTitle')) + '</div>' +
       '<div class="reader-error-text">' + esc(msg) + '</div>' +
-      '<a href="/book/' + encodeURIComponent(bookId) + '" class="tb-btn" style="margin-top:12px;">' + esc(rt('readerJs.back')) + '</a></div>';
+      '<a href="' + (globalThis.bookPagePath ? globalThis.bookPagePath(bookId) : `/book/${encodeURIComponent(bookId)}`) + '" class="tb-btn" style="margin-top:12px;">' + esc(rt('readerJs.back')) + '</a></div>';
   }
 
   /* ===== Reader ext classifier (kept in sync with server utils/book-format.js) ===== */
@@ -2334,7 +2710,7 @@ import {
    */
   function showUnsupportedBanner(kind) {
     bookPagesEl?.classList.add('is-hidden');
-    const downloadHref = '/download/' + encodeURIComponent(bookId);
+    const downloadHref = globalThis.downloadBookPath ? globalThis.downloadBookPath(bookId) : `/download/${encodeURIComponent(bookId)}`;
     const title = kind === 'djvu' ? rt('readerJs.djvuUnsupportedTitle') : rt('readerJs.unsupportedTitle');
     const text = kind === 'djvu' ? rt('readerJs.djvuUnsupportedText') : rt('readerJs.unsupportedText');
     readerBody.innerHTML =
@@ -2343,7 +2719,7 @@ import {
       '<div class="reader-error-text">' + esc(text) + '</div>' +
       '<div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">' +
       '<a href="' + downloadHref + '" class="tb-btn" download>' + esc(rt('readerJs.download')) + '</a>' +
-      '<a href="/book/' + encodeURIComponent(bookId) + '" class="tb-btn">' + esc(rt('readerJs.back')) + '</a>' +
+      '<a href="' + (globalThis.bookPagePath ? globalThis.bookPagePath(bookId) : `/book/${encodeURIComponent(bookId)}`) + '" class="tb-btn">' + esc(rt('readerJs.back')) + '</a>' +
       '</div></div>';
   }
 
@@ -2359,7 +2735,10 @@ import {
     // the browser's native PDF viewer render the file; for DJVU we surface a
     // clear download prompt (no browser has a native DJVU renderer).
     const kind = classifyExt(bookExt);
-    const url = '/api/books/' + encodeURIComponent(bookId) + '/content/book.' + bookExt.toLowerCase();
+    const contentSuffix = 'content/book.' + bookExt.toLowerCase();
+    const url = globalThis.apiBookPath
+      ? globalThis.apiBookPath(bookId, contentSuffix)
+      : `/api/books/${encodeURIComponent(bookId)}/${contentSuffix}`;
 
     if (kind === 'pdf') {
       readerBody.innerHTML = '<iframe class="reader-pdf-frame" src="' + url + '" title="PDF"></iframe>';
@@ -2382,14 +2761,15 @@ import {
     readerBody.replaceChildren(view);
     await view.open(file);
 
-    view.renderer.setStyles?.(getBookCSS());
     view.renderer.setAttribute('flow', S.layout === 'scrolled' ? 'scrolled' : 'paginated');
-    view.renderer.setAttribute('max-inline-size', S.layout === 'dual' ? Math.floor(innerWidth / 2) + 'px' : S.maxWidth + 'px');
-    view.renderer.setAttribute('max-column-count', S.layout === 'dual' ? '2' : '1');
+    applyRendererLayout();
+    await syncReaderGoogleFont();
+    applyBookStyles();
 
     view.addEventListener('load', ({ detail: { doc, index } }) => {
       if (!ttsAdvancingSection) stopReaderTts();
       if (doc && index != null) docIndexMap.set(doc, index);
+      syncReaderGoogleFont(doc).then(() => applyBookStyles());
       wireDoc(doc);
       wireSelection(doc);
     });
@@ -2429,17 +2809,16 @@ import {
 
   /* Две колонки: при ресайзе окна пересчитать ширину колонки (без лишнего saveSettings). */
   let resizeTimer = null;
-  window.addEventListener('resize', () => {
+  function onViewportResize() {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (!view?.renderer) return;
-      view.renderer.setAttribute(
-        'max-inline-size',
-        S.layout === 'dual' ? `${Math.floor(innerWidth / 2)}px` : `${S.maxWidth}px`
-      );
+      applyRendererLayout();
       if (view.lastLocation) updateBookPageDisplay(view.lastLocation);
     }, 120);
-  });
+  }
+  window.addEventListener('resize', onViewportResize);
+  window.visualViewport?.addEventListener('resize', onViewportResize);
 
   /* ===== Boot ===== */
   applySettings();

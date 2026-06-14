@@ -175,79 +175,6 @@ function renderIndexStatsBlock(stats) {
   </div>`;
 }
 
-function attachProfileTabs() {
-  const root = document.querySelector('[data-profile-root]');
-  if (!root) return;
-  if (root.dataset.profileInitialized) return;
-  root.dataset.profileInitialized = '1';
-  const tabs = [...root.querySelectorAll('[data-profile-tab]')];
-  const panels = [...root.querySelectorAll('[data-profile-panel]')];
-  if (!tabs.length || !panels.length) return;
-
-  const selectTab = (id) => {
-    const next = id === 'settings' ? 'settings' : 'activity';
-    for (const t of tabs) {
-      const on = t.dataset.profileTab === next;
-      t.setAttribute('aria-selected', on ? 'true' : 'false');
-      t.classList.toggle('is-active', on);
-      t.setAttribute('tabindex', on ? '0' : '-1');
-    }
-    for (const p of panels) {
-      const on = p.dataset.profilePanel === next;
-      if (on) p.removeAttribute('hidden');
-      else p.setAttribute('hidden', '');
-    }
-    const path = `${window.location.pathname}${window.location.search}`;
-    try {
-      if (next === 'settings') {
-        history.replaceState(null, '', `${path}#settings`);
-      } else {
-        history.replaceState(null, '', path);
-      }
-    } catch {
-      /* ignore */
-    }
-  };
-
-  let initial = root.dataset.profileInitialTab === 'settings' ? 'settings' : 'activity';
-  const h = (window.location.hash || '').replace(/^#/, '').toLowerCase();
-  if (h === 'settings') initial = 'settings';
-  if (h === 'activity') initial = 'activity';
-
-  selectTab(initial);
-
-  for (const btn of tabs) {
-    btn.addEventListener('click', () => selectTab(btn.dataset.profileTab));
-    btn.addEventListener('keydown', (event) => {
-      const idx = tabs.indexOf(btn);
-      if (idx < 0) return;
-      if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault();
-        const nextIdx =
-          event.key === 'ArrowRight'
-            ? (idx + 1) % tabs.length
-            : (idx - 1 + tabs.length) % tabs.length;
-        const nextBtn = tabs[nextIdx];
-        if (!nextBtn) return;
-        selectTab(nextBtn.dataset.profileTab);
-        nextBtn.focus();
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        const first = tabs[0];
-        if (!first) return;
-        selectTab(first.dataset.profileTab);
-        first.focus();
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        const last = tabs[tabs.length - 1];
-        if (!last) return;
-        selectTab(last.dataset.profileTab);
-        last.focus();
-      }
-    });
-  }
-}
-
 function syncProfilePageCounters() {
   const root = document.querySelector('[data-profile-page-stats]');
   if (!root) return;
@@ -262,11 +189,10 @@ function syncProfilePageCounters() {
     else link.setAttribute('hidden', '');
   }
 
-  const bmSpan = document.querySelector('[data-profile-reader-bm-count]');
-  if (bmSpan) bmSpan.textContent = formatClientInt(readerBm);
-
-  const notesSpan = document.querySelector('[data-profile-reader-notes-count]');
-  if (notesSpan) notesSpan.textContent = formatClientInt(readerNotes);
+  // Счётчики могут встречаться в нескольких местах (плитка + заголовок секции).
+  document.querySelectorAll('[data-profile-reading-count]').forEach((el) => { el.textContent = formatClientInt(reading); });
+  document.querySelectorAll('[data-profile-reader-bm-count]').forEach((el) => { el.textContent = formatClientInt(readerBm); });
+  document.querySelectorAll('[data-profile-reader-notes-count]').forEach((el) => { el.textContent = formatClientInt(readerNotes); });
 }
 
 function bumpProfileReadingTotal(delta) {
@@ -303,7 +229,7 @@ async function loadBookPageReview() {
     return;
   }
   try {
-    const r = await fetch(`/api/books/${encodeURIComponent(id)}/review`, { credentials: 'same-origin' });
+    const r = await fetch(`${apiBookPath(id, 'review')}`, { credentials: 'same-origin' });
     if (!r.ok) {
       mount.remove();
       return;
@@ -846,7 +772,9 @@ function syncBookBookmarkButtonUi(button, bookmarked) {
 
 function syncAuthorSeriesFavoriteButtonUi(button, favorite) {
   if (isFavoriteEntityListButton(button)) {
-    button.textContent = uiT('book.remove');
+    if (!button.classList.contains('account-list-remove')) {
+      button.textContent = uiT('profile.removeTitle');
+    }
   } else {
     button.textContent = favorite ? uiT('book.inFavorite') : uiT('book.addFavorite');
   }
@@ -869,7 +797,7 @@ function attachReadBookActions() {
         const csrfMeta = document.querySelector('meta[name="csrf-token"]');
         const headers = {};
         if (csrfMeta) headers['x-csrf-token'] = csrfMeta.content;
-        const response = await fetch(`/api/read/${encodeURIComponent(bookId)}`, {
+        const response = await fetch(apiReadPath(bookId), {
           method: 'POST', credentials: 'same-origin', headers
         });
         if (await handleAuthRequired(response)) return;
@@ -936,7 +864,7 @@ function attachCoverLongPress() {
       const csrfMeta = document.querySelector('meta[name="csrf-token"]');
       const headers = {};
       if (csrfMeta) headers['x-csrf-token'] = csrfMeta.content;
-      const response = await fetch(`/api/read/${encodeURIComponent(bookId)}`, {
+      const response = await fetch(apiReadPath(bookId), {
         method: 'POST', credentials: 'same-origin', headers
       });
       if (await handleAuthRequired(response)) return;
@@ -1181,7 +1109,7 @@ async function attachBookmarkActions() {
         if (!await confirmAction(msg, { danger: true })) return;
       }
       try {
-        const response = await fetch(`/api/bookmarks/${encodeURIComponent(bookId)}`, {
+        const response = await fetch(apiBookmarkPath(bookId), {
           method: 'POST',
           credentials: 'same-origin'
         });
@@ -1201,12 +1129,10 @@ async function attachBookmarkActions() {
           const item = card || row;
           if (item) {
             item.style.display = 'none';
-            updateFavoritesViewState('books');
             const removeTimer = window.setTimeout(() => {
               if (item.style.display === 'none') {
                 item.remove();
-                updateFavoritesViewState('books');
-              }
+                  }
             }, 5500);
             showToast(uiT('app.bookRemovedFavorite'), 'success', {
               actionLabel: uiT('app.undo'), duration: 5000,
@@ -1214,20 +1140,17 @@ async function attachBookmarkActions() {
                 window.clearTimeout(removeTimer);
                 item.style.display = '';
                 syncBookBookmarkButtonUi(button, true);
-                updateFavoritesViewState('books');
-                void (async () => {
+                    void (async () => {
                   try {
-                    const r = await fetch(`/api/bookmarks/${encodeURIComponent(bookId)}`, { method: 'POST', credentials: 'same-origin' });
+                    const r = await fetch(apiBookmarkPath(bookId), { method: 'POST', credentials: 'same-origin' });
                     if (await handleAuthRequired(r)) return;
                     if (!r.ok) {
                       item.style.display = 'none';
-                      updateFavoritesViewState('books');
-                      showToast(uiT('app.favoriteBookUndoFail'), 'error');
+                                showToast(uiT('app.favoriteBookUndoFail'), 'error');
                     }
                   } catch {
                     item.style.display = 'none';
-                    updateFavoritesViewState('books');
-                    showToast(uiT('app.networkError'), 'error');
+                            showToast(uiT('app.networkError'), 'error');
                   }
                 })();
               }
@@ -1279,13 +1202,11 @@ async function attachFavoriteActions() {
           const row = button.closest('.table-row');
           if (row) {
             row.style.display = 'none';
-            updateFavoritesViewState('authors');
             const authorName = button.dataset.favoriteAuthor;
             const removeTimer = window.setTimeout(() => {
               if (row.style.display === 'none') {
                 row.remove();
-                updateFavoritesViewState('authors');
-              }
+                  }
             }, 5500);
             showToast(uiT('app.authorRemovedFavorite'), 'success', {
               actionLabel: uiT('app.undo'), duration: 5000,
@@ -1293,8 +1214,7 @@ async function attachFavoriteActions() {
                 window.clearTimeout(removeTimer);
                 row.style.display = '';
                 syncAuthorSeriesFavoriteButtonUi(button, true);
-                updateFavoritesViewState('authors');
-                void (async () => {
+                    void (async () => {
                   try {
                     const r = await fetch('/api/favorites/authors', {
                       method: 'POST',
@@ -1305,13 +1225,11 @@ async function attachFavoriteActions() {
                     if (await handleAuthRequired(r)) return;
                     if (!r.ok) {
                       row.style.display = 'none';
-                      updateFavoritesViewState('authors');
-                      showToast(uiT('app.authorUndoFail'), 'error');
+                                showToast(uiT('app.authorUndoFail'), 'error');
                     }
                   } catch {
                     row.style.display = 'none';
-                    updateFavoritesViewState('authors');
-                    showToast(uiT('app.networkError'), 'error');
+                            showToast(uiT('app.networkError'), 'error');
                   }
                 })();
               }
@@ -1361,13 +1279,11 @@ async function attachFavoriteActions() {
           const row = button.closest('.table-row');
           if (row) {
             row.style.display = 'none';
-            updateFavoritesViewState('series');
             const seriesName = button.dataset.favoriteSeries;
             const removeTimer = window.setTimeout(() => {
               if (row.style.display === 'none') {
                 row.remove();
-                updateFavoritesViewState('series');
-              }
+                  }
             }, 5500);
             showToast(uiT('app.seriesRemovedFavorite'), 'success', {
               actionLabel: uiT('app.undo'), duration: 5000,
@@ -1375,8 +1291,7 @@ async function attachFavoriteActions() {
                 window.clearTimeout(removeTimer);
                 row.style.display = '';
                 syncAuthorSeriesFavoriteButtonUi(button, true);
-                updateFavoritesViewState('series');
-                void (async () => {
+                    void (async () => {
                   try {
                     const r = await fetch('/api/favorites/series', {
                       method: 'POST',
@@ -1387,13 +1302,11 @@ async function attachFavoriteActions() {
                     if (await handleAuthRequired(r)) return;
                     if (!r.ok) {
                       row.style.display = 'none';
-                      updateFavoritesViewState('series');
-                      showToast(uiT('app.seriesUndoFail'), 'error');
+                                showToast(uiT('app.seriesUndoFail'), 'error');
                     }
                   } catch {
                     row.style.display = 'none';
-                    updateFavoritesViewState('series');
-                    showToast(uiT('app.networkError'), 'error');
+                            showToast(uiT('app.networkError'), 'error');
                   }
                 })();
               }
@@ -1410,49 +1323,6 @@ async function attachFavoriteActions() {
   }
 }
 
-function updateFavoritesViewState(view) {
-  const switcherLink = document.querySelector(`.favorites-switcher [href="/favorites?view=${view}"]`);
-  if (!switcherLink) return;
-  const countNode = switcherLink.querySelector('.favorites-switcher-count');
-  if (!countNode) return;
-
-  const sectionTitleMuted = document.querySelector('.favorites-section .section-title .muted, .favorites-section-books .section-title .muted');
-
-  if (view === 'books') {
-    const cards = [...document.querySelectorAll('.favorites-section-books .card')];
-    const visibleCards = cards.filter((el) => el.style.display !== 'none');
-    const hasHiddenPendingUndo = cards.some((el) => el.style.display === 'none');
-    const count = visibleCards.length;
-    countNode.textContent = String(count);
-    if (sectionTitleMuted) sectionTitleMuted.textContent = String(count);
-    const container = document.querySelector('.favorites-section-books .grid');
-    if (!count && container && !hasHiddenPendingUndo) {
-      const emptyState = document.createElement('div');
-      emptyState.className = 'empty-state';
-      emptyState.innerHTML = `<strong>${escapeHtml(uiT('favorites.emptyBooksTitle'))}</strong><span class="muted">${escapeHtml(uiT('favorites.emptyBooksText'))}</span><div class="actions"><a class="entity-link" href="/">${escapeHtml(uiT('favorites.toCatalog'))}</a></div>`;
-      container.replaceWith(emptyState);
-    }
-    return;
-  }
-
-  const rows = [...document.querySelectorAll('.favorites-list .table-row')];
-  const visibleRows = rows.filter((el) => el.style.display !== 'none');
-  const hasHiddenPendingUndo = rows.some((el) => el.style.display === 'none');
-  const count = visibleRows.length;
-  countNode.textContent = String(count);
-  if (sectionTitleMuted) sectionTitleMuted.textContent = String(count);
-  const container = document.querySelector('.favorites-list');
-  if (!count && container && !hasHiddenPendingUndo) {
-    const emptyState = document.createElement('div');
-    emptyState.className = 'empty-state';
-    if (view === 'authors') {
-      emptyState.innerHTML = `<strong>${escapeHtml(uiT('favorites.emptyAuthorsTitle'))}</strong><span class="muted">${escapeHtml(uiT('favorites.emptyAuthorsText'))}</span><div class="actions"><a class="entity-link" href="/authors">${escapeHtml(uiT('favorites.openAuthors'))}</a></div>`;
-    } else {
-      emptyState.innerHTML = `<strong>${escapeHtml(uiT('favorites.emptySeriesTitle'))}</strong><span class="muted">${escapeHtml(uiT('favorites.emptySeriesText'))}</span><div class="actions"><a class="entity-link" href="/series">${escapeHtml(uiT('favorites.openSeries'))}</a></div>`;
-    }
-    container.replaceWith(emptyState);
-  }
-}
 
 async function pollIndexStatus() {
   const banner = document.querySelector('[data-index-status]');
@@ -2596,7 +2466,7 @@ function attachSearchSuggest() {
       sections.push(`<div class="suggest-group-title">${escapeHtml(uiT('search.books'))}</div>`);
       data.books.forEach((b) => {
         const itemId = `suggest-item-${itemSeq++}`;
-        sections.push(`<a class="suggest-item" id="${itemId}" href="/book/${encodeURIComponent(b.id)}" data-suggest-item role="option"><span class="suggest-item-title">${escapeHtml(b.title)}</span><span class="suggest-item-sub">${escapeHtml(b.authors || '')}</span></a>`);
+        sections.push(`<a class="suggest-item" id="${itemId}" href="${bookPagePath(b.id)}" data-suggest-item role="option"><span class="suggest-item-title">${escapeHtml(b.title)}</span><span class="suggest-item-sub">${escapeHtml(b.authors || '')}</span></a>`);
       });
     }
     if (data.authors?.length) {
@@ -2801,7 +2671,7 @@ function renderCardHtml(book, { batchSelect = false, seriesContext = null } = {}
     !batchSelect && isPageDownloadAllowed()
       ? `<details class="download-menu download-menu-compact">
       <summary class="button download-menu-trigger download-menu-trigger-compact">${escapeHtml(uiT('download.label'))}</summary>
-      <div class="download-menu-popover">${formats.map(([f, l]) => `<a class="download-format-link" href="/download/${encodeURIComponent(book.id)}?format=${encodeURIComponent(f)}">${escapeHtml(l)}</a>`).join('')}</div>
+      <div class="download-menu-popover">${formats.map(([f, l]) => `<a class="download-format-link" href="${downloadBookPath(book.id, `format=${encodeURIComponent(f)}`)}">${escapeHtml(l)}</a>`).join('')}</div>
     </details>`
       : '';
   const batchCb = batchSelect
@@ -2811,8 +2681,8 @@ function renderCardHtml(book, { batchSelect = false, seriesContext = null } = {}
   const coverRating = _libRateClamped ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${_libRateClamped}">${Array.from({ length: _libRateClamped }, () => '<span>★</span>').join('')}</span></span>` : '';
   return `<article class="card" data-book-id="${id}">
     ${batchCb}
-    <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
-      <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${title}">
+    <a class="cover" href="${bookPagePath(book.id)}" data-role="cover">
+      <img class="cover-image" loading="lazy" draggable="false" src="${apiBookPath(book.id, 'cover-thumb')}" data-cover-src="${apiBookPath(book.id, 'cover-thumb')}" alt="${title}">
       <span class="cover-fallback" hidden>
         <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
         <span class="cover-fallback-overlay"></span>
@@ -2822,7 +2692,7 @@ function renderCardHtml(book, { batchSelect = false, seriesContext = null } = {}
       ${coverRating}
     </a>
     <div class="meta">
-      <h3><a href="/book/${encodeURIComponent(book.id)}">${title}</a></h3>
+      <h3><a href="${bookPagePath(book.id)}">${title}</a></h3>
       <div class="author">${book.authors ? uiRenderAuthorLinks(book.authorsList, book.authors, `ajax-a-${book.id}`) : escapeHtml(uiT('book.authorUnknown'))}</div>
       ${showSeries ? `<div class="card-series">${uiRenderSeriesLinks(book.seriesList, `ajax-s-${book.id}`, authorKey)}</div>` : ''}
       ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
@@ -3871,7 +3741,7 @@ function attachSendToEreader() {
           submitBtn.disabled = true;
           submitBtn.textContent = uiT('app.emailSending');
           try {
-            const res = await fetch(`/api/send-to-ereader/${encodeURIComponent(bookId)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ format }) });
+            const res = await fetch(apiSendToEreaderPath(bookId), { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ format }) });
             const data = await res.json();
             if (res.ok) {
               showToast(data.message || uiT('app.emailSent'), 'success');
@@ -4144,11 +4014,38 @@ function attachUpdateUpload() {
   }
 }
 
+function attachAccountNavSelect() {
+  document.querySelectorAll('[data-account-nav-select]').forEach((sel) => {
+    if (sel.dataset.bound === '1') return;
+    sel.dataset.bound = '1';
+    sel.addEventListener('change', () => {
+      const url = sel.value;
+      if (!url) return;
+      const cur = `${window.location.pathname}${window.location.search}`;
+      if (url !== cur) window.location.assign(url);
+    });
+  });
+}
+
+function resolveBookIdFromRow(row) {
+  if (!row) return '';
+  const ref = row.dataset.bookIdRef;
+  if (ref && typeof globalThis.decodeBookRef === 'function') {
+    const decoded = globalThis.decodeBookRef(ref);
+    if (decoded) return decoded;
+  }
+  return row.dataset.bookId || row.dataset.removeReading || '';
+}
+
 function attachProfileRemoveActions() {
   for (const btn of document.querySelectorAll('[data-remove-reading]')) {
     btn.addEventListener('click', async () => {
-      const bookId = btn.dataset.removeReading;
       const row = btn.closest('.profile-list-item');
+      const bookId = resolveBookIdFromRow(row);
+      if (!bookId) {
+        showToast(uiT('app.removeReadingFail'), 'error');
+        return;
+      }
       const title = (row?.querySelector('a')?.textContent || '').trim();
       const msg = title ? uiTp('app.removeReadingConfirm', { title }) : uiT('app.removeReadingConfirmShort');
       if (!await confirmAction(msg, { danger: true })) return;
@@ -4157,7 +4054,7 @@ function attachProfileRemoveActions() {
       const openCount = Math.max(1, Number(row?.dataset.readingOpenCount) || 1);
 
       try {
-        const r = await fetch(`/api/reading-history/${encodeURIComponent(bookId)}`, { method: 'DELETE', credentials: 'same-origin' });
+        const r = await fetch(apiReadingHistoryPath(bookId), { method: 'DELETE', credentials: 'same-origin' });
         if (await handleAuthRequired(r)) return;
         if (!r.ok) {
           showToast(uiT('app.removeReadingFail'), 'error');
@@ -4176,7 +4073,7 @@ function attachProfileRemoveActions() {
             window.clearTimeout(removeTimer);
             void (async () => {
               try {
-                const restore = await fetch(`/api/reading-history/${encodeURIComponent(bookId)}`, {
+                const restore = await fetch(apiReadingHistoryPath(bookId), {
                   method: 'POST',
                   credentials: 'same-origin',
                   headers: { 'Content-Type': 'application/json' },
@@ -4237,7 +4134,7 @@ function attachProfileRemoveActions() {
             window.clearTimeout(removeTimer);
             void (async () => {
               try {
-                const restore = await fetch(`/api/books/${encodeURIComponent(bookId)}/bookmarks`, {
+                const restore = await fetch(`${apiBookPath(bookId, 'bookmarks')}`, {
                   method: 'POST',
                   credentials: 'same-origin',
                   headers: { 'Content-Type': 'application/json' },
@@ -4281,7 +4178,7 @@ function attachProfileRemoveActions() {
         return;
       }
       try {
-        const r = await fetch(`/api/books/${encodeURIComponent(bookId)}/annotations/${encodeURIComponent(aid)}`, { method: 'DELETE', credentials: 'same-origin' });
+        const r = await fetch(`${apiBookPath(bookId, `annotations/${encodeURIComponent(aid)}`)}`, { method: 'DELETE', credentials: 'same-origin' });
         if (await handleAuthRequired(r)) return;
         if (!r.ok) {
           showToast(uiT('app.annotationDeleteFail'), 'error');
@@ -5002,8 +4899,8 @@ attachAddToShelfButtons();
 attachSendToEreader();
 attachSendBatchToEreader();
 attachUpdateUpload();
-attachProfileTabs();
 attachProfileRemoveActions();
+attachAccountNavSelect();
 attachAdminRecaptchaDisclosure();
 if (document.querySelector('[data-index-status]')) pollIndexStatus();
 if (document.querySelector('[data-admin-index-controls]')) pollAdminIndexControls();
@@ -5243,7 +5140,7 @@ function attachDirtyFormTracking() {
       const setsHtml = sets.map(function(set) {
         const rows = set.items.map(function(book) {
           return '<tr>'
-            + '<td data-label="' + thFormat + '"><a href="/book/' + encodeURIComponent(book.id) + '" class="admin-chip admin-compact-btn">' + escapeHtml((book.ext || '').toUpperCase()) + '</a></td>'
+            + '<td data-label="' + thFormat + '"><a href="' + bookPagePath(book.id) + '" class="admin-chip admin-compact-btn">' + escapeHtml((book.ext || '').toUpperCase()) + '</a></td>'
             + '<td data-label="' + thSize + '" style="white-space:nowrap">' + escapeHtml(fmtSize(book.size)) + '</td>'
             + '<td data-label="' + thLang + '">' + escapeHtml(book.lang || '') + '</td>'
             + '<td data-label="' + thFile + '" class="muted" style="font-size:.85em;word-break:break-all">' + escapeHtml(book.archive_name || book.file_name || '') + '</td>'

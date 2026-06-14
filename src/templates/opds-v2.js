@@ -2,7 +2,7 @@
  * OPDS 2.0 (JSON) template functions.
  * Spec: https://drafts.opds.io/opds-2.0
  */
-import { siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel } from './shared.js';
+import { siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel, downloadBookPath, apiBookPath } from './shared.js';
 
 const OPDS_MIME_FOR_SOURCE = {
   fb2: 'application/fb2+zip',
@@ -52,7 +52,7 @@ export function renderOpds2NavigationFeed(baseUrl, { title, selfPath, entries, n
 function formatPublication(book) {
   const authors = String(book.authors || '').split(':').map(a => a.trim()).filter(Boolean);
   const extLower = String(book.ext || 'fb2').toLowerCase();
-  const dl = `/download/${encodeURIComponent(book.id)}?opds=1`;
+  const dl = downloadBookPath(book.id, 'opds=1');
 
   // Download links — source format + conversion to epub for fb2
   const links = [];
@@ -68,7 +68,7 @@ function formatPublication(book) {
     links.push({ rel: 'http://opds-spec.org/acquisition', href: dl, type: sourceMime, title: FORMAT_LABELS[extLower] || extLower.toUpperCase() });
   }
   if (book.id) {
-    links.push({ rel: 'http://opds-spec.org/image', href: `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`, type: 'image/webp' });
+    links.push({ rel: 'http://opds-spec.org/image', href: `${apiBookPath(book.id, 'cover')}?opds=1`, type: 'image/webp' });
   }
 
   const pub = {
@@ -80,7 +80,7 @@ function formatPublication(book) {
       format: extLower
     },
     links,
-    images: book.id ? [{ href: `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`, type: 'image/webp' }] : []
+    images: book.id ? [{ href: `${apiBookPath(book.id, 'cover')}?opds=1`, type: 'image/webp' }] : []
   };
 
   if (book.annotation) {

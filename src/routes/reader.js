@@ -177,7 +177,14 @@ export function registerReaderRoutes(app) {
   }));
 
   app.delete('/api/reading-history/:bookId', requireApiAuth, asyncHandler(async (req, res) => {
-    deleteReadingHistoryEntry(req.user.username, String(req.params.bookId));
+    const bookId = String(req.params.bookId || '');
+    if (!bookId) {
+      return apiFail(res, 400, ApiErrorCode.BOOK_INVALID_ID, t('api.book.invalidId'));
+    }
+    const deleted = deleteReadingHistoryEntry(req.user.username, bookId);
+    if (!deleted) {
+      return apiFail(res, 404, ApiErrorCode.NOT_FOUND, t('app.removeReadingFail'));
+    }
     invalidateUserPageCaches(req.user.username);
     clearPageDataCache();
     res.json({ ok: true });

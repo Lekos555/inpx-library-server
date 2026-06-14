@@ -10,13 +10,14 @@ import { requireBrowseAuth, requireBrowseOrOpds, requireWebAuth, requireAdminWeb
 import { getCachedPageData, getStaleOrSchedule, clearPageDataCache, invalidateUserPageCaches } from '../services/cache.js';
 import { logSystemEvent } from '../services/system-events.js';
 import { getRecommendedLibraryView, getHomeRecommendations, buildSimilarBooks } from '../services/recommendations.js';
+import { bookPagePath, apiBookPath } from '../utils/book-ref.js';
 import { safePage } from '../utils/safe-int.js';
 import {
   DETAILS_CACHE_MAX,
   HOME_SECTIONS_CACHE_TTL_MS,
   PAGE_CACHE_TTL_MS
 } from '../constants.js';
-import { getUserShelves, getShelfById, getShelfBooks, getSetting, getReadBookIdSet, getFullyReadSeriesNames } from '../db.js';
+import { getUserShelves, getShelfById, getShelfBooks, getSetting, getReadBookIdSet, getFullyReadSeriesNames, getUserStats } from '../db.js';
 import {
   getBookById,
   getBooksByIds,
@@ -31,11 +32,11 @@ import {
   getFavoriteAuthorsLight,
   getFavoriteSeriesLight,
   getIndexStatus,
-  getBookmarks,
+  getBookmarksPage,
+  getReadBooksPage,
   getLibrarySections,
   getLibraryView,
   updateBookMetadata,
-  getReadBooks,
   isBookmarked,
   isBookRead,
   isSeriesFullyRead,
@@ -398,7 +399,7 @@ function safeRecordReadingHistory(username, bookId) {
 
 // --- Exported accessors for other modules ---
 
-export { detailsCache, getDetailsFull, clearBookDetailsCache, bookFlibustaSidecarEffective };
+export { detailsCache, getDetailsFull, clearBookDetailsCache, bookFlibustaSidecarEffective, resolveBestCoverDetails };
 
 // --- Route registration ---
 
@@ -500,8 +501,10 @@ export function registerLibraryRoutes(app, deps) {
       : view === 'recommended'
         ? getRecommendedLibraryView({ page, pageSize, username: user?.username || '' })
         : getStaleOrSchedule(`library:${view}:${user?.username || ''}:sort:${sort}:${order}:p${page}:s${pageSize}`, () => getLibraryView(view, { page, pageSize, username: user?.username || '', type, sort, order }), PAGE_CACHE_TTL_MS, { total: 0, items: [] });
-    const readBookIds = user ? getReadBookIdSet(user.username) : null;
-    const readSeriesNames = user ? getFullyReadSeriesNames(user.username) : null;
+    const isReadSeriesList = view === 'read' && result.itemType === 'series';
+    const readBookIds = user && !isReadSeriesList ? getReadBookIdSet(user.username) : null;
+    const readSeriesNames = user && isReadSeriesList ? getFullyReadSeriesNames(user.username) : null;
+    const userStats = user ? getUserStats(user.username) : null;
     res.send(renderLibraryView({
       view,
       title: titles[view] || t('library.titleFallback'),
@@ -518,7 +521,8 @@ export function registerLibraryRoutes(app, deps) {
       csrfToken: req.csrfToken || '',
       readBookIds,
       readSeriesNames,
-      computing: Boolean(result.computing)
+      computing: Boolean(result.computing),
+      userStats
     }));
   });
 
@@ -862,7 +866,7 @@ export function registerLibraryRoutes(app, deps) {
     const bookId = req.params.id;
     const { title, authors, series, seriesNo, genres, lang, date, keywords, libRate } = req.body;
     if (!title || !String(title).trim()) {
-      return res.redirect(`/book/${encodeURIComponent(bookId)}?flash=` + encodeURIComponent(t('book.edit.titleRequired')));
+      return res.redirect(`${bookPagePath(bookId)}?flash=` + encodeURIComponent(t('book.edit.titleRequired')));
     }
     try {
       const ok = updateBookMetadata(bookId, {
@@ -881,9 +885,9 @@ export function registerLibraryRoutes(app, deps) {
       clearCardHtmlCache();
       logSystemEvent('info', 'operations', 'book metadata edited', { actor: req.user.username, bookId });
       const msg = ok ? t('book.edit.saved') : t('book.edit.notFound');
-      res.redirect(`/book/${encodeURIComponent(bookId)}?flash=` + encodeURIComponent(msg));
+      res.redirect(`${bookPagePath(bookId)}?flash=` + encodeURIComponent(msg));
     } catch (error) {
-      res.redirect(`/book/${encodeURIComponent(bookId)}?flash=` + encodeURIComponent(error.message));
+      res.redirect(`${bookPagePath(bookId)}?flash=` + encodeURIComponent(error.message));
     }
   });
 
@@ -893,19 +897,42 @@ export function registerLibraryRoutes(app, deps) {
     const view = ['books', 'read', 'authors', 'series'].includes(String(req.query.view || '')) ? String(req.query.view) : 'books';
     const sort = ['title', 'author', 'date', 'rating', 'name', 'count'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
     const order = String(req.query.order || '');
-    const books = getBookmarks(req.user.username, sort, 200);
-    const readBooks = getReadBooks(req.user.username, sort, 200);
-    const authors = getFavoriteAuthorsLight(req.user.username, 50);
-    const series = getFavoriteSeriesLight(req.user.username, 50);
-    const readBookIds = getReadBookIdSet(req.user.username);
-    const readSeriesNames = getFullyReadSeriesNames(req.user.username);
-    res.send(renderFavorites({ books, readBooks, authors, series, view, sort, order, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds, readSeriesNames }));
+    const page = safePage(req.query.page);
+    const pageSize = 24;
+    const username = req.user.username;
+    const userStats = getUserStats(username);
+    let books = [];
+    let readBooks = [];
+    let authors = [];
+    let series = [];
+    let total = 0;
+    if (view === 'books') {
+      const result = getBookmarksPage(username, { sort, page, pageSize });
+      books = result.items;
+      total = result.total;
+    } else if (view === 'read') {
+      const result = getReadBooksPage(username, { sort, page, pageSize });
+      readBooks = result.items;
+      total = result.total;
+    } else if (view === 'authors') {
+      authors = getFavoriteAuthorsLight(username, 50);
+    } else if (view === 'series') {
+      series = getFavoriteSeriesLight(username, 50);
+    }
+    const readBookIds = view === 'books' || view === 'read' ? getReadBookIdSet(username) : null;
+    const readSeriesNames = view === 'series' ? getFullyReadSeriesNames(username) : null;
+    res.send(renderFavorites({
+      books, readBooks, authors, series, view, sort, order, page, pageSize, total,
+      user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '',
+      readBookIds, readSeriesNames, userStats
+    }));
   });
 
   app.get('/shelves', requireWebAuth, (req, res) => {
     const stats = getCachedStats();
     const shelves = getUserShelves(req.user.username);
-    res.send(renderShelves({ shelves, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '' }));
+    const userStats = getUserStats(req.user.username);
+    res.send(renderShelves({ shelves, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', userStats }));
   });
 
   app.get('/shelves/:id', requireWebAuth, (req, res) => {
@@ -913,7 +940,8 @@ export function registerLibraryRoutes(app, deps) {
     if (!shelf) return res.status(404).send(t('shelf.notFound'));
     const stats = getCachedStats();
     const books = getShelfBooks(shelf.id, req.user.username);
-    res.send(renderShelfDetail({ shelf, books, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds: getReadBookIdSet(req.user.username) }));
+    const userStats = getUserStats(req.user.username);
+    res.send(renderShelfDetail({ shelf, books, user: req.user, stats, indexStatus: getIndexStatus(), csrfToken: req.csrfToken || '', readBookIds: getReadBookIdSet(req.user.username), userStats }));
   });
 
   // --- Book details API ---
@@ -1092,7 +1120,7 @@ export function registerLibraryRoutes(app, deps) {
       res.json({
         items: list.map((x) => ({
           index: x.index,
-          url: `/api/books/${encodeURIComponent(book.id)}/illustration/${x.index}`
+          url: `${apiBookPath(book.id, `illustration/${x.index}`)}`
         }))
       });
     } catch (error) {

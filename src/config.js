@@ -135,7 +135,23 @@ export const config = {
   scanIntervalHours: parseEnvInt('SCAN_INTERVAL_HOURS', process.env.SCAN_INTERVAL_HOURS, 0, { min: 0, max: 8760 }),
 
   // ── Performance profile ────────────────────────────
-  ...resolvePerfProfile()
+  ...resolvePerfProfile(),
+
+  // ── Telegram Bot ───────────────────────────────────
+  telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+  /** Массив Telegram user ID (строки); пустой = доступ у всех */
+  telegramAllowedUsers: (process.env.TELEGRAM_ALLOWED_USERS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+  /** Полный URL webhook (приоритет). Пусто — long polling. */
+  telegramWebhookUrl: (process.env.TELEGRAM_WEBHOOK_URL || '').trim(),
+  /** Базовый URL сервера; webhook = base + telegramWebhookPath */
+  telegramWebhookBase: (process.env.TELEGRAM_WEBHOOK_BASE || '').trim().replace(/\/$/, ''),
+  /** Путь webhook (по умолчанию /telegram/webhook) */
+  telegramWebhookPath: (process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook').trim() || '/telegram/webhook',
+  /** Secret token для заголовка X-Telegram-Bot-Api-Secret-Token */
+  telegramWebhookSecret: (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim(),
 };
 
 function resolvePerfProfile() {

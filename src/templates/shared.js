@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, parseGenreCodes } from '../genre-map.js';
 import { getAvailableDownloadFormats, FORMAT_LABELS } from '../conversion.js';
 import { config } from '../config.js';
+import { bookPagePath, readPagePath, apiBookPath, downloadBookPath, encodeBookRef } from '../utils/book-ref.js';
 import { formatSingleAuthorName, splitAuthorValues } from '../inpx.js';
 import {
   t,
@@ -26,6 +27,19 @@ import {
 export { t, tp, getLocale, plural, countLabel, formatLocaleInt, formatLocaleDateShort, formatLocaleDateTimeShort, formatLocaleDateLong, serializeClientI18n };
 export { formatAuthorLabel, formatGenreLabel, formatLanguageLabel, parseGenreCodes };
 export { getAvailableDownloadFormats, FORMAT_LABELS };
+export { bookPagePath, readPagePath, apiBookPath, downloadBookPath };
+
+/** data-* атрибут с ID книги (base64url), безопасен для NUL и спецсимволов в HTML. */
+export function bookIdDataAttr(id) {
+  return `data-book-id-ref="${escapeHtml(encodeBookRef(String(id ?? '')))}"`;
+}
+
+/** Единая кнопка «×» для строк личного кабинета (профиль, избранное, полки). */
+export function renderListRemoveBtn({ extraAttrs = '', titleKey = 'profile.removeTitle' } = {}) {
+  const label = t(titleKey);
+  const attrs = extraAttrs ? ` ${extraAttrs}` : '';
+  return `<button type="button" class="profile-remove-btn account-list-remove"${attrs} title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">&times;</button>`;
+}
 
 const APP_MIN_PATH = path.join(config.publicDir, 'app.min.js');
 const CSS_MIN_PATH = path.join(config.publicDir, 'styles.min.css');
@@ -96,7 +110,7 @@ export function renderCover(book, { readBookIds = null } = {}) {
     ? `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${_libRateClamped}">${Array.from({ length: _libRateClamped }, () => '<span>★</span>').join('')}</span></span>`
     : '';
   return `
-    <a class="cover" href="/book/${encodeURIComponent(book.id)}" data-role="cover">
+    <a class="cover" href="${bookPagePath(book.id)}" data-role="cover">
       <span class="cover-fallback">
         <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
         <span class="cover-fallback-overlay"></span>
@@ -105,7 +119,7 @@ export function renderCover(book, { readBookIds = null } = {}) {
           <span class="cover-fallback-author">${escapeHtml(formatAuthorLabel(book.authors) || t('book.authorUnknown'))}</span>
         </span>
       </span>
-      <img class="cover-image" loading="lazy" draggable="false" src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" data-cover-src="/api/books/${encodeURIComponent(book.id)}/cover-thumb" alt="${escapeHtml(book.title)}">
+      <img class="cover-image" loading="lazy" draggable="false" src="${apiBookPath(book.id, 'cover-thumb')}" data-cover-src="${apiBookPath(book.id, 'cover-thumb')}" alt="${escapeHtml(book.title)}">
       ${readBadge}
       ${coverRating}
     </a>`;
@@ -509,7 +523,7 @@ export function renderDownloadMenu(book, { compact = false, accent = false, user
     <details class="download-menu ${compact ? 'download-menu-compact' : ''}">
       <summary class="${triggerClass}">${escapeHtml(t('download.label'))}</summary>
       <div class="download-menu-popover">
-        ${formats.map(([format, label]) => `<a class="download-format-link" href="/download/${encodeURIComponent(book.id)}?format=${encodeURIComponent(format)}">${escapeHtml(label)}</a>`).join('')}
+        ${formats.map(([format, label]) => `<a class="download-format-link" href="${downloadBookPath(book.id, `format=${encodeURIComponent(format)}`)}">${escapeHtml(label)}</a>`).join('')}
       </div>
     </details>`;
 }
@@ -599,14 +613,46 @@ function renderSidebarNavigation(user, currentPath = '/', stats = null) {
       ${link('/', t('nav.home'), true)}
       ${link('/library/recent', t('nav.recent'), true)}
       ${user ? link('/library/recommended', t('nav.recommended'), true) : ''}
-      ${user ? link('/library/continue', t('nav.continue'), true) : ''}
       ${link('/authors', t('nav.authors'), true)}
       ${link('/series', t('nav.series'), true)}
       ${link('/genres', t('nav.genres'), true)}
       ${showLanguages ? link('/languages', t('nav.languages'), true) : ''}
-      ${user ? link('/favorites', t('nav.favorites'), true) : ''}
-      ${user ? link('/shelves', t('nav.shelves'), true) : ''}
       ${user ? link('/profile', t('nav.profile'), true) : ''}
+    </div>`;
+}
+
+// Единая перекрёстная навигация по личным разделам. Каждый пункт — отдельная
+// страница (дёшево по рендеру), но визуально это выглядит как один раздел с
+// вкладками. Переиспользуем стиль .view-switcher для единообразия.
+export function renderAccountNav(active = '', counts = {}) {
+  const items = [
+    { key: 'activity', label: t('profile.tabActivity'), href: '/profile' },
+    { key: 'books', label: t('favorites.books'), href: '/favorites?view=books' },
+    { key: 'series', label: t('favorites.series'), href: '/favorites?view=series' },
+    { key: 'authors', label: t('favorites.authors'), href: '/favorites?view=authors' },
+    { key: 'shelves', label: t('nav.shelves'), href: '/shelves' },
+    { key: 'read', label: t('profile.readBooks'), href: '/library/read' },
+    { key: 'settings', label: t('profile.tabSettings'), href: '/profile/settings' }
+  ];
+  const navLinks = items.map((it) => {
+    const count = counts[it.key];
+    const badge = count != null ? ` <span class="view-switcher-count">${formatLocaleInt(count)}</span>` : '';
+    return `<a class="button view-switcher-link${it.key === active ? ' is-active' : ''}"${it.key === active ? ' aria-current="page"' : ''} href="${it.href}">${escapeHtml(it.label)}${badge}</a>`;
+  }).join('');
+  const selectOptions = items.map((it) => {
+    const count = counts[it.key];
+    const label = count != null ? `${it.label} (${formatLocaleInt(count)})` : it.label;
+    const selected = it.key === active ? ' selected' : '';
+    return `<option value="${escapeHtml(it.href)}"${selected}>${escapeHtml(label)}</option>`;
+  }).join('');
+  return `
+    <div class="account-nav-shell">
+      <select class="account-nav-select" data-account-nav-select aria-label="${escapeHtml(t('profile.tablistAria'))}">
+        ${selectOptions}
+      </select>
+      <nav class="view-switcher account-nav account-nav-tabs" aria-label="${escapeHtml(t('profile.tablistAria'))}">
+        ${navLinks}
+      </nav>
     </div>`;
 }
 
@@ -688,7 +734,7 @@ export function renderBookGrid(items = [], { isAuthenticated = false, lazyDetail
           ${batchCb(book)}
           ${renderCover(book, { readBookIds })}
           <div class="meta">
-            <h3><a href="/book/${encodeURIComponent(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
+            <h3><a href="${bookPagePath(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
             <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 1, bookAuthors: book.authors, popoverId: `card-a-${book.id}` }) : escapeHtml(t('book.authorUnknown'))}</div>
             ${showSeries ? `<div class="card-series">${renderSeriesLinks(book.seriesList, { limit: 1, popoverId: `card-s-${book.id}`, firstAuthor: book.authorsList?.[0] || firstAuthorValue(book.authors) })}</div>` : ''}
             ${book.readProgress > 0 ? `<div class="card-read-progress"><div class="read-progress-bar" role="progressbar" aria-valuenow="${Math.round(book.readProgress)}" aria-valuemin="0" aria-valuemax="100"><div class="read-progress-fill" style="width:${Math.round(book.readProgress)}%"></div></div><span class="read-progress-label">${Math.round(book.readProgress)}%</span></div>` : ''}
@@ -720,7 +766,7 @@ export function renderFavoriteBookGrid(items = [], { batchSelect = false, user =
           ${batchCb(book)}
           ${renderCover(book, { readBookIds })}
           <div class="meta">
-            <h3><a href="/book/${encodeURIComponent(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
+            <h3><a href="${bookPagePath(book.id)}">${titlePrefix}${escapeHtml(book.title)}</a></h3>
             <div class="author">${book.authors ? renderAuthorLinks(book.authorsList, { limit: 1, bookAuthors: book.authors, popoverId: `fav-a-${book.id}` }) : escapeHtml(t('book.authorUnknown'))}</div>
             ${showSeries ? `<div class="card-series">${renderSeriesLinks(book.seriesList, { limit: 1, popoverId: `card-s-${book.id}`, firstAuthor: book.authorsList?.[0] || firstAuthorValue(book.authors) })}</div>` : ''}
             <div class="card-actions card-actions-favorites">
@@ -809,7 +855,7 @@ export function renderAuthorFacetStandaloneBookRows(books = [], batchSelect = fa
           return `
         <div class="author-facet-standalone-row" data-book-id="${id}">
           ${batchCb}
-          <a class="table-row-stack table-row-link compact-row author-facet-standalone-link" href="/book/${id}">
+          <a class="table-row-stack table-row-link compact-row author-facet-standalone-link" href="${bookPagePath(book.id)}">
             <div>
               <strong>${title}</strong><br>
               <span class="muted">${meta}</span>
@@ -905,7 +951,7 @@ export function renderMiniBookList(title, items = [], emptyText = null) {
   const empty = emptyText ?? t('mini.empty');
   const body = items.length
     ? items.map((item) => `
-          <a class="table-row table-row-stack table-row-link compact-row" href="/book/${encodeURIComponent(item.id)}">
+          <a class="table-row table-row-stack table-row-link compact-row" href="${bookPagePath(item.id)}">
             <div>
               <strong>${escapeHtml(item.title)}</strong><br>
               <span class="muted">${escapeHtml(formatAuthorLabel(item.authors))}</span>
@@ -980,6 +1026,7 @@ function renderAdminSidebar(currentPath = '/admin') {
           ${link('/admin/content', t('admin.nav.content'))}
           ${link('/admin/users', t('admin.nav.users'))}
           ${link('/admin/smtp', t('admin.nav.smtp'))}
+          ${link('/admin/telegram', t('admin.nav.telegram'))}
           ${link('/admin/events', t('admin.nav.events'))}
           ${link('/admin/update', t('admin.nav.backup'))}
         </div>
@@ -1068,6 +1115,7 @@ export function pageShell({ title, content, user, query = '', field = 'all', sta
     </div>
   </div>
   <button class="scroll-to-top" type="button" data-scroll-top aria-label="${escapeHtml(t('scrollTop'))}">↑</button>
+  <script src="/book-ref.js?v=${STATIC_ASSET_VERSION}" defer></script>
   <script src="/${APP_ASSET_FILE}?v=${STATIC_ASSET_VERSION}" defer></script>
   <script>
     if ('serviceWorker' in navigator) {

@@ -1938,6 +1938,85 @@ export function setSmtpSettings({ host, port, secure, user, pass, from }) {
   setSetting('smtp_from', from || '');
 }
 
+let _stmtTelegramSettingExists = null;
+
+function telegramSettingExists(key) {
+  _stmtTelegramSettingExists ??= db.prepare('SELECT 1 AS ok FROM settings WHERE key = ? LIMIT 1');
+  return Boolean(_stmtTelegramSettingExists.get(key));
+}
+
+/** true — настройки заданы в админке; env используется только до первого сохранения. */
+function isTelegramAdminConfigured() {
+  if (getSetting('telegram_configured') === '1') return true;
+  return ['telegram_bot_token', 'telegram_allowed_users', 'telegram_enabled']
+    .some((key) => telegramSettingExists(key));
+}
+
+export function getTelegramSettings() {
+  return {
+    adminConfigured: isTelegramAdminConfigured(),
+    token: decryptValue(getSetting('telegram_bot_token')) || '',
+    allowedUsers: getSetting('telegram_allowed_users'),
+    welcomeMessage: getSetting('telegram_welcome_message') || '',
+    profileDescription: getSetting('telegram_profile_description') || '',
+    profileShortDescription: getSetting('telegram_profile_short_description') || '',
+    /** '0' = явно отключён; иначе считается включённым */
+    enabled: getSetting('telegram_enabled') !== '0',
+  };
+}
+
+export function setTelegramSettings({ token, allowedUsers, enabled, welcomeMessage, profileDescription, profileShortDescription }) {
+  if (token !== undefined && String(token).trim()) {
+    setSetting('telegram_bot_token', encryptValue(String(token).trim()));
+  }
+  if (allowedUsers !== undefined) {
+    setSetting('telegram_allowed_users', String(allowedUsers ?? ''));
+  }
+  if (welcomeMessage !== undefined) {
+    setSetting('telegram_welcome_message', String(welcomeMessage ?? ''));
+  }
+  if (profileDescription !== undefined) {
+    setSetting('telegram_profile_description', String(profileDescription ?? ''));
+  }
+  if (profileShortDescription !== undefined) {
+    setSetting('telegram_profile_short_description', String(profileShortDescription ?? ''));
+  }
+  if (enabled !== undefined) {
+    setSetting('telegram_enabled', enabled ? '1' : '0');
+  }
+  setSetting('telegram_configured', '1');
+}
+
+/** Эффективная конфигурация бота: после сохранения в админке env не подменяет пустые поля. */
+export function resolveTelegramRuntimeConfig() {
+  const tg = getTelegramSettings();
+  if (tg.adminConfigured) {
+    const list = String(tg.allowedUsers || '').split(',').map((s) => s.trim()).filter(Boolean);
+    return {
+      token: String(tg.token || '').trim(),
+      allowedUsers: list.length ? list : null,
+      enabled: tg.enabled,
+    };
+  }
+  const envToken = String(config.telegramBotToken || '').trim();
+  const envUsers = config.telegramAllowedUsers.length ? config.telegramAllowedUsers : null;
+  return {
+    token: String(tg.token || envToken).trim(),
+    allowedUsers: envUsers,
+    enabled: tg.enabled,
+  };
+}
+
+/** Токен для проверки в админке: поле пароля может быть пустым, если токен уже сохранён. */
+export function resolveTelegramTokenForAdmin(rawToken = '') {
+  const trimmed = String(rawToken || '').trim();
+  if (trimmed) return trimmed;
+  const tg = getTelegramSettings();
+  if (tg.token) return tg.token;
+  if (!tg.adminConfigured) return String(config.telegramBotToken || '').trim();
+  return '';
+}
+
 db.exec(`CREATE TABLE IF NOT EXISTS reading_positions (
   username TEXT NOT NULL,
   book_id TEXT NOT NULL,
@@ -1974,7 +2053,8 @@ export function setReadingPosition(username, bookId, position, progress) {
 let _stmtDeleteReadHistory = null;
 export function deleteReadingHistoryEntry(username, bookId) {
   _stmtDeleteReadHistory ??= db.prepare('DELETE FROM reading_history WHERE username = ? AND book_id = ?');
-  _stmtDeleteReadHistory.run(username, bookId);
+  const result = _stmtDeleteReadHistory.run(String(username || '').trim(), String(bookId ?? ''));
+  return result.changes > 0;
 }
 
 /** Восстановление строки истории (для отмены удаления в профиле). */
@@ -2217,11 +2297,9 @@ function _ensureUserStatsStmt() {
         (SELECT COUNT(*) FROM reading_history rh JOIN active_books b ON b.id = rh.book_id WHERE rh.username = ?) AS readingCount,
         (SELECT COUNT(*) FROM bookmarks WHERE username = ?) AS bookmarkCount,
         (SELECT COUNT(*) FROM read_books rb2 JOIN active_books ab2 ON ab2.id = rb2.book_id WHERE rb2.username = ?) AS readBooksCount,
-        (SELECT COUNT(*) FROM (SELECT ab.series FROM active_books ab LEFT JOIN read_books rb3 ON rb3.username = ? AND rb3.book_id = ab.id WHERE ab.series IS NOT NULL AND ab.series != '' GROUP BY ab.series HAVING COUNT(*) = COUNT(rb3.book_id))) AS readSeriesCount,
         (SELECT COUNT(*) FROM favorite_authors WHERE username = ?) AS favoriteAuthorsCount,
         (SELECT COUNT(*) FROM favorite_series WHERE username = ?) AS favoriteSeriesCount,
         (SELECT COUNT(*) FROM shelves WHERE username = ?) AS shelvesCount,
-        (SELECT COUNT(*) FROM shelf_books sb JOIN shelves s ON s.id = sb.shelf_id WHERE s.username = ?) AS shelfBooksCount,
         (SELECT COUNT(*) FROM reader_bookmarks WHERE username = ?) AS readerBookmarksCount,
         (SELECT COUNT(*) FROM reader_annotations WHERE username = ?) AS readerAnnotationsCount,
         (SELECT created_at FROM users WHERE username = ?) AS createdAt
@@ -2231,16 +2309,14 @@ function _ensureUserStatsStmt() {
 }
 
 export function getUserStats(username) {
-  const row = _ensureUserStatsStmt().get(username, username, username, username, username, username, username, username, username, username, username);
+  const row = _ensureUserStatsStmt().get(username, username, username, username, username, username, username, username, username);
   return {
     readingCount: row?.readingCount || 0,
     bookmarkCount: row?.bookmarkCount || 0,
     readBooksCount: row?.readBooksCount || 0,
-    readSeriesCount: row?.readSeriesCount || 0,
     favoriteAuthorsCount: row?.favoriteAuthorsCount || 0,
     favoriteSeriesCount: row?.favoriteSeriesCount || 0,
     shelvesCount: row?.shelvesCount || 0,
-    shelfBooksCount: row?.shelfBooksCount || 0,
     readerBookmarksCount: row?.readerBookmarksCount || 0,
     readerAnnotationsCount: row?.readerAnnotationsCount || 0,
     createdAt: row?.createdAt || null

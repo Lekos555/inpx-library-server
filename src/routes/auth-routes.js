@@ -16,7 +16,7 @@ import {
 } from '../db.js';
 import { logSystemEvent } from '../services/system-events.js';
 import {
-  renderLogin, renderAdminLogin, renderRegister, renderProfile,
+  renderLogin, renderAdminLogin, renderRegister, renderProfile, renderProfileSettings,
 } from '../templates.js';
 
 function getRecaptchaKeys() {
@@ -48,10 +48,21 @@ export function registerAuthRoutes(app, deps) {
       stats: getCachedStats(),
       indexStatus: getIndexStatus(),
       userStats: getUserStats(user.username),
-      ereaderEmail: getEreaderEmail(user.username),
       recentBooks: getReadingHistory(user.username, 5),
       readerBookmarks: getAllReaderBookmarks(user.username, 10),
       readerAnnotations: getAllReaderAnnotations(user.username, 10),
+      flash,
+      csrfToken
+    };
+  }
+
+  function buildProfileSettingsData(user, flash = '', csrfToken = '') {
+    return {
+      user,
+      stats: getCachedStats(),
+      indexStatus: getIndexStatus(),
+      userStats: getUserStats(user.username),
+      ereaderEmail: getEreaderEmail(user.username),
       flash,
       csrfToken
     };
@@ -183,22 +194,26 @@ export function registerAuthRoutes(app, deps) {
     res.send(renderProfile(buildProfileData(req.user, '', req.csrfToken || '')));
   });
 
+  app.get('/profile/settings', requireWebAuth, (req, res) => {
+    res.send(renderProfileSettings(buildProfileSettingsData(req.user, '', req.csrfToken || '')));
+  });
+
   app.post('/profile/email', requireWebAuth, (req, res) => {
     const rawEmail = String(req.body.ereaderEmail || '').trim();
     if (rawEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEmail)) {
-      return res.status(400).send(renderProfile(buildProfileData(req.user, t('profile.invalidEmail'), req.csrfToken || '')));
+      return res.status(400).send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.invalidEmail'), req.csrfToken || '')));
     }
     try {
       setEreaderEmail(req.user.username, rawEmail);
-      res.send(renderProfile(buildProfileData(req.user, t('profile.emailSaved'), req.csrfToken || '')));
+      res.send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.emailSaved'), req.csrfToken || '')));
     } catch (error) {
-      res.status(500).send(renderProfile(buildProfileData(req.user, translateKnownErrorMessage(error.message), req.csrfToken || '')));
+      res.status(500).send(renderProfileSettings(buildProfileSettingsData(req.user, translateKnownErrorMessage(error.message), req.csrfToken || '')));
     }
   });
 
   app.post('/profile/password', requireWebAuth, (req, res) => {
     const { currentPassword, newPassword, confirmPassword } = req.body;
-    const renderErr = (msg) => res.status(400).send(renderProfile(buildProfileData(req.user, msg, req.csrfToken || '')));
+    const renderErr = (msg) => res.status(400).send(renderProfileSettings(buildProfileSettingsData(req.user, msg, req.csrfToken || '')));
 
     const fullUser = getUserByUsername(req.user.username);
     if (!fullUser || !verifyPassword(currentPassword, fullUser.passwordHash)) {
@@ -210,7 +225,7 @@ export function registerAuthRoutes(app, deps) {
     try {
       changePassword(req.user.username, newPassword);
       logSystemEvent('info', 'auth', 'password changed', { username: req.user.username });
-      res.send(renderProfile(buildProfileData(req.user, t('profile.passwordChanged'), req.csrfToken || '')));
+      res.send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.passwordChanged'), req.csrfToken || '')));
     } catch (error) {
       return renderErr(translateKnownErrorMessage(error.message));
     }

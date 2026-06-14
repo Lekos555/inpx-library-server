@@ -1,7 +1,7 @@
 /**
  * OPDS (Open Publication Distribution System) template functions.
  */
-import { escapeHtml, sanitizeHtml, siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel } from './shared.js';
+import { escapeHtml, sanitizeHtml, siteTitleForDisplay, t, FORMAT_LABELS, formatGenreLabel, downloadBookPath, apiBookPath } from './shared.js';
 
 function renderOpdsBaseLinks(baseUrl, selfPath, { acquisition = false } = {}) {
   const selfType = acquisition
@@ -47,8 +47,8 @@ function renderOpdsBookEntries(baseUrl, items, { includeContent = false } = {}) 
     const authors = String(book.authors || '').split(':').map((item) => item.trim()).filter(Boolean);
     const extLower = String(book.ext || 'fb2').toLowerCase();
     const sourceMime = OPDS_MIME_FOR_SOURCE[extLower] || 'application/octet-stream';
-    const dl = `/download/${encodeURIComponent(book.id)}?opds=1`;
-    const cover = `/api/books/${encodeURIComponent(book.id)}/cover?opds=1`;
+    const dl = downloadBookPath(book.id, 'opds=1');
+    const cover = `${apiBookPath(book.id, 'cover')}?opds=1`;
 
     // Download links — like inpx-web: source format + zip, and conversion to epub for fb2
     const links = [];

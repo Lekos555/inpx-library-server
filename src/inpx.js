@@ -26,8 +26,10 @@ import {
   suppressBook,
   getSuppressedBookIds,
   invalidateReadCache,
+  getReadBooksCount,
   createDatabaseBackup,
-  onViewRebuild
+  onViewRebuild,
+  deleteReadingHistoryEntry
 } from './db.js';
 import { config } from './config.js';
 import { formatGenreLabel, formatGenreList } from './genre-map.js';
@@ -2724,7 +2726,9 @@ export function searchBooks({ query = '', page = 1, pageSize = 24, field = 'all'
         rankSQL = '0';
       }
 
-      const rankedOrderBy = `${rankSQL} ASC, ${orderBy}`;
+      const rankedOrderBy = sort === 'series'
+        ? `${orderBy}, ${rankSQL} ASC`
+        : `${rankSQL} ASC, ${orderBy}`;
       const items = db.prepare(`
         SELECT id, title, authors, genres, series, series_no AS seriesNo, ext, lang,
                lib_rate AS libRate, archive_name AS archiveName
@@ -5163,16 +5167,54 @@ export function isFavoriteSeries(username, seriesName) {
   return Boolean(_stmtIsFavSeries.get(username, resolved));
 }
 
+const _bookmarksOrderMap = {
+  title: 'b.title COLLATE NOCASE ASC',
+  author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
+  date: 'bm.created_at DESC',
+  rating: 'b.lib_rate DESC, b.title_sort ASC'
+};
+
+let _stmtBookmarksCount = null;
+export function getBookmarksCount(username) {
+  _stmtBookmarksCount ??= db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM bookmarks bm
+    JOIN active_books b ON b.id = bm.book_id
+    WHERE bm.username = ?
+  `);
+  return Number(_stmtBookmarksCount.get(username)?.count || 0);
+}
+
 const _stmtBookmarksBySort = new Map();
 const _stmtBookmarksLimitedBySort = new Map();
-export function getBookmarks(username, sort = 'date', limit = 0) {
-  const orderMap = {
-    title: 'b.title COLLATE NOCASE ASC',
-    author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
-    date: 'bm.created_at DESC',
-    rating: 'b.lib_rate DESC, b.title_sort ASC'
+const _stmtBookmarksPagedBySort = new Map();
+
+export function getBookmarksPage(username, { sort = 'date', page = 1, pageSize = 24 } = {}) {
+  const orderBy = _bookmarksOrderMap[sort] || _bookmarksOrderMap.date;
+  const safePage = Math.max(1, Math.floor(Number(page) || 1));
+  const safeSize = Math.max(1, Math.min(100, Math.floor(Number(pageSize) || 24)));
+  const offset = (safePage - 1) * safeSize;
+  let stmt = _stmtBookmarksPagedBySort.get(orderBy);
+  if (!stmt) {
+    stmt = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+             b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+      FROM bookmarks bm
+      JOIN active_books b ON b.id = bm.book_id
+      WHERE bm.username = ?
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `);
+    _stmtBookmarksPagedBySort.set(orderBy, stmt);
+  }
+  return {
+    items: stmt.all(username, safeSize, offset).map(mapBookListRow),
+    total: getBookmarksCount(username)
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+}
+
+export function getBookmarks(username, sort = 'date', limit = 0) {
+  const orderBy = _bookmarksOrderMap[sort] || _bookmarksOrderMap.date;
   if (limit > 0) {
     let stmt = _stmtBookmarksLimitedBySort.get(orderBy);
     if (!stmt) {
@@ -5294,6 +5336,7 @@ export function toggleReadBook(username, bookId) {
   }
   db.prepare('INSERT OR IGNORE INTO users(username) VALUES(?)').run(username);
   db.prepare('INSERT OR IGNORE INTO read_books(username, book_id) VALUES(?, ?)').run(username, bookId);
+  deleteReadingHistoryEntry(username, bookId);
   invalidateReadCache(username);
   return true;
 }
@@ -5320,16 +5363,43 @@ export function addReadBooksIfMissing(username, bookIds) {
   return { added, already, missing };
 }
 
+const _readBooksOrderMap = {
+  title: 'b.title COLLATE NOCASE ASC',
+  author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
+  date: 'rb.created_at DESC',
+  rating: 'b.lib_rate DESC, b.title_sort ASC'
+};
+
 const _stmtReadBooksBySort = new Map();
 const _stmtReadBooksLimitedBySort = new Map();
-export function getReadBooks(username, sort = 'date', limit = 0) {
-  const orderMap = {
-    title: 'b.title COLLATE NOCASE ASC',
-    author: `COALESCE(b.authors, '') COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC`,
-    date: 'rb.created_at DESC',
-    rating: 'b.lib_rate DESC, b.title_sort ASC'
+const _stmtReadBooksPagedBySort = new Map();
+
+export function getReadBooksPage(username, { sort = 'date', page = 1, pageSize = 24 } = {}) {
+  const orderBy = _readBooksOrderMap[sort] || _readBooksOrderMap.date;
+  const safePage = Math.max(1, Math.floor(Number(page) || 1));
+  const safeSize = Math.max(1, Math.min(100, Math.floor(Number(pageSize) || 24)));
+  const offset = (safePage - 1) * safeSize;
+  let stmt = _stmtReadBooksPagedBySort.get(orderBy);
+  if (!stmt) {
+    stmt = db.prepare(`
+      SELECT b.id, b.title, b.authors, b.genres, b.series, b.series_no AS seriesNo,
+             b.ext, b.lib_rate AS libRate, b.archive_name AS archiveName
+      FROM read_books rb
+      JOIN active_books b ON b.id = rb.book_id
+      WHERE rb.username = ?
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `);
+    _stmtReadBooksPagedBySort.set(orderBy, stmt);
+  }
+  return {
+    items: stmt.all(username, safeSize, offset).map(mapBookListRow),
+    total: getReadBooksCount(username)
   };
-  const orderBy = orderMap[sort] || orderMap.date;
+}
+
+export function getReadBooks(username, sort = 'date', limit = 0) {
+  const orderBy = _readBooksOrderMap[sort] || _readBooksOrderMap.date;
   if (limit > 0) {
     let stmt = _stmtReadBooksLimitedBySort.get(orderBy);
     if (!stmt) {

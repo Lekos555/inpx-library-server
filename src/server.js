@@ -25,6 +25,7 @@ import { registerLibraryRoutes, detailsCache, getDetailsFull, bookFlibustaSideca
 // --- Extracted modules ---
 import { securityHeaders } from './middleware/security-headers.js';
 import { browseLimiter } from './middleware/rate-limiter-browse.js';
+import { bookRefUrlRewrite } from './middleware/book-ref-rewrite.js';
 import {
   attachSessionUser, csrfGuard,
   requireAdminWeb
@@ -42,10 +43,11 @@ import { logSystemEvent } from './services/system-events.js';
 import { mirrorIndexingLogsToDataFile, appendIndexDiaryLine } from './services/file-log.js';
 import { installRuntimeLogCapture } from './services/runtime-logs.js';
 import { startScanScheduler } from './services/scheduler.js';
+import { startTelegramBot, stopTelegramBot, restartTelegramBot, isTelegramBotRunning, shouldRunTelegramBotInThisProcess, registerTelegramBotRoutes } from './services/telegram-bot.js';
 import {
   STATS_CACHE_TTL_MS, HOME_SECTIONS_CACHE_TTL_MS
 } from './constants.js';
-import { db, getUserByUsername, hasAdminUser, initDb, ensureSchemaIndexes, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts, countSuppressedBooks, getDbBreakdown } from './db.js';
+import { db, getUserByUsername, hasAdminUser, initDb, ensureSchemaIndexes, analyzeDatabaseYielding, getSmtpSettings, getUserStats, getSetting, setSetting, getSources, decryptValue, getMeta, setMeta, rebuildBooksFtsFromContent, ensureBooksFtsTriggers, rebuildActiveBooksView, refreshCatalogBookCounts, countSuppressedBooks, getDbBreakdown, getTelegramSettings } from './db.js';
 import {
   backfillCatalogSearchFields,
   getConfiguredInpxFile,
@@ -75,6 +77,7 @@ import {
   renderShelves,
   renderShelfDetail,
   renderAdminSmtp,
+  renderAdminTelegram,
   renderAdminUpdate,
   renderAdminSources,
   renderReader,
@@ -241,6 +244,7 @@ export function gracefulExit(code = 0) {
     clearTimeout(postIndexMaintenanceTimer);
     postIndexMaintenanceTimer = null;
   }
+  stopTelegramBot();
   const server = app.get('httpServer');
   const closeDb = () => { try { db.close(); } catch {} };
   if (server) {
@@ -528,6 +532,7 @@ function runRepairMetadata() {
 
 app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 app.use(express.json({ limit: '100kb' }));
+registerTelegramBotRoutes(app);
 app.use(cookieParser());
 // gzip/deflate — обрабатывается пакетом compression (fallback для клиентов без Brotli).
 app.use(compression({
@@ -605,6 +610,7 @@ app.get('/set-lang', (req, res) => {
   res.redirect('/');
 });
 app.use(attachSessionUser);
+app.use(bookRefUrlRewrite);
 app.use(csrfGuard);
 
 /**
@@ -932,9 +938,11 @@ registerAdminRoutes(app, {
   gracefulExit,
   setAllowAnonymousDownload,
   setSiteName,
+  restartTelegramBot,
+  isTelegramBotRunning,
   templates: {
     renderOperations, renderAdminUsers, renderAdminUpdate, renderAdminSmtp,
-    renderAdminEvents, renderAdminSources, renderAdminDuplicates, renderAdminContent
+    renderAdminTelegram, renderAdminEvents, renderAdminSources, renderAdminDuplicates, renderAdminContent
   }
 });
 
@@ -1142,6 +1150,16 @@ async function bootstrap() {
 
     if (process.argv.includes('--reindex')) {
       startBackgroundIndexing(true, false);
+    }
+
+    {
+      const tgDb = getTelegramSettings();
+      if (tgDb.enabled && shouldRunTelegramBotInThisProcess()) {
+        startTelegramBot().catch((err) => {
+          console.warn('[telegram-bot] Ошибка запуска:', err.message);
+          logSystemEvent('warn', 'telegram-bot', 'ошибка запуска', { error: err.message });
+        });
+      }
     }
 
     // Start scan scheduler (if SCAN_INTERVAL_HOURS > 0)

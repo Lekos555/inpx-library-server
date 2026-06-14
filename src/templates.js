@@ -23,7 +23,8 @@ export {
   renderShelves,
   renderShelfDetail,
   renderReader,
-  renderProfile
+  renderProfile,
+  renderProfileSettings
 } from './templates/library.js';
 
 // Admin templates
@@ -35,7 +36,8 @@ export {
   renderAdminContent,
   renderAdminDuplicates,
   renderAdminSources,
-  renderAdminSmtp
+  renderAdminSmtp,
+  renderAdminTelegram
 } from './templates/admin.js';
 
 // OPDS templates
