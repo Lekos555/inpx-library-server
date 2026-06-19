@@ -1,6 +1,6 @@
 {
   "name": "inpx-library-server",
-  "version": "1.7.6",
+  "version": "1.7.7",
   "description": "Self-hosted web server for INPX/FB2 book libraries with search, online reader, OPDS catalog and e-reader delivery",
   "private": true,
   "type": "module",
@@ -33,13 +33,14 @@
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.7",
+    "esbuild": "^0.25.10",
     "express": "^4.21.2",
     "foliate-js": "^1.0.1",
     "iconv-lite": "^0.6.3",
     "jxl-oxide-wasm": "^0.12.5",
+    "msedge-tts": "^2.0.5",
     "nodemailer": "^8.0.2",
     "sharp": "^0.34.5",
-    "unzipper": "^0.12.3",
-    "esbuild": "^0.25.10"
+    "unzipper": "^0.12.3"
   }
 }

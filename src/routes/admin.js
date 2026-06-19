@@ -23,7 +23,7 @@ import {
   setSetting, getSetting, encryptValue, decryptValue, getSources, getSourceById,
   addSource, updateSource, deleteSourceProgressive, forceDetachSourceRowUnsafe,
   getSmtpSettings, setSmtpSettings, getTelegramSettings, setTelegramSettings, resolveTelegramTokenForAdmin, hasAdminUser, listUsers, countAdminUsers,
-  getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser,
+  getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser, setUserTelegramId, setUserTelegramBotAllowed, setUserEreaderEmailAllowed, setUserEreaderEmail,
   db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView, refreshCatalogBookCounts,
   getSuppressedBooks, unsuppressBook, unsuppressAll, getScheduleLog
 } from '../db.js';
@@ -45,6 +45,14 @@ import { clearArchiveReadCaches } from '../archives.js';
 import {
   SYSTEM_EVENTS_MAX_COUNT, SYSTEM_EVENTS_RETAIN_COUNT, SAFE_ADMIN_REDIRECTS
 } from '../constants.js';
+
+function lastFormFieldValue(value) {
+  return Array.isArray(value) ? value[value.length - 1] : value;
+}
+
+function isFormFlagEnabled(value) {
+  return lastFormFieldValue(value) === '1';
+}
 
 // Self-update состояние и логика вынесены в services/self-update.js.
 // i18n-ключи ниже используются при форматировании пользовательского лога апдейта.
@@ -579,6 +587,7 @@ export function registerAdminRoutes(app, deps) {
   app.post('/admin/telegram', requireAdminWeb, async (req, res) => {
     const rawToken = String(req.body.token ?? '').trim();
     const allowedUsers = String(req.body.allowedUsers ?? '').trim();
+    const accessMode = String(req.body.accessMode ?? '').trim();
     const welcomeMessage = String(req.body.welcomeMessage ?? '').trim().slice(0, 4096);
     const profileDescription = String(req.body.profileDescription ?? '').trim().slice(0, 512);
     const profileShortDescription = String(req.body.profileShortDescription ?? '').trim().slice(0, 120);
@@ -605,6 +614,7 @@ export function registerAdminRoutes(app, deps) {
     setTelegramSettings({
       ...(rawToken ? { token: rawToken } : {}),
       allowedUsers,
+      accessMode,
       welcomeMessage,
       profileDescription,
       profileShortDescription,
@@ -918,7 +928,22 @@ export function registerAdminRoutes(app, deps) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashUpdateMissing')));
       }
       updateUser({ username, password, role });
-      logSystemEvent('info', 'auth', 'user updated', { actor: req.user.username, username, role, passwordChanged: Boolean(password) });
+      setUserTelegramId(username, String(req.body.telegramId ?? '').trim());
+      setUserTelegramBotAllowed(username, isFormFlagEnabled(req.body.telegramBotAllowed));
+      setUserEreaderEmailAllowed(username, isFormFlagEnabled(req.body.ereaderEmailAllowed));
+      const rawEreaderEmail = String(req.body.ereaderEmail ?? '').trim();
+      if (rawEreaderEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEreaderEmail)) {
+        throw new Error('Invalid email');
+      }
+      setUserEreaderEmail(username, rawEreaderEmail);
+      logSystemEvent('info', 'auth', 'user updated', {
+        actor: req.user.username,
+        username,
+        role,
+        passwordChanged: Boolean(password),
+        telegramBotAllowed: isFormFlagEnabled(req.body.telegramBotAllowed),
+        ereaderEmailAllowed: isFormFlagEnabled(req.body.ereaderEmailAllowed),
+      });
       res.redirect('/admin/users?flash=' + encodeURIComponent(tp('admin.users.flashUpdated', { username })));
     } catch (error) {
       res.redirect('/admin/users?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));

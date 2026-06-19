@@ -29,7 +29,10 @@ export function registerBrowseApiRoutes(app) {
   app.get('/api/library/:view(recent|continue|read|recommended)', requireBrowseAuth, (req, res) => {
     const view = String(req.params.view);
     const page = safePage(req.query.page);
-    const pageSize = 24;
+    const pageSizeRaw = Number(req.query.pageSize);
+    const pageSize = Number.isFinite(pageSizeRaw) && pageSizeRaw > 0 && pageSizeRaw <= 24
+      ? Math.floor(pageSizeRaw)
+      : 24;
     const type = String(req.query.type || '').trim();
     const sort = ['recent', 'title', 'author', 'series', 'rating'].includes(String(req.query.sort || '')) ? String(req.query.sort) : 'title';
     const order = String(req.query.order || '');

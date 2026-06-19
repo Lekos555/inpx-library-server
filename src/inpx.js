@@ -4486,6 +4486,26 @@ let _stmtReadSeriesCount = null;
 let _stmtReadSeriesItems = null;
 let _stmtReadViewCount = null;
 let _stmtReadViewItems = null;
+let _stmtCachedBookAnnotation = null;
+
+function attachCachedAnnotationsToBooks(books) {
+  if (!Array.isArray(books) || !books.length) return books;
+  _stmtCachedBookAnnotation ??= db.prepare(
+    `SELECT annotation, annotation_is_html AS annotationIsHtml FROM book_details_cache WHERE book_id = ?`
+  );
+  for (const book of books) {
+    if (!book?.id || book.annotation) continue;
+    try {
+      const row = _stmtCachedBookAnnotation.get(String(book.id));
+      if (row?.annotation) {
+        book.annotation = row.annotation;
+        book.annotationIsHtml = Boolean(row.annotationIsHtml);
+      }
+    } catch { /* ignore */ }
+  }
+  return books;
+}
+
 export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, username = '', type = '', sort = 'title', order = '' } = {}) {
   const offset = (page - 1) * pageSize;
 
@@ -4521,6 +4541,7 @@ export function getLibraryView(view = 'recent', { page = 1, pageSize = 24, usern
       LIMIT ? OFFSET ?
     `).all(normalizedUsername, normalizedUsername, pageSize, offset).map(mapBookListRow);
     attachSeriesListsToBooks(items);
+    attachCachedAnnotationsToBooks(items);
     return { total, items };
   }
 

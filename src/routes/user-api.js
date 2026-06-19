@@ -5,7 +5,7 @@ import { ApiErrorCode, apiFail } from '../api-errors.js';
 import {
   db, getUserShelves, getShelfById, createShelf, updateShelf, deleteShelf,
   addBookToShelf, removeBookFromShelf, getShelfBooks, getBookShelves,
-  getEreaderEmail, setEreaderEmail, getSmtpSettings
+  getEreaderEmail, setEreaderEmail, getSmtpSettings, getUserByUsername, isEreaderEmailAllowedForUser,
 } from '../db.js';
 import {
   getBookById, getBooksByIds, getReadingHistory, getBookmarks, getFavoriteAuthors, getFavoriteSeries,
@@ -28,6 +28,13 @@ import { normalizeBatchIdsParam, resolveAdhocBookIdsFromClientList, resolveBatch
  */
 export function registerUserApiRoutes(app, deps) {
   const { batchEmailLocks } = deps;
+
+  function denyEreaderEmailAccess(res, user) {
+    const full = getUserByUsername(user.username);
+    if (isEreaderEmailAllowedForUser(full)) return false;
+    apiFail(res, 403, ApiErrorCode.EREADER_EMAIL_DENIED, t('profile.ereaderEmail.accessDenied'));
+    return true;
+  }
 
   /* ── History & Favorites data ─────────────────────────────────── */
 
@@ -249,6 +256,7 @@ export function registerUserApiRoutes(app, deps) {
   });
 
   app.post('/api/ereader-email', requireApiAuth, (req, res) => {
+    if (denyEreaderEmailAccess(res, req.user)) return;
     const rawEmail = String(req.body.email || '').trim();
     if (rawEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEmail)) {
       return apiFail(res, 400, ApiErrorCode.PROFILE_INVALID_EMAIL, t('profile.invalidEmail'));
@@ -261,6 +269,7 @@ export function registerUserApiRoutes(app, deps) {
 
   app.post('/api/send-to-ereader/batch', requireApiAuth, async (req, res, next) => {
     try {
+      if (denyEreaderEmailAccess(res, req.user)) return;
       const ereaderEmail = getEreaderEmail(req.user.username);
       if (!ereaderEmail) {
         return apiFail(res, 400, ApiErrorCode.EREADER_EMAIL_MISSING, t('api.ereader.emailMissing'));
@@ -408,6 +417,7 @@ export function registerUserApiRoutes(app, deps) {
 
   app.post('/api/send-to-ereader/:id', requireApiAuth, async (req, res, next) => {
     try {
+      if (denyEreaderEmailAccess(res, req.user)) return;
       const ereaderEmail = getEreaderEmail(req.user.username);
       if (!ereaderEmail) {
         return apiFail(res, 400, ApiErrorCode.EREADER_EMAIL_MISSING, t('api.ereader.emailMissing'));

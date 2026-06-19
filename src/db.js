@@ -116,6 +116,40 @@ function ensureUsersSchema() {
   if (!hasBlocked) {
     db.exec(`ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`);
   }
+
+  const hasTelegramId = columns.some((column) => column.name === 'telegram_id');
+  if (!hasTelegramId) {
+    db.exec(`ALTER TABLE users ADD COLUMN telegram_id TEXT DEFAULT NULL`);
+  }
+
+  const hasTelegramLinkedAt = columns.some((column) => column.name === 'telegram_linked_at');
+  if (!hasTelegramLinkedAt) {
+    db.exec(`ALTER TABLE users ADD COLUMN telegram_linked_at TEXT DEFAULT NULL`);
+  }
+
+  const hasTelegramBotAllowed = columns.some((column) => column.name === 'telegram_bot_allowed');
+  if (!hasTelegramBotAllowed) {
+    db.exec(`ALTER TABLE users ADD COLUMN telegram_bot_allowed INTEGER NOT NULL DEFAULT 1`);
+  }
+
+  const hasEreaderEmailAllowed = columns.some((column) => column.name === 'ereader_email_allowed');
+  if (!hasEreaderEmailAllowed) {
+    db.exec(`ALTER TABLE users ADD COLUMN ereader_email_allowed INTEGER NOT NULL DEFAULT 1`);
+  }
+}
+
+function ensureTelegramLinkSchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS telegram_link_tokens (
+      token TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_telegram_link_tokens_username ON telegram_link_tokens(username);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;
+  `);
 }
 
 function ensureBooksSchema() {
@@ -377,11 +411,179 @@ let _stmtGetUser = null;
 export function getUserByUsername(username) {
   _stmtGetUser ??= db.prepare(`
     SELECT username, password_hash AS passwordHash, role, created_at AS createdAt,
-           COALESCE(session_gen, 0) AS sessionGen, COALESCE(blocked, 0) AS blocked
+           COALESCE(session_gen, 0) AS sessionGen, COALESCE(blocked, 0) AS blocked,
+           telegram_id AS telegramId, telegram_linked_at AS telegramLinkedAt,
+           COALESCE(telegram_bot_allowed, 1) AS telegramBotAllowed,
+           COALESCE(ereader_email_allowed, 1) AS ereaderEmailAllowed
     FROM users
     WHERE username = ?
   `);
   return _stmtGetUser.get(username);
+}
+
+let _stmtGetUserByTelegramId = null;
+export function getUserByTelegramId(telegramId) {
+  const normalized = normalizeTelegramId(telegramId);
+  if (!normalized) return null;
+  _stmtGetUserByTelegramId ??= db.prepare(`
+    SELECT username, password_hash AS passwordHash, role, created_at AS createdAt,
+           COALESCE(session_gen, 0) AS sessionGen, COALESCE(blocked, 0) AS blocked,
+           telegram_id AS telegramId, telegram_linked_at AS telegramLinkedAt,
+           COALESCE(telegram_bot_allowed, 1) AS telegramBotAllowed,
+           COALESCE(ereader_email_allowed, 1) AS ereaderEmailAllowed
+    FROM users
+    WHERE telegram_id = ?
+  `);
+  return _stmtGetUserByTelegramId.get(normalized);
+}
+
+export function isTelegramBotAllowedForUser(user) {
+  if (!user || user.blocked) return false;
+  return Number(user.telegramBotAllowed ?? 1) !== 0;
+}
+
+export function isEreaderEmailAllowedForUser(user) {
+  if (!user || user.blocked) return false;
+  return Number(user.ereaderEmailAllowed ?? 1) !== 0;
+}
+
+export function setUserTelegramBotAllowed(username, allowed) {
+  const normalizedUsername = String(username || '').trim();
+  const existing = getUserByUsername(normalizedUsername);
+  if (!existing) throw new Error('User not found');
+  db.prepare(`
+    UPDATE users SET telegram_bot_allowed = ? WHERE username = ?
+  `).run(allowed ? 1 : 0, normalizedUsername);
+  return getUserByUsername(normalizedUsername);
+}
+
+export function setUserEreaderEmailAllowed(username, allowed) {
+  const normalizedUsername = String(username || '').trim();
+  const existing = getUserByUsername(normalizedUsername);
+  if (!existing) throw new Error('User not found');
+  db.prepare(`
+    UPDATE users SET ereader_email_allowed = ? WHERE username = ?
+  `).run(allowed ? 1 : 0, normalizedUsername);
+  return getUserByUsername(normalizedUsername);
+}
+
+export function normalizeTelegramId(value) {
+  const s = String(value ?? '').trim();
+  if (!/^\d{5,20}$/.test(s)) return null;
+  return s;
+}
+
+const TELEGRAM_LINK_TOKEN_TTL_MS = 10 * 60_000;
+
+function pruneExpiredTelegramLinkTokens() {
+  db.prepare(`DELETE FROM telegram_link_tokens WHERE expires_at < datetime('now')`).run();
+}
+
+export function createTelegramLinkToken(username) {
+  const normalizedUsername = String(username || '').trim();
+  const user = getUserByUsername(normalizedUsername);
+  if (!user) throw new Error('User not found');
+  if (user.blocked) throw new Error('Account is blocked');
+  if (!isTelegramBotAllowedForUser(user)) throw new Error('Telegram bot access denied');
+
+  db.prepare('DELETE FROM telegram_link_tokens WHERE username = ?').run(normalizedUsername);
+  pruneExpiredTelegramLinkTokens();
+
+  const token = crypto.randomBytes(24).toString('hex');
+  const expiresAt = new Date(Date.now() + TELEGRAM_LINK_TOKEN_TTL_MS).toISOString();
+  db.prepare(`
+    INSERT INTO telegram_link_tokens(token, username, expires_at)
+    VALUES(?, ?, ?)
+  `).run(token, normalizedUsername, expiresAt);
+  return { token, expiresAt };
+}
+
+export function completeTelegramLink(token, telegramId) {
+  const normalizedToken = String(token || '').trim();
+  const normalizedTgId = normalizeTelegramId(telegramId);
+  if (!normalizedToken) throw new Error('Invalid link token');
+  if (!normalizedTgId) throw new Error('Invalid Telegram ID');
+
+  return db.transaction(() => {
+    pruneExpiredTelegramLinkTokens();
+    const row = db.prepare(`
+      SELECT token, username, expires_at AS expiresAt
+      FROM telegram_link_tokens
+      WHERE token = ?
+    `).get(normalizedToken);
+    if (!row || new Date(row.expiresAt).getTime() < Date.now()) {
+      if (row) db.prepare('DELETE FROM telegram_link_tokens WHERE token = ?').run(normalizedToken);
+      throw new Error('Link token expired or invalid');
+    }
+
+    const existingUser = getUserByTelegramId(normalizedTgId);
+    if (existingUser && existingUser.username !== row.username) {
+      throw new Error('This Telegram account is already linked to another user');
+    }
+
+    const target = getUserByUsername(row.username);
+    if (!target || target.blocked) throw new Error('Account is blocked');
+    if (!isTelegramBotAllowedForUser(target)) throw new Error('Telegram bot access denied');
+    if (target.telegramId && target.telegramId !== normalizedTgId) {
+      throw new Error('User already has a different Telegram account linked');
+    }
+
+    db.prepare(`
+      UPDATE users
+      SET telegram_id = ?, telegram_linked_at = datetime('now')
+      WHERE username = ?
+    `).run(normalizedTgId, row.username);
+    db.prepare('DELETE FROM telegram_link_tokens WHERE username = ?').run(row.username);
+
+    return { username: row.username, telegramId: normalizedTgId };
+  })();
+}
+
+export function unlinkTelegram(username) {
+  const normalizedUsername = String(username || '').trim();
+  db.prepare(`
+    UPDATE users SET telegram_id = NULL, telegram_linked_at = NULL WHERE username = ?
+  `).run(normalizedUsername);
+  db.prepare('DELETE FROM telegram_link_tokens WHERE username = ?').run(normalizedUsername);
+}
+
+export function unlinkTelegramByTelegramId(telegramId) {
+  const user = getUserByTelegramId(telegramId);
+  if (!user) return false;
+  unlinkTelegram(user.username);
+  return true;
+}
+
+export function setUserTelegramId(username, telegramId) {
+  const normalizedUsername = String(username || '').trim();
+  const existing = getUserByUsername(normalizedUsername);
+  if (!existing) throw new Error('User not found');
+
+  const raw = String(telegramId ?? '').trim();
+  if (!raw) {
+    unlinkTelegram(normalizedUsername);
+    return getUserByUsername(normalizedUsername);
+  }
+
+  const normalized = normalizeTelegramId(raw);
+  if (!normalized) throw new Error('Invalid Telegram ID');
+
+  const owner = getUserByTelegramId(normalized);
+  if (owner && owner.username !== normalizedUsername) {
+    throw new Error('This Telegram account is already linked to another user');
+  }
+
+  db.prepare(`
+    UPDATE users
+    SET telegram_id = ?, telegram_linked_at = datetime('now')
+    WHERE username = ?
+  `).run(normalized, normalizedUsername);
+  db.prepare('DELETE FROM telegram_link_tokens WHERE username = ?').run(normalizedUsername);
+  return getUserByUsername(normalizedUsername);
+}
+
+export function getTelegramBotUsername() {
+  return getMeta('telegram_bot_username') || '';
 }
 
 let _stmtListUsers = null;
@@ -389,6 +591,11 @@ export function listUsers() {
   _stmtListUsers ??= db.prepare(`
     SELECT u.username, u.role, u.created_at AS createdAt,
       COALESCE(u.blocked, 0) AS blocked,
+      u.telegram_id AS telegramId,
+      u.telegram_linked_at AS telegramLinkedAt,
+      COALESCE(u.telegram_bot_allowed, 1) AS telegramBotAllowed,
+      COALESCE(u.ereader_email_allowed, 1) AS ereaderEmailAllowed,
+      COALESCE(u.ereader_email, '') AS ereaderEmail,
       (SELECT COUNT(*) FROM reading_history rh WHERE rh.username = u.username) AS readingCount,
       (SELECT MAX(rh.last_opened_at) FROM reading_history rh WHERE rh.username = u.username) AS lastReadAt
     FROM users u
@@ -483,6 +690,7 @@ export function deleteUser(username) {
     db.prepare(`DELETE FROM favorite_series WHERE username = ?`).run(normalizedUsername);
     db.prepare(`DELETE FROM shelf_books WHERE shelf_id IN (SELECT id FROM shelves WHERE username = ?)`).run(normalizedUsername);
     db.prepare(`DELETE FROM shelves WHERE username = ?`).run(normalizedUsername);
+    db.prepare(`DELETE FROM telegram_link_tokens WHERE username = ?`).run(normalizedUsername);
     return db.prepare(`DELETE FROM users WHERE username = ?`).run(normalizedUsername).changes;
   })();
 }
@@ -1022,6 +1230,7 @@ WHERE rp.progress >= 99
   `);
 
   ensureUsersSchema();
+  ensureTelegramLinkSchema();
   ensureBooksSchema();
   db.exec(`
     CREATE TABLE IF NOT EXISTS library_dedup_projection (
@@ -1952,11 +2161,15 @@ function isTelegramAdminConfigured() {
     .some((key) => telegramSettingExists(key));
 }
 
+const TELEGRAM_ACCESS_MODES = new Set(['open', 'linked_only', 'whitelist_or_linked']);
+
 export function getTelegramSettings() {
+  const accessModeRaw = getSetting('telegram_access_mode') || 'whitelist_or_linked';
   return {
     adminConfigured: isTelegramAdminConfigured(),
     token: decryptValue(getSetting('telegram_bot_token')) || '',
     allowedUsers: getSetting('telegram_allowed_users'),
+    accessMode: TELEGRAM_ACCESS_MODES.has(accessModeRaw) ? accessModeRaw : 'whitelist_or_linked',
     welcomeMessage: getSetting('telegram_welcome_message') || '',
     profileDescription: getSetting('telegram_profile_description') || '',
     profileShortDescription: getSetting('telegram_profile_short_description') || '',
@@ -1965,12 +2178,16 @@ export function getTelegramSettings() {
   };
 }
 
-export function setTelegramSettings({ token, allowedUsers, enabled, welcomeMessage, profileDescription, profileShortDescription }) {
+export function setTelegramSettings({ token, allowedUsers, accessMode, enabled, welcomeMessage, profileDescription, profileShortDescription }) {
   if (token !== undefined && String(token).trim()) {
     setSetting('telegram_bot_token', encryptValue(String(token).trim()));
   }
   if (allowedUsers !== undefined) {
     setSetting('telegram_allowed_users', String(allowedUsers ?? ''));
+  }
+  if (accessMode !== undefined) {
+    const mode = TELEGRAM_ACCESS_MODES.has(accessMode) ? accessMode : 'whitelist_or_linked';
+    setSetting('telegram_access_mode', mode);
   }
   if (welcomeMessage !== undefined) {
     setSetting('telegram_welcome_message', String(welcomeMessage ?? ''));
@@ -1995,6 +2212,7 @@ export function resolveTelegramRuntimeConfig() {
     return {
       token: String(tg.token || '').trim(),
       allowedUsers: list.length ? list : null,
+      accessMode: tg.accessMode,
       enabled: tg.enabled,
     };
   }
@@ -2003,6 +2221,7 @@ export function resolveTelegramRuntimeConfig() {
   return {
     token: String(tg.token || envToken).trim(),
     allowedUsers: envUsers,
+    accessMode: tg.accessMode || 'whitelist_or_linked',
     enabled: tg.enabled,
   };
 }
@@ -2051,9 +2270,16 @@ export function setReadingPosition(username, bookId, position, progress) {
 }
 
 let _stmtDeleteReadHistory = null;
+let _stmtDeleteReadPos = null;
 export function deleteReadingHistoryEntry(username, bookId) {
+  const u = String(username || '').trim();
+  const id = String(bookId ?? '');
   _stmtDeleteReadHistory ??= db.prepare('DELETE FROM reading_history WHERE username = ? AND book_id = ?');
-  const result = _stmtDeleteReadHistory.run(String(username || '').trim(), String(bookId ?? ''));
+  const result = _stmtDeleteReadHistory.run(u, id);
+  if (result.changes > 0) {
+    _stmtDeleteReadPos ??= db.prepare('DELETE FROM reading_positions WHERE username = ? AND book_id = ?');
+    _stmtDeleteReadPos.run(u, id);
+  }
   return result.changes > 0;
 }
 
@@ -2178,9 +2404,18 @@ export function getEreaderEmail(username) {
 }
 
 let _stmtSetEreaderEmail = null;
-export function setEreaderEmail(username, email) {
+export function setUserEreaderEmail(username, email) {
+  const user = getUserByUsername(username);
+  if (!user) throw new Error('User not found');
   _stmtSetEreaderEmail ??= db.prepare('UPDATE users SET ereader_email = ? WHERE username = ?');
   _stmtSetEreaderEmail.run(String(email || '').trim(), username);
+}
+
+export function setEreaderEmail(username, email) {
+  const user = getUserByUsername(username);
+  if (!user) throw new Error('User not found');
+  if (!isEreaderEmailAllowedForUser(user)) throw new Error('E-reader email access denied');
+  setUserEreaderEmail(username, email);
 }
 
 export function getReadBooks(username, sort = 'title', order = '') {

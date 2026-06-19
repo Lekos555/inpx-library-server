@@ -5,8 +5,9 @@
 import fs from 'node:fs/promises';
 import cluster from 'node:cluster';
 import { config } from '../config.js';
-import { getMeta, setMeta, resolveTelegramRuntimeConfig, getTelegramSettings } from '../db.js';
-import { searchCatalog, getBookById, getBooksByFacet, getAuthorBooksGrouped } from '../inpx.js';
+import { getMeta, setMeta, resolveTelegramRuntimeConfig, getTelegramSettings, getUserByTelegramId, completeTelegramLink, unlinkTelegramByTelegramId, getUserShelves, getShelfBooks, getShelfById, isTelegramBotAllowedForUser } from '../db.js';
+import { searchCatalog, getBookById, getBooksByFacet, getAuthorBooksGrouped, getFavoriteAuthorsLight, getFavoriteSeriesLight } from '../inpx.js';
+import { getRecommendedLibraryView } from './recommendations.js';
 import { resolveDownload } from '../conversion.js';
 import { getDetailsFull, resolveBestCoverDetails } from '../routes/library.js';
 import {
@@ -27,6 +28,9 @@ const TG_API = 'https://api.telegram.org';
 const POLL_TIMEOUT_SEC = 30;
 /** Книг/элементов на страницу (Telegram: каждая книга — отдельное сообщение). */
 const PAGE_SIZE = 10;
+/** Рекомендации в TG — короткая подборка, не весь кеш (до 72 на сайте). */
+const TG_RECOMMENDED_PAGE_SIZE = 5;
+const TG_RECOMMENDED_MAX_ITEMS = 10;
 /** Лимит Telegram Bot API для sendDocument */
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 /** Лимит подписи к фото в Telegram */
@@ -92,6 +96,8 @@ let _dlSeq = 0;
 let _token = '';
 /** null = все пользователи разрешены; Set<string> = конкретные Telegram user ID */
 let _allowedUsers = null;
+/** @type {'open'|'linked_only'|'whitelist_or_linked'} */
+let _accessMode = 'whitelist_or_linked';
 let _offset = 0;
 let _abortCtrl = null;
 /** @type {'polling'|'webhook'} */
@@ -305,6 +311,11 @@ async function registerBotCommands() {
     commands: [
       { command: 'start', description: 'Начало работы' },
       { command: 'help', description: 'Справка' },
+      { command: 'me', description: 'Статус привязки аккаунта' },
+      { command: 'shelves', description: 'Мои полки' },
+      { command: 'favorites', description: 'Избранное' },
+      { command: 'recommended', description: 'Рекомендации' },
+      { command: 'unlink', description: 'Отвязать аккаунт' },
       { command: 'author', description: 'Поиск автора' },
       { command: 'series', description: 'Поиск серии' },
       { command: 'search', description: 'Поиск книг' },
@@ -347,7 +358,95 @@ function esc(s) {
 }
 
 function isAllowed(userId) {
-  return !_allowedUsers || _allowedUsers.has(String(userId));
+  const id = String(userId ?? '');
+  if (!id) return false;
+
+  const linkedUser = getUserByTelegramId(id);
+  if (linkedUser) return isTelegramBotAllowedForUser(linkedUser);
+
+  if (_accessMode === 'linked_only') return false;
+
+  return !_allowedUsers || _allowedUsers.has(id);
+}
+
+function resolveLinkedUser(userId) {
+  const user = getUserByTelegramId(userId);
+  return isTelegramBotAllowedForUser(user) ? user : null;
+}
+
+function telegramAccessDeniedMessage(userId) {
+  const user = getUserByTelegramId(userId);
+  if (user && !user.blocked && !Number(user.telegramBotAllowed ?? 1)) {
+    return '⛔ Доступ к боту для вашего аккаунта отключён администратором.';
+  }
+  return '⛔ У вас нет доступа к этому боту.';
+}
+
+async function handleTelegramLink(chatId, telegramUserId, token) {
+  try {
+    const result = completeTelegramLink(token, telegramUserId);
+    await sendText(
+      chatId,
+      `✅ <b>Аккаунт привязан</b>\n\n` +
+        `Вы вошли как <b>${esc(result.username)}</b>.\n` +
+        `Доступны: <code>/shelves</code> · <code>/favorites</code> · <code>/recommended</code>\n\n` +
+        `Отвязать: <code>/unlink</code> · Статус: <code>/me</code>`,
+    );
+    logSystemEvent('info', 'telegram-bot', 'telegram account linked', {
+      username: result.username,
+      telegramId: result.telegramId,
+    });
+  } catch (err) {
+    const msg = String(err.message || '');
+    let userMsg = '⚠️ Не удалось привязать аккаунт. Ссылка устарела или недействительна.';
+    if (msg.includes('already linked')) {
+      userMsg = '⚠️ Этот Telegram уже привязан к другому аккаунту библиотеки.';
+    } else if (msg.includes('different Telegram')) {
+      userMsg = '⚠️ У аккаунта библиотеки уже привязан другой Telegram.';
+    } else if (msg.includes('blocked')) {
+      userMsg = '⛔ Аккаунт библиотеки заблокирован.';
+    } else if (msg.includes('access denied')) {
+      userMsg = '⛔ Доступ к Telegram-боту для вашего аккаунта отключён администратором.';
+    }
+    await sendText(chatId, userMsg);
+  }
+}
+
+async function handleTelegramMe(chatId, telegramUserId) {
+  const linked = resolveLinkedUser(telegramUserId);
+  if (!linked) {
+    await sendText(
+      chatId,
+      'ℹ️ Telegram не привязан к аккаунту библиотеки.\n\n' +
+        'Привяжите в профиле на сайте: Настройки → Telegram.',
+    );
+    return;
+  }
+  await sendText(
+    chatId,
+    `👤 <b>${esc(linked.username)}</b>\n` +
+      `Telegram ID: <code>${esc(linked.telegramId)}</code>\n` +
+      (linked.telegramLinkedAt ? `Привязан: ${esc(linked.telegramLinkedAt)}\n` : '') +
+      '\n<b>Ваше на сайте:</b>\n' +
+      '<code>/shelves</code> — полки\n' +
+      '<code>/favorites</code> — избранное\n' +
+      '<code>/recommended</code> — рекомендации\n\n' +
+      'Отвязать: <code>/unlink</code>',
+  );
+}
+
+async function handleTelegramUnlink(chatId, telegramUserId) {
+  const linked = resolveLinkedUser(telegramUserId);
+  if (!linked) {
+    await sendText(chatId, 'ℹ️ Telegram не привязан к аккаунту библиотеки.');
+    return;
+  }
+  unlinkTelegramByTelegramId(telegramUserId);
+  logSystemEvent('info', 'telegram-bot', 'telegram account unlinked', {
+    username: linked.username,
+    telegramId: linked.telegramId,
+  });
+  await sendText(chatId, `✅ Аккаунт <b>${esc(linked.username)}</b> отвязан от Telegram.`);
 }
 
 /**
@@ -403,6 +502,14 @@ function buildAuthorOverviewItems(grouped) {
 function resolveWelcomeMessage() {
   const custom = String(getTelegramSettings().welcomeMessage || '').trim();
   return custom || TELEGRAM_DEFAULT_WELCOME;
+}
+
+function parsePersonalCommand(text) {
+  const cmd = String(text || '').trim().split(/\s+/)[0]?.replace(/@\w+$/, '').toLowerCase() || '';
+  if (['/shelves', '/полки', '/shelf', '/полка'].includes(cmd)) return { kind: 'shelves' };
+  if (['/favorites', '/favourites', '/избранное', '/favorite'].includes(cmd)) return { kind: 'favorites' };
+  if (['/recommended', '/recommendations', '/рекомендации', '/recs'].includes(cmd)) return { kind: 'recommended' };
+  return null;
 }
 
 function parseUserQuery(text) {
@@ -556,8 +663,8 @@ async function sendBookCard(chatId, book) {
   return res?.result?.message_id;
 }
 
-function pgRow(page, total) {
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+function pgRow(page, total, pageSize = PAGE_SIZE) {
+  const totalPages = Math.ceil(total / pageSize);
   if (totalPages <= 1) return null;
   const btns = [];
   if (page > 1) btns.push({ text: '◀', callback_data: 'pgp' });
@@ -566,21 +673,21 @@ function pgRow(page, total) {
   return btns;
 }
 
-function listFooterMarkup(chatId, page, total) {
+function listFooterMarkup(chatId, page, total, pageSize = PAGE_SIZE) {
   const rows = [];
   if (canNavigateBack(chatId)) {
     rows.push([{ text: '⬅️ Назад', callback_data: 'nav:back' }]);
   }
-  const pg = pgRow(page, total);
+  const pg = pgRow(page, total, pageSize);
   if (pg) rows.push(pg);
   return rows.length ? { inline_keyboard: rows } : null;
 }
 
-async function sendBookResults(chatId, items, page, total, header) {
+async function sendBookResults(chatId, items, page, total, header, pageSize = PAGE_SIZE) {
   const session = getChatSession(chatId);
   await clearListMessages(chatId);
 
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const totalPages = Math.ceil(total / pageSize);
   const pageInfo = totalPages > 1 ? ` · ${page}/${totalPages}` : '';
   const headerRes = await sendText(chatId, `${header}${pageInfo}`);
   if (headerRes?.ok) session.messages.headerId = headerRes.result.message_id;
@@ -602,9 +709,9 @@ async function sendBookResults(chatId, items, page, total, header) {
     session.messages.progressId = undefined;
   }
 
-  const footer = listFooterMarkup(chatId, page, total);
+  const footer = listFooterMarkup(chatId, page, total, pageSize);
   if (footer) {
-    const shown = (page - 1) * PAGE_SIZE + items.length;
+    const shown = (page - 1) * pageSize + items.length;
     const footerRes = await sendText(chatId, `<i>${shown} из ${total}</i>`, { reply_markup: footer });
     if (footerRes?.ok) session.messages.footerId = footerRes.result.message_id;
   }
@@ -630,6 +737,138 @@ async function sendTextListResults(chatId, items, page, total, header, renderIte
     const footerRes = await sendText(chatId, `<i>${shown} из ${total}</i>`, { reply_markup: footer });
     if (footerRes?.ok) session.messages.footerId = footerRes.result.message_id;
   }
+}
+
+async function doShelvesList(chatId, username, page = 1, { fresh = false } = {}) {
+  const shelves = getUserShelves(username);
+  if (!shelves.length) {
+    await sendText(chatId, '📚 У вас пока нет полок. Создайте их на сайте.');
+    return;
+  }
+  const total = shelves.length;
+  const slice = shelves.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  if (fresh) resetNavForNewSearch(chatId);
+  setSearchState(chatId, { kind: 'shelves-list', username, page, total });
+  await sendTextListResults(
+    chatId,
+    slice,
+    page,
+    total,
+    '📚 <b>Мои полки</b>',
+    async (item) => {
+      const key = regNavKey({ kind: 'shelf', username, shelfId: item.id, shelfName: item.name });
+      const count = Number(item.bookCount) || 0;
+      const res = await sendText(chatId, `📚 <b>${esc(item.name)}</b> — ${count} кн.`, {
+        reply_markup: { inline_keyboard: [[{ text: '📖 Книги полки', callback_data: `fa:${key}` }]] },
+      });
+      return { messageId: res?.result?.message_id };
+    },
+  );
+}
+
+async function doShelfBooks(chatId, username, shelfId, shelfName, page = 1) {
+  const shelf = getShelfById(shelfId, username);
+  if (!shelf) {
+    await sendText(chatId, '❌ Полка не найдена.');
+    return;
+  }
+  const books = getShelfBooks(shelfId, username)
+    .map((row) => getBookById(row.id))
+    .filter(Boolean);
+  const total = books.length;
+  if (!total) {
+    await sendText(chatId, `📚 Полка «${esc(shelfName)}» пока пуста.`);
+    return;
+  }
+  const items = books.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  setSearchState(chatId, { kind: 'shelf-books', username, shelfId, shelfName, page, total });
+  await sendBookResults(chatId, items, page, total, `📚 <b>${esc(shelfName)}</b> — ${total} кн.`);
+}
+
+async function doFavoritesList(chatId, username, page = 1, { fresh = false } = {}) {
+  const authors = getFavoriteAuthorsLight(username, 200);
+  const series = getFavoriteSeriesLight(username, 200);
+  const items = [
+    ...authors.map((a) => ({ type: 'author', name: a.name, displayName: a.displayName || a.name })),
+    ...series.map((s) => ({ type: 'series', name: s.name, displayName: s.displayName || s.name })),
+  ];
+  if (!items.length) {
+    await sendText(chatId, '⭐ Избранное пусто. Добавьте авторов и серии на сайте.');
+    return;
+  }
+  const total = items.length;
+  const slice = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  if (fresh) resetNavForNewSearch(chatId);
+  setSearchState(chatId, { kind: 'favorites-list', username, page, total });
+  await sendTextListResults(
+    chatId,
+    slice,
+    page,
+    total,
+    '⭐ <b>Избранное</b>',
+    async (item) => {
+      if (item.type === 'author') {
+        const key = regNavKey({ kind: 'author', author: item.name });
+        const res = await sendText(chatId, `👤 <b>${esc(item.displayName)}</b>`, {
+          reply_markup: { inline_keyboard: [[{ text: '📚 Серии автора', callback_data: `fa:${key}` }]] },
+        });
+        return { messageId: res?.result?.message_id };
+      }
+      const key = regNavKey({ kind: 'series', series: item.name });
+      const res = await sendText(chatId, `📚 <b>${esc(item.displayName)}</b>`, {
+        reply_markup: { inline_keyboard: [[{ text: '📖 Книги серии', callback_data: `fa:${key}` }]] },
+      });
+      return { messageId: res?.result?.message_id };
+    },
+  );
+}
+
+async function doRecommendedBooks(chatId, username, page = 1, { fresh = false } = {}) {
+  let view = getRecommendedLibraryView({ username, page, pageSize: TG_RECOMMENDED_PAGE_SIZE });
+  if (view.computing) {
+    await sendText(chatId, '⏳ Рекомендации ещё собираются. Попробуйте через минуту.');
+    return;
+  }
+  if (!view.total) {
+    await sendText(
+      chatId,
+      '💡 Рекомендаций пока нет. Добавьте избранное или откройте несколько книг на сайте.',
+    );
+    return;
+  }
+  const cappedTotal = Math.min(view.total, TG_RECOMMENDED_MAX_ITEMS);
+  const maxPage = Math.max(1, Math.ceil(cappedTotal / TG_RECOMMENDED_PAGE_SIZE));
+  const safePage = Math.min(Math.max(1, page), maxPage);
+  if (safePage !== page) {
+    view = getRecommendedLibraryView({ username, page: safePage, pageSize: TG_RECOMMENDED_PAGE_SIZE });
+  }
+  const books = view.items
+    .slice(0, Math.max(0, cappedTotal - (safePage - 1) * TG_RECOMMENDED_PAGE_SIZE))
+    .map((row) => getBookById(row.id))
+    .filter(Boolean);
+  if (!books.length) {
+    await sendText(chatId, '💡 Рекомендации пока недоступны.');
+    return;
+  }
+  if (fresh) resetNavForNewSearch(chatId);
+  setSearchState(chatId, { kind: 'recommended-books', username, page: safePage, total: cappedTotal });
+  const moreOnSite = view.total > cappedTotal
+    ? `\n<i>Ещё ${view.total - cappedTotal} на сайте: /library/recommended</i>`
+    : '';
+  await sendBookResults(
+    chatId,
+    books,
+    safePage,
+    cappedTotal,
+    `💡 <b>Рекомендации для вас</b>${moreOnSite}`,
+    TG_RECOMMENDED_PAGE_SIZE,
+  );
+}
+
+async function dispatchPersonalCommand(chatId, username, cmd) {
+  if (cmd.kind === 'shelves') await doShelvesList(chatId, username, 1, { fresh: true });
+  else if (cmd.kind === 'favorites') await doFavoritesList(chatId, username, 1, { fresh: true });
+  else if (cmd.kind === 'recommended') await doRecommendedBooks(chatId, username, 1, { fresh: true });
 }
 
 // ─── Обработчики команд ───────────────────────────────────────────────────────
@@ -855,6 +1094,9 @@ async function openNavEntry(chatId, entry, page = 1) {
     case 'series':
       await doSeriesBooks(chatId, entry.series, page);
       break;
+    case 'shelf':
+      await doShelfBooks(chatId, entry.username, entry.shelfId, entry.shelfName, page);
+      break;
     default:
       await sendText(chatId, '⚠️ Ссылка устарела. Повторите поиск.');
   }
@@ -870,6 +1112,10 @@ async function restoreSearchState(chatId, state) {
   else if (state.kind === 'author-series') await doAuthorSeriesBooks(chatId, state.authorName, state.seriesName, state.page);
   else if (state.kind === 'author-standalone') await doAuthorStandaloneBooks(chatId, state.authorName, state.page);
   else if (state.kind === 'series-books') await doSeriesBooks(chatId, state.seriesName, state.page);
+  else if (state.kind === 'shelves-list') await doShelvesList(chatId, state.username, state.page);
+  else if (state.kind === 'shelf-books') await doShelfBooks(chatId, state.username, state.shelfId, state.shelfName, state.page);
+  else if (state.kind === 'favorites-list') await doFavoritesList(chatId, state.username, state.page);
+  else if (state.kind === 'recommended-books') await doRecommendedBooks(chatId, state.username, state.page);
 }
 
 async function continueListedSearch(chatId, page) {
@@ -884,6 +1130,10 @@ async function continueListedSearch(chatId, page) {
   else if (state.kind === 'author-series') await doAuthorSeriesBooks(chatId, state.authorName, state.seriesName, page);
   else if (state.kind === 'author-standalone') await doAuthorStandaloneBooks(chatId, state.authorName, page);
   else if (state.kind === 'series-books') await doSeriesBooks(chatId, state.seriesName, page);
+  else if (state.kind === 'shelves-list') await doShelvesList(chatId, state.username, page);
+  else if (state.kind === 'shelf-books') await doShelfBooks(chatId, state.username, state.shelfId, state.shelfName, page);
+  else if (state.kind === 'favorites-list') await doFavoritesList(chatId, state.username, page);
+  else if (state.kind === 'recommended-books') await doRecommendedBooks(chatId, state.username, page);
 }
 
 async function dispatchSearch(chatId, parsed) {
@@ -969,6 +1219,7 @@ async function handleUpdate(upd) {
       if (!chatId) return;
       if (!isAllowed(cq.from?.id)) {
         await answerCb(cq.id, '⛔ Нет доступа.');
+        await sendText(chatId, telegramAccessDeniedMessage(cq.from?.id));
         return;
       }
       const data = cq.data ?? '';
@@ -1008,13 +1259,38 @@ async function handleUpdate(upd) {
     if (!msg?.text) return;
     const chatId = msg.chat.id;
     if (!isAllowed(msg.from?.id)) {
-      await sendText(chatId, '⛔ У вас нет доступа к этому боту.');
+      await sendText(chatId, telegramAccessDeniedMessage(msg.from?.id));
       return;
     }
     const text = msg.text.trim();
 
     if (text === '/start' || text.startsWith('/start ')) {
+      const payload = text === '/start' ? '' : text.slice('/start '.length).trim();
+      if (payload.startsWith('link_')) {
+        await handleTelegramLink(chatId, msg.from?.id, payload.slice('link_'.length));
+        return;
+      }
+      const linked = resolveLinkedUser(msg.from?.id);
+      if (linked) {
+        await sendText(
+          chatId,
+          resolveWelcomeMessage() +
+            `\n\n👤 Вы вошли как <b>${esc(linked.username)}</b>.\n` +
+            'Полки: <code>/shelves</code> · Избранное: <code>/favorites</code> · Рекомендации: <code>/recommended</code>',
+        );
+        return;
+      }
       await sendText(chatId, resolveWelcomeMessage());
+      return;
+    }
+
+    if (text === '/me' || text.startsWith('/me ') || text === '/account' || text.startsWith('/account ')) {
+      await handleTelegramMe(chatId, msg.from?.id);
+      return;
+    }
+
+    if (text === '/unlink' || text.startsWith('/unlink ')) {
+      await handleTelegramUnlink(chatId, msg.from?.id);
       return;
     }
 
@@ -1029,8 +1305,38 @@ async function handleUpdate(upd) {
           '<code>/author Кораблев</code> — обзор серий автора\n' +
           '<code>/series другая сторона</code> — книги серии\n' +
           '<code>/search …</code> — поиск только по книгам\n\n' +
+          '👤 <b>Личное</b> (нужна привязка аккаунта на сайте):\n' +
+          '<code>/shelves</code> — мои полки\n' +
+          '<code>/favorites</code> — избранные авторы и серии\n' +
+          '<code>/recommended</code> — рекомендации\n' +
+          '<code>/me</code> — статус · <code>/unlink</code> — отвязать\n\n' +
           '📥 Кнопки формата под книгой — скачать файл.',
       );
+      return;
+    }
+
+    const personalCmd = parsePersonalCommand(text);
+    if (personalCmd) {
+      const linked = resolveLinkedUser(msg.from?.id);
+      if (!linked) {
+        await sendText(
+          chatId,
+          'ℹ️ Эта команда доступна после привязки аккаунта.\n' +
+            'Профиль на сайте → Настройки → Telegram → «Привязать».',
+        );
+        return;
+      }
+      try {
+        await dispatchPersonalCommand(chatId, linked.username, personalCmd);
+      } catch (err) {
+        logSystemEvent('warn', 'telegram-bot', 'ошибка личной команды', {
+          chatId,
+          kind: personalCmd.kind,
+          username: linked.username,
+          error: err.message,
+        });
+        await sendText(chatId, `❌ Ошибка: ${esc(err.message)}`);
+      }
       return;
     }
 
@@ -1107,7 +1413,7 @@ async function stopTelegramBotAndWait() {
 async function applyTelegramConfig() {
   if (!shouldRunTelegramBotInThisProcess()) return;
 
-  const { token, allowedUsers, enabled } = resolveTelegramRuntimeConfig();
+  const { token, allowedUsers, accessMode, enabled } = resolveTelegramRuntimeConfig();
 
   await stopTelegramBotAndWait();
 
@@ -1115,6 +1421,7 @@ async function applyTelegramConfig() {
 
   _token = token;
   _allowedUsers = allowedUsers ? new Set(allowedUsers.map(String)) : null;
+  _accessMode = accessMode || 'whitelist_or_linked';
   _offset = 0;
   _webhookSecret = config.telegramWebhookSecret || '';
 
@@ -1127,6 +1434,7 @@ async function applyTelegramConfig() {
   await registerBotProfile();
 
   const username = me.result?.username ?? '?';
+  setMeta('telegram_bot_username', username);
   const webhookUrl = resolveWebhookUrl();
   const generation = _generation;
   _running = true;

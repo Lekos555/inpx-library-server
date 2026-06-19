@@ -167,7 +167,15 @@ const KNOWN_ERROR_TO_KEY = {
   'Путь к источнику не указан': 'admin.sources.error.pathRequired',
   'Источник с таким путём уже существует': 'admin.sources.error.duplicatePath',
   'Название полки не указано': 'shelves.error.nameRequired',
-  'Полка с таким названием уже существует': 'shelves.error.duplicateName'
+  'Полка с таким названием уже существует': 'shelves.error.duplicateName',
+  'Invalid Telegram ID': 'profile.telegram.errorInvalidId',
+  'Invalid email': 'profile.invalidEmail',
+  'Link token expired or invalid': 'profile.telegram.errorInvalidToken',
+  'This Telegram account is already linked to another user': 'profile.telegram.errorAlreadyLinked',
+  'User already has a different Telegram account linked': 'profile.telegram.errorDifferentLinked',
+  'Account is blocked': 'auth.accountBlocked',
+  'Telegram bot access denied': 'profile.telegram.accessDenied',
+  'E-reader email access denied': 'profile.ereaderEmail.accessDenied'
 };
 
 export function translateKnownErrorMessage(message) {

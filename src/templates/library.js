@@ -12,7 +12,7 @@ import {
   renderSectionIntro, renderFacetHero, renderAlert, renderAccountNav,
   renderListRemoveBtn, bookIdDataAttr,
   firstAuthorValue, uniqueBooksById, batchSelectInputAttrs, safeDomIdPart,
-  browseTotalLine, canDownloadInUi, renderAuthorLinks, renderSeriesLinks,
+  browseTotalLine, canDownloadInUi, canSendToEmailInUi, renderAuthorLinks, renderSeriesLinks,
   STATIC_ASSET_VERSION, siteTitleForDisplay, READ_CHECK_SVG,
   bookPagePath, readPagePath, apiBookPath,
   t, tp, getLocale, plural, countLabel, formatLocaleInt,
@@ -20,10 +20,13 @@ import {
   formatAuthorLabel, formatLanguageLabel,
   formatGenreLabel, parseGenreCodes
 } from './shared.js';
+import { pickHomeWelcomeQuote } from '../home-welcome-quotes.js';
 
-export function renderHome({ user, stats, indexStatus, history = [], favoriteAuthors = [], favoriteSeries = [], sections = {}, recommendations = [], continueBooks = [], homeSubtitle = '', csrfToken = '', readBookIds = null, hasContinueData = false }) {
+export function renderHome({ user, stats, indexStatus, history = [], favoriteAuthors = [], favoriteSeries = [], sections = {}, recommendations = [], homeSubtitle = '', csrfToken = '', readBookIds = null, hasContinueData = false }) {
   const isAuthenticated = Boolean(user);
   const loginHint = tp('home.loginHint', { login: `<a href="/login">${escapeHtml(t('nav.login'))}</a>` });
+  const quoteInviting = !isAuthenticated || !hasContinueData;
+  const welcomeQuote = pickHomeWelcomeQuote(getLocale(), { inviting: quoteInviting });
   const subtitleText = homeSubtitle === '-' ? '' : (homeSubtitle || t('home.subtitle'));
   const recommendationsShelf = isAuthenticated
     ? (recommendations.length
@@ -38,21 +41,21 @@ export function renderHome({ user, stats, indexStatus, history = [], favoriteAut
     </section>`)
     : '';
   const continueShelf = isAuthenticated && hasContinueData
-    ? (continueBooks.length
-        ? renderHomeShelf({ title: t('home.shelfContinue'), href: '/library/continue', items: continueBooks, type: 'books', isAuthenticated, showBatch: true, user, readBookIds })
-        : `<section class="library-shelf" data-home-continue data-loaded="0">
+    ? `<section class="library-shelf" data-home-continue data-loaded="0">
       <div class="section-title">
         <h2>${escapeHtml(t('home.shelfContinue'))}</h2>
         <div class="actions"><a class="shelf-link" href="/library/continue">${escapeHtml(t('home.showAll'))}</a></div>
       </div>
       <div data-home-continue-grid>${renderSkeletonGrid(6)}</div>
-    </section>`)
+    </section>`
     : '';
   const content = `
-    <section class="page-intro page-intro-home">
-      <div class="page-intro-copy">
-        <h1>${escapeHtml(t('home.title'))}</h1>
-        ${subtitleText ? `<p>${escapeHtml(subtitleText)}</p>` : ''}
+    ${subtitleText ? `<header class="home-page-intro"><p class="home-page-subtitle">${escapeHtml(subtitleText)}</p></header>` : ''}
+    <section class="welcome-hero-banner home-reveal">
+      <div class="welcome-hero-overlay"></div>
+      <div class="welcome-hero-content">
+        <blockquote class="welcome-hero-quote">${escapeHtml(welcomeQuote.quote)}</blockquote>
+        <cite class="welcome-hero-author">${escapeHtml(welcomeQuote.author)}</cite>
       </div>
     </section>
     ${!isAuthenticated ? `<div class="home-inline-note">${loginHint}</div>` : ''}
@@ -352,7 +355,7 @@ export function renderBook({
           <div class="actions actions-primary">
             ${renderDownloadMenu(book, { accent: true, user })}
             <a href="${readPagePath(book.id)}" class="button" target="_blank" rel="noopener noreferrer">${escapeHtml(t('book.read'))}</a>
-            ${isAuthenticated ? `<button class="button" type="button" data-send-to-ereader="${encodeURIComponent(book.id)}">${escapeHtml(t('book.toEmail'))}</button>` : ''}
+            ${isAuthenticated && canSendToEmailInUi(user) ? `<button class="button" type="button" data-send-to-ereader="${encodeURIComponent(book.id)}">${escapeHtml(t('book.toEmail'))}</button>` : ''}
           </div>
         </div>
         ${user?.role === 'admin' ? `<details class="book-edit-disclosure book-edit-disclosure--inline">
@@ -1361,7 +1364,7 @@ export function renderProfile({ user, stats, indexStatus, userStats, recentBooks
   return pageShell({ title: t('profile.title'), content, user, stats, indexStatus, breadcrumbs: [{ label: t('profile.title') }], currentPath: '/profile', csrfToken });
 }
 
-export function renderProfileSettings({ user, stats, indexStatus, userStats, ereaderEmail = '', flash = '', csrfToken = '' }) {
+export function renderProfileSettings({ user, stats, indexStatus, userStats, ereaderEmail = '', telegramId = '', telegramLinkedAt = '', telegramBotAvailable = false, telegramBotAllowed = true, ereaderEmailAllowed = true, flash = '', csrfToken = '' }) {
   const fmtDate = (d) => formatLocaleDateLong(d);
   const initials = String(user.username || '?').replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || '?';
   const roleLabel = user.role === 'admin' ? t('profile.admin') : t('profile.user');
@@ -1392,12 +1395,33 @@ export function renderProfileSettings({ user, stats, indexStatus, userStats, ere
     <div class="table-list">
       <div class="table-row table-row-stack profile-form-row">
         <div>
+          <strong>${escapeHtml(t('profile.telegram.title'))}</strong>
+          <p class="muted" style="margin:4px 0 8px;font-size:12px;">${escapeHtml(t('profile.telegram.hint'))}</p>
+          ${telegramId
+            ? `<p style="margin:0 0 8px;">${escapeHtml(t('profile.telegram.linked'))} · ID <code>${escapeHtml(telegramId)}</code>${telegramLinkedAt ? `<span class="muted"> · ${escapeHtml(fmtDate(telegramLinkedAt))}</span>` : ''}</p>
+               ${telegramBotAllowed
+                 ? `<form method="post" action="/profile/telegram/unlink" class="admin-inline-form" data-confirm="${escapeHtml(t('profile.telegram.unlinkConfirm'))}">
+                      ${csrfHiddenField(csrfToken)}
+                      <button type="submit" class="button-danger">${escapeHtml(t('profile.telegram.unlink'))}</button>
+                    </form>`
+                 : `<p class="muted" style="margin:0;">${escapeHtml(t('profile.telegram.accessDenied'))}</p>`}`
+            : !telegramBotAllowed
+              ? `<p class="muted" style="margin:0;">${escapeHtml(t('profile.telegram.accessDenied'))}</p>`
+              : telegramBotAvailable
+                ? `<a class="button" href="/profile/telegram/link">${escapeHtml(t('profile.telegram.link'))}</a>`
+                : `<p class="muted" style="margin:0;">${escapeHtml(t('profile.telegram.botUnavailable'))}</p>`}
+        </div>
+      </div>
+      <div class="table-row table-row-stack profile-form-row">
+        <div>
           <strong>${escapeHtml(t('profile.ereaderEmail'))}</strong>
-          <form method="post" action="/profile/email" class="vertical-form" style="margin-top:8px;">
-            ${csrfHiddenField(csrfToken)}
-            <div><input type="email" name="ereaderEmail" value="${escapeHtml(ereaderEmail)}" placeholder="kindle@kindle.com"></div>
-            <div class="actions"><button type="submit">${escapeHtml(t('profile.save'))}</button></div>
-          </form>
+          ${ereaderEmailAllowed
+            ? `<form method="post" action="/profile/email" class="vertical-form" style="margin-top:8px;">
+                 ${csrfHiddenField(csrfToken)}
+                 <div><input type="email" name="ereaderEmail" value="${escapeHtml(ereaderEmail)}" placeholder="kindle@kindle.com"></div>
+                 <div class="actions"><button type="submit">${escapeHtml(t('profile.save'))}</button></div>
+               </form>`
+            : `<p class="muted" style="margin:4px 0 0;font-size:12px;">${escapeHtml(t('profile.ereaderEmail.accessDenied'))}</p>`}
         </div>
       </div>
       <div class="table-row table-row-stack profile-form-row">

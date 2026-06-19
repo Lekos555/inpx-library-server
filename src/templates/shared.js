@@ -174,6 +174,10 @@ export function canDownloadInUi(user) {
   return Boolean(user?.username) || _allowAnonymousDownload;
 }
 
+export function canSendToEmailInUi(user) {
+  return Boolean(user?.username) && user.ereaderEmailAllowed !== false;
+}
+
 export function escapeHtml(value = '') {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -588,7 +592,7 @@ export function renderBatchDownloadToolbar(batchContext, { extraActions = '', us
         </div>
       </details>
     </div>`;
-  const emailHtml = user ? renderBatchEmailMenu(batchContext) : '';
+  const emailHtml = user && canSendToEmailInUi(user) ? renderBatchEmailMenu(batchContext) : '';
   return `
     <div class="batch-download-bar">
       <div class="batch-download-cluster">${toolbar}${extraActions}${emailHtml}</div>
@@ -1071,7 +1075,7 @@ export function pageShell({ title, content, user, query = '', field = 'all', sta
   <link rel="apple-touch-icon" href="/favicon-192.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400;1,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/${CSS_ASSET_FILE}?v=${STATIC_ASSET_VERSION}">
   <style>
     .spinner{display:block;width:36px;height:36px;border:4px solid rgba(255,255,255,.15);border-top-color:var(--accent-hover,#a1671b);border-radius:50%;animation:spin .7s linear infinite;}

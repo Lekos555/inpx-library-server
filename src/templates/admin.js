@@ -369,6 +369,10 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
         <strong>${escapeHtml(account.username)}</strong>
         <span class="role-badge role-badge-${escapeHtml(account.role)}">${escapeHtml(account.role)}</span>
         ${account.blocked ? `<span class="badge-blocked">${escapeHtml(t('admin.users.blocked'))}</span>` : ''}
+        ${account.telegramId ? `<span class="muted">TG ${escapeHtml(account.telegramId)}</span>` : ''}
+        ${account.ereaderEmail ? `<span class="muted">${escapeHtml(account.ereaderEmail)}</span>` : ''}
+        ${!account.telegramBotAllowed ? `<span class="badge-blocked">${escapeHtml(t('admin.users.telegramDenied'))}</span>` : ''}
+        ${!account.ereaderEmailAllowed ? `<span class="badge-blocked">${escapeHtml(t('admin.users.emailDenied'))}</span>` : ''}
         ${isSelf(account) ? `<span class="badge-self">${escapeHtml(t('admin.users.self'))}</span>` : ''}
         <span class="muted admin-user-row-date">${escapeHtml(t('admin.users.created'))} ${escapeHtml(fmtDate(account.createdAt))}</span>
       </summary>
@@ -387,6 +391,30 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.newPassword'))}</label>
               <input type="password" name="password" placeholder="${escapeHtml(t('admin.users.noChangePassword'))}">
+            </div>
+            <div class="admin-field-group">
+              <label>${escapeHtml(t('admin.users.telegramId'))}</label>
+              <input type="text" name="telegramId" value="${escapeHtml(account.telegramId || '')}" placeholder="123456789" inputmode="numeric" pattern="\\d*">
+              <span class="admin-field-hint">${escapeHtml(t('admin.users.telegramIdHint'))}</span>
+            </div>
+            <div class="admin-field-group">
+              <label>${escapeHtml(t('admin.users.ereaderEmail'))}</label>
+              <input type="email" name="ereaderEmail" value="${escapeHtml(account.ereaderEmail || '')}" placeholder="kindle@kindle.com">
+              <span class="admin-field-hint">${escapeHtml(t('admin.users.ereaderEmailHint'))}</span>
+            </div>
+            <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;">
+              <label class="admin-checkbox-label" style="text-transform:none;letter-spacing:0;">
+                <input type="hidden" name="telegramBotAllowed" value="0">
+                <input type="checkbox" name="telegramBotAllowed" value="1" ${account.telegramBotAllowed !== 0 && account.telegramBotAllowed !== false ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px;">
+                ${escapeHtml(t('admin.users.telegramBotAllowed'))}
+              </label>
+            </div>
+            <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;">
+              <label class="admin-checkbox-label" style="text-transform:none;letter-spacing:0;">
+                <input type="hidden" name="ereaderEmailAllowed" value="0">
+                <input type="checkbox" name="ereaderEmailAllowed" value="1" ${account.ereaderEmailAllowed !== 0 && account.ereaderEmailAllowed !== false ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px;">
+                ${escapeHtml(t('admin.users.ereaderEmailAllowed'))}
+              </label>
             </div>
           </div>
           <div class="admin-actions-row">
@@ -1165,6 +1193,15 @@ export function renderAdminTelegram({ user, stats, indexStatus, tg = {}, botRunn
           <label>${escapeHtml(t('admin.telegram.allowedUsers'))}</label>
           <input type="text" name="allowedUsers" value="${escapeHtml(tg.allowedUsers || '')}" placeholder="123456789, 987654321">
           <span class="admin-field-hint">${escapeHtml(t('admin.telegram.allowedUsersHint'))}</span>
+        </div>
+        <div class="admin-field-group">
+          <label>${escapeHtml(t('admin.telegram.accessMode'))}</label>
+          <select name="accessMode">
+            <option value="whitelist_or_linked" ${(tg.accessMode || 'whitelist_or_linked') === 'whitelist_or_linked' ? 'selected' : ''}>${escapeHtml(t('admin.telegram.accessModeWhitelistOrLinked'))}</option>
+            <option value="linked_only" ${tg.accessMode === 'linked_only' ? 'selected' : ''}>${escapeHtml(t('admin.telegram.accessModeLinkedOnly'))}</option>
+            <option value="open" ${tg.accessMode === 'open' ? 'selected' : ''}>${escapeHtml(t('admin.telegram.accessModeOpen'))}</option>
+          </select>
+          <span class="admin-field-hint">${escapeHtml(t('admin.telegram.accessModeHint'))}</span>
         </div>
         <div class="admin-field-group">
           <label>${escapeHtml(t('admin.telegram.profileDescription'))}</label>

@@ -41,12 +41,14 @@ async function loadHomeRecommendationsProgressively(attempt = 0) {
       return;
     }
     const tmp = document.createElement('div');
-    tmp.innerHTML = `<div class="grid">${items.map((b) => renderCardHtml(b)).join('')}</div>`;
+    tmp.innerHTML = `<div class="grid home-reveal">${items.map((b) => renderCardHtml(b)).join('')}</div>`;
     const grid = tmp.firstElementChild;
     if (!grid) return;
     gridMount.replaceWith(grid);
     attachCoverErrorFallback(grid);
     attachDownloadMenus(grid);
+    revealHomeBlock(grid);
+    revealHomeBlock(section);
     section.dataset.loaded = '1';
   } catch {
     section.remove();
@@ -56,25 +58,145 @@ async function loadHomeRecommendationsProgressively(attempt = 0) {
 async function loadHomeContinueProgressively() {
   const section = document.querySelector('[data-home-continue]');
   if (!section || section.dataset.loaded === '1') return;
-  const gridMount = section.querySelector('[data-home-continue-grid]');
-  if (!gridMount) return;
+  const welcomeBanner = document.querySelector('.welcome-hero-banner');
+  const gridMount = section?.querySelector('[data-home-continue-grid]');
   try {
     const r = await fetch('/api/library/continue?page=1&pageSize=6', { credentials: 'same-origin' });
-    if (!r.ok) { section.remove(); return; }
+    if (!r.ok) {
+      section?.remove();
+      return;
+    }
     const data = await r.json();
     const items = Array.isArray(data?.items) ? data.items : [];
-    if (!items.length) { section.remove(); return; }
+    if (!items.length) {
+      section?.remove();
+      return;
+    }
+    const featuredBook = items[0];
+    const remainingItems = items.slice(1);
+    if (featuredBook && welcomeBanner) {
+      const heroTmp = document.createElement('div');
+      heroTmp.innerHTML = renderPremiumHeroCardHtml(featuredBook);
+      const heroCard = heroTmp.firstElementChild;
+      if (heroCard) {
+        heroCard.classList.add('home-reveal');
+        welcomeBanner.replaceWith(heroCard);
+        attachCoverErrorFallback(heroCard);
+        applyHeroBookAnnotation(featuredBook);
+        revealHomeBlock(heroCard);
+      }
+    }
+    if (!section) return;
+    if (!remainingItems.length) {
+      section.remove();
+      return;
+    }
+    if (!gridMount) return;
     const tmp = document.createElement('div');
-    tmp.innerHTML = `<div class="grid">${items.map((b) => renderCardHtml(b)).join('')}</div>`;
+    tmp.innerHTML = `<div class="grid home-reveal">${remainingItems.map((b) => renderCardHtml(b)).join('')}</div>`;
     const grid = tmp.firstElementChild;
     if (!grid) return;
     gridMount.replaceWith(grid);
     attachCoverErrorFallback(grid);
     attachDownloadMenus(grid);
+    revealHomeBlock(grid);
+    revealHomeBlock(section);
     section.dataset.loaded = '1';
   } catch {
-    section.remove();
+    section?.remove();
   }
+}
+
+function revealHomeBlock(el) {
+  if (!el) return;
+  if (!el.classList.contains('home-reveal')) el.classList.add('home-reveal');
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => el.classList.add('home-reveal-active'));
+  });
+}
+
+function initHomeWelcomeReveal() {
+  const banner = document.querySelector('.welcome-hero-banner.home-reveal');
+  if (banner) revealHomeBlock(banner);
+}
+
+function renderCoverRatingBadgeHtml(libRate) {
+  const n = Math.max(0, Math.min(5, Math.floor(Number(libRate) || 0)));
+  if (!n) return '';
+  return `<span class="cover-rating-wrapper"><span class="cover-rating-badge cover-rating-${n}">${Array.from({ length: n }, () => '<span>★</span>').join('')}</span></span>`;
+}
+
+function renderPremiumHeroCardHtml(book) {
+  const title = escapeHtml(book.title || '');
+  const progress = Math.max(0, Math.min(100, Math.round(Number(book.readProgress) || 0)));
+  const coverSrc = apiBookPath(book.id, 'cover-thumb');
+  const coverRating = renderCoverRatingBadgeHtml(book.libRate);
+  return `<section class="premium-hero-card">
+    <div class="hero-card-cover-side">
+      <a class="hero-cover-link cover" href="${bookPagePath(book.id)}">
+        <img class="cover-image hero-cover-image" loading="eager" draggable="false" src="${coverSrc}" data-cover-src="${coverSrc}" alt="${title}">
+        <span class="cover-fallback hero-cover-fallback" hidden>
+          <img class="cover-fallback-image" draggable="false" src="/book-fallback.png" alt="">
+          <span class="cover-fallback-overlay"></span>
+          <span class="cover-fallback-copy"><span class="cover-fallback-title">${title}</span><span class="cover-fallback-author">${escapeHtml(book.authors || uiT('book.authorUnknown'))}</span></span>
+        </span>
+        ${coverRating}
+      </a>
+    </div>
+    <div class="hero-card-info-side">
+      <div class="hero-card-kicker">${escapeHtml(uiT('home.heroKicker'))}</div>
+      <h1 class="hero-card-title">${title}</h1>
+      <div class="hero-card-author">${book.authors ? uiRenderAuthorLinks(book.authorsList, book.authors, `hero-a-${book.id}`) : escapeHtml(uiT('book.authorUnknown'))}</div>
+      <p class="hero-card-annotation" data-hero-annotation hidden></p>
+      <div class="hero-card-progress">
+        <div class="hero-card-progress-bar" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div class="hero-card-progress-fill" style="width:${progress}%"></div></div>
+        <span class="hero-card-progress-label">${escapeHtml(uiTp('home.heroProgress', { pct: progress }))}</span>
+      </div>
+      <div class="hero-card-actions">
+        <a class="button button-primary hero-read-btn" href="${readPagePath(book.id)}">${escapeHtml(uiT('home.heroReadBook'))}</a>
+        <a class="button button-secondary hero-about-btn" href="${bookPagePath(book.id)}">${escapeHtml(uiT('home.heroAboutBook'))}</a>
+      </div>
+    </div>
+  </section>`;
+}
+
+function formatHeroAnnotationText(raw, isHtml) {
+  let text = String(raw || '').trim();
+  if (!text) return '';
+  if (isHtml) {
+    const el = document.createElement('div');
+    el.innerHTML = text;
+    text = el.textContent || '';
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  if (text.length > 320) text = `${text.slice(0, 317)}…`;
+  return text;
+}
+
+function applyHeroBookAnnotation(book) {
+  const slot = document.querySelector('[data-hero-annotation]');
+  if (!slot || !book) return;
+  const text = formatHeroAnnotationText(book.annotation, book.annotationIsHtml);
+  if (text) {
+    slot.textContent = text;
+    slot.hidden = false;
+    return;
+  }
+  void fetchHeroBookAnnotation(book.id);
+}
+
+async function fetchHeroBookAnnotation(bookId) {
+  const slot = document.querySelector('[data-hero-annotation]');
+  if (!slot || !bookId) return;
+  try {
+    const r = await fetch(apiBookPath(bookId, 'details'), { credentials: 'same-origin' });
+    if (!r.ok) return;
+    const data = await r.json();
+    const text = formatHeroAnnotationText(data.annotation, data.annotationIsHtml);
+    if (!text) return;
+    slot.textContent = text;
+    slot.hidden = false;
+  } catch { /* ignore */ }
 }
 
 function safeDomIdPart(value) {
@@ -2430,8 +2552,10 @@ function attachFormSubmitSpinners() {
         hidden.value = btn.value;
         form.appendChild(hidden);
       }
-      btn.disabled = true;
-      btn.innerHTML = '<span class="btn-spinner"></span>' + escapeHtml(uiT('app.running') || '\u0412\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026');
+      window.setTimeout(() => {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-spinner"></span>' + escapeHtml(uiT('app.running') || '\u0412\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026');
+      }, 0);
     });
   }
 }
@@ -4890,6 +5014,7 @@ attachSearchSuggest();
 attachBookIllustrationLightbox();
 loadHomeRecommendationsProgressively();
 loadHomeContinueProgressively();
+initHomeWelcomeReveal();
 attachLoadMore();
 attachBatchDownloadSelection();
 attachConfirmedFormSubmits();

@@ -123,7 +123,13 @@ export function getSessionUser(req) {
   if (session.sessionGen !== currentGen) return null;
   if (user.blocked) return null;
 
-  return { username: user.username, role: user.role || 'user', sessionGen: user.sessionGen || 0 };
+  return {
+    username: user.username,
+    role: user.role || 'user',
+    sessionGen: user.sessionGen || 0,
+    telegramBotAllowed: Number(user.telegramBotAllowed ?? 1) !== 0,
+    ereaderEmailAllowed: Number(user.ereaderEmailAllowed ?? 1) !== 0,
+  };
 }
 
 /** Attach user and CSRF token to every request. */

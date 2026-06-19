@@ -433,12 +433,13 @@ export function registerLibraryRoutes(app, deps) {
     }
     const displaySections = { ...sections, newest: displayNewest };
     const hasContinueData = username ? hasContinueBooks(username) : false;
+    const readBookIds = username ? getReadBookIdSet(username) : null;
     const canUseAnonymousHomeHtmlCache = !user && !indexStatus?.active && !indexStatus?.error;
     const csrfToken = req.csrfToken || '';
     const homeSubtitle = getSetting('home_subtitle') || '';
     const html = canUseAnonymousHomeHtmlCache
       ? getCachedPageData(`page:home:anon:${getLocale()}`, () => renderHome({ user, stats, indexStatus, sections: displaySections, homeSubtitle, csrfToken: '', hasContinueData: false }), 1000 * 60 * 2)
-      : renderHome({ user, stats, indexStatus, sections: displaySections, homeSubtitle, csrfToken, hasContinueData });
+      : renderHome({ user, stats, indexStatus, sections: displaySections, homeSubtitle, csrfToken, hasContinueData, readBookIds });
     res.send(html);
     // Фоновый прогрев per-user кэшей для последующих переходов
     if (username) {

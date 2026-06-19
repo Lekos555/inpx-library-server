@@ -13,6 +13,9 @@ import {
   getUserByUsername, getSetting, createUser, changePassword,
   setEreaderEmail, getEreaderEmail, getUserStats,
   getAllReaderBookmarks, getAllReaderAnnotations, decryptValue,
+  createTelegramLinkToken, unlinkTelegram, getTelegramBotUsername, resolveTelegramRuntimeConfig, setMeta,
+  isTelegramBotAllowedForUser,
+  isEreaderEmailAllowedForUser,
 } from '../db.js';
 import { logSystemEvent } from '../services/system-events.js';
 import {
@@ -21,6 +24,27 @@ import {
 
 function getRecaptchaKeys() {
   return { siteKey: getSetting('recaptcha_site_key'), secretKey: decryptValue(getSetting('recaptcha_secret_key')) };
+}
+
+async function resolveTelegramBotUsernameForLink() {
+  const cached = getTelegramBotUsername();
+  if (cached) return cached;
+
+  const tgRuntime = resolveTelegramRuntimeConfig();
+  if (!tgRuntime.enabled || !tgRuntime.token) return '';
+
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${tgRuntime.token}/getMe`);
+    const data = await resp.json();
+    const username = data?.result?.username;
+    if (data?.ok && username) {
+      setMeta('telegram_bot_username', username);
+      return username;
+    }
+  } catch {
+    /* ignore — fallback to flash on settings page */
+  }
+  return '';
 }
 
 async function verifyRecaptcha(token, secretKey) {
@@ -57,12 +81,20 @@ export function registerAuthRoutes(app, deps) {
   }
 
   function buildProfileSettingsData(user, flash = '', csrfToken = '') {
+    const fullUser = getUserByUsername(user.username);
+    const tgRuntime = resolveTelegramRuntimeConfig();
     return {
       user,
       stats: getCachedStats(),
       indexStatus: getIndexStatus(),
       userStats: getUserStats(user.username),
       ereaderEmail: getEreaderEmail(user.username),
+      telegramId: fullUser?.telegramId || '',
+      telegramLinkedAt: fullUser?.telegramLinkedAt || '',
+      telegramBotUsername: getTelegramBotUsername(),
+      telegramBotAvailable: Boolean(tgRuntime.enabled && tgRuntime.token),
+      telegramBotAllowed: fullUser ? isTelegramBotAllowedForUser(fullUser) : true,
+      ereaderEmailAllowed: fullUser ? isEreaderEmailAllowedForUser(fullUser) : true,
       flash,
       csrfToken
     };
@@ -195,13 +227,17 @@ export function registerAuthRoutes(app, deps) {
   });
 
   app.get('/profile/settings', requireWebAuth, (req, res) => {
-    res.send(renderProfileSettings(buildProfileSettingsData(req.user, '', req.csrfToken || '')));
+    res.send(renderProfileSettings(buildProfileSettingsData(req.user, String(req.query.flash || ''), req.csrfToken || '')));
   });
 
   app.post('/profile/email', requireWebAuth, (req, res) => {
     const rawEmail = String(req.body.ereaderEmail || '').trim();
     if (rawEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEmail)) {
       return res.status(400).send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.invalidEmail'), req.csrfToken || '')));
+    }
+    const fullUser = getUserByUsername(req.user.username);
+    if (!isEreaderEmailAllowedForUser(fullUser)) {
+      return res.status(403).send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.ereaderEmail.accessDenied'), req.csrfToken || '')));
     }
     try {
       setEreaderEmail(req.user.username, rawEmail);
@@ -228,6 +264,34 @@ export function registerAuthRoutes(app, deps) {
       res.send(renderProfileSettings(buildProfileSettingsData(req.user, t('profile.passwordChanged'), req.csrfToken || '')));
     } catch (error) {
       return renderErr(translateKnownErrorMessage(error.message));
+    }
+  });
+
+  /** GET — надёжнее для внешнего редиректа в Telegram (POST+disable submit ломает отправку формы). */
+  app.get('/profile/telegram/link', requireWebAuth, async (req, res) => {
+    try {
+      const tgRuntime = resolveTelegramRuntimeConfig();
+      if (!tgRuntime.enabled || !tgRuntime.token) {
+        return res.redirect('/profile/settings?flash=' + encodeURIComponent(t('profile.telegram.botUnavailable')));
+      }
+      const botUsername = await resolveTelegramBotUsernameForLink();
+      if (!botUsername) {
+        return res.redirect('/profile/settings?flash=' + encodeURIComponent(t('profile.telegram.botUnavailable')));
+      }
+      const { token } = createTelegramLinkToken(req.user.username);
+      res.redirect(302, `https://t.me/${botUsername}?start=link_${token}`);
+    } catch (error) {
+      res.redirect('/profile/settings?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));
+    }
+  });
+
+  app.post('/profile/telegram/unlink', requireWebAuth, (req, res) => {
+    try {
+      unlinkTelegram(req.user.username);
+      logSystemEvent('info', 'auth', 'telegram unlinked from profile', { username: req.user.username });
+      res.redirect('/profile/settings?flash=' + encodeURIComponent(t('profile.telegram.unlinked')));
+    } catch (error) {
+      res.redirect('/profile/settings?flash=' + encodeURIComponent(translateKnownErrorMessage(error.message)));
     }
   });
 }

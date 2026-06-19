@@ -32,6 +32,7 @@ export function registerReaderRoutes(app) {
     const progressNum = Number.isFinite(Number(progress)) ? Math.max(0, Math.min(100, Number(progress))) : 0;
     const posStr = String(position || '');
     setReadingPosition(username, bookId, posStr, progressNum);
+    invalidateUserPageCaches(username);
     // Auto-mark as read when progress reaches 99%+
     let markedRead = false;
     if (progressNum >= 99 && !isBookRead(username, bookId)) {
