@@ -178,8 +178,13 @@ export function canSendToEmailInUi(user) {
   return Boolean(user?.username) && user.ereaderEmailAllowed !== false;
 }
 
+/** Удаляет символы, запрещённые в XML 1.0 (кроме tab/LF/CR). */
+function stripXmlInvalidControls(value) {
+  return String(value ?? '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+}
+
 export function escapeHtml(value = '') {
-  return String(value)
+  return stripXmlInvalidControls(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -190,7 +195,7 @@ export function escapeHtml(value = '') {
 const ALLOWED_HTML_TAG_RE = /^(b|i|em|strong|p|br|span|div|ul|ol|li|h[1-6]|blockquote|sup|sub|a|img|table|thead|tbody|tr|td|th)$/i;
 
 export function sanitizeHtml(html) {
-  return String(html || '')
+  return stripXmlInvalidControls(String(html || ''))
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/javascript:/gi, 'blocked:')

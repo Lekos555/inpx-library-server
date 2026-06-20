@@ -40,6 +40,7 @@ test('shared.js escapeHtml works correctly', async () => {
   assert.strictEqual(escapeHtml('<b>"&\'</b>'), '&lt;b&gt;&quot;&amp;&#39;&lt;/b&gt;');
   assert.strictEqual(escapeHtml(''), '');
   assert.strictEqual(escapeHtml(undefined), '');
+  assert.strictEqual(escapeHtml('id\u0000suffix'), 'idsuffix');
 });
 
 test('shared.js setSiteName / getSiteName round-trip', async () => {

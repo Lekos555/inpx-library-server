@@ -61,6 +61,19 @@ test('book entry <id> is a valid IRI (urn:inpx:book:...)', () => {
   assert.ok(/^urn:/.test(idMatch[1]), `<id> must be IRI, got: ${idMatch[1]}`);
 });
 
+test('book entry <id> strips XML-invalid control chars from book.id (NUL in Flibusta ids)', () => {
+  const xml = renderOpdsBooksFeed('http://example', {
+    id: 'search',
+    title: 'Test',
+    selfPath: '/opds/search?type=title&term=test',
+    items: [{ ...sampleBook, id: '2:315483\u0000tail' }]
+  });
+  assert.ok(xml.includes('<id>urn:inpx:book:2:315483tail</id>'), 'NUL must be removed from <id> text');
+  assert.ok(!xml.includes('\0'), 'XML must not contain raw NUL');
+  const bareCtrl = xml.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/);
+  assert.strictEqual(bareCtrl, null, 'XML must not contain control characters');
+});
+
 test('feed parses as well-formed XML (smoke test via XMLParser if available)', () => {
   // We do not depend on a parser library; instead, verify all `&` in attribute
   // values are followed by a valid entity reference. (Same idea as above but
