@@ -363,6 +363,9 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
   const regularUsers = users.filter((account) => account.role !== 'admin');
   const fmtDate = (d) => formatLocaleDateShort(d);
   const isSelf = (account) => account.username === user?.username;
+  const accountFlagOn = (value) => Number(value ?? 1) !== 0;
+  const accountAutocompleteSection = (account) => `section-admin-${String(account.username).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const userField = (base, account) => `${base}__${String(account.username).replace(/[^\w.-]/g, '_')}`;
   const renderUserRows = (items = []) => items.map((account) => `
     <details class="admin-user-row ${account.blocked ? 'admin-user-row-blocked' : ''}">
       <summary class="admin-user-row-summary">
@@ -371,15 +374,15 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
         ${account.blocked ? `<span class="badge-blocked">${escapeHtml(t('admin.users.blocked'))}</span>` : ''}
         ${account.telegramId ? `<span class="muted">TG ${escapeHtml(account.telegramId)}</span>` : ''}
         ${account.ereaderEmail ? `<span class="muted">${escapeHtml(account.ereaderEmail)}</span>` : ''}
-        ${!account.telegramBotAllowed ? `<span class="badge-blocked">${escapeHtml(t('admin.users.telegramDenied'))}</span>` : ''}
-        ${!account.ereaderEmailAllowed ? `<span class="badge-blocked">${escapeHtml(t('admin.users.emailDenied'))}</span>` : ''}
+        ${!accountFlagOn(account.telegramBotAllowed) ? `<span class="badge-blocked">${escapeHtml(t('admin.users.telegramDenied'))}</span>` : ''}
+        ${!accountFlagOn(account.ereaderEmailAllowed) ? `<span class="badge-blocked">${escapeHtml(t('admin.users.emailDenied'))}</span>` : ''}
         ${isSelf(account) ? `<span class="badge-self">${escapeHtml(t('admin.users.self'))}</span>` : ''}
         <span class="muted admin-user-row-date">${escapeHtml(t('admin.users.created'))} ${escapeHtml(fmtDate(account.createdAt))}</span>
       </summary>
       <div class="admin-user-row-body">
-        <form class="user-admin-form" action="/admin/users/update" method="post">
+        <form class="user-admin-form" action="/admin/users/update" method="post" autocomplete="off">
           ${csrfHiddenField(csrfToken)}
-          <input type="hidden" name="accountUsername" value="${escapeHtml(account.username)}" autocomplete="off">
+          <input type="hidden" name="accountUsername" value="${escapeHtml(account.username)}" autocomplete="${escapeHtml(accountAutocompleteSection(account))} username">
           <div class="admin-form-grid">
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.role'))}</label>
@@ -390,29 +393,27 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
             </div>
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.newPassword'))}</label>
-              <input type="password" name="password" placeholder="${escapeHtml(t('admin.users.noChangePassword'))}">
+              <input type="password" name="${escapeHtml(userField('newPassword', account))}" placeholder="${escapeHtml(t('admin.users.noChangePassword'))}" autocomplete="${escapeHtml(accountAutocompleteSection(account))} new-password" data-admin-no-autofill>
             </div>
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.telegramId'))}</label>
-              <input type="text" name="telegramId" value="${escapeHtml(account.telegramId || '')}" placeholder="123456789" inputmode="numeric" pattern="\\d*" autocomplete="off" data-lpignore="true" data-1p-ignore>
+              <input type="text" name="${escapeHtml(userField('accountTelegramId', account))}" value="" placeholder="123456789" inputmode="numeric" pattern="\\d*" autocomplete="${escapeHtml(accountAutocompleteSection(account))} off" data-lpignore="true" data-1p-ignore="true" data-admin-no-autofill data-initial-telegram-id="${escapeHtml(account.telegramId || '')}">
               <span class="admin-field-hint">${escapeHtml(t('admin.users.telegramIdHint'))}</span>
             </div>
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.ereaderEmail'))}</label>
-              <input type="email" name="ereaderEmail" value="${escapeHtml(account.ereaderEmail || '')}" placeholder="kindle@kindle.com" autocomplete="off" data-lpignore="true" data-1p-ignore>
+              <input type="email" name="${escapeHtml(userField('accountEreaderEmail', account))}" value="" placeholder="kindle@kindle.com" autocomplete="${escapeHtml(accountAutocompleteSection(account))} off" data-lpignore="true" data-1p-ignore="true" data-admin-no-autofill data-initial-ereader-email="${escapeHtml(account.ereaderEmail || '')}">
               <span class="admin-field-hint">${escapeHtml(t('admin.users.ereaderEmailHint'))}</span>
             </div>
             <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;">
               <label class="admin-checkbox-label" style="text-transform:none;letter-spacing:0;">
-                <input type="hidden" name="telegramBotAllowed" value="0">
-                <input type="checkbox" name="telegramBotAllowed" value="1" ${account.telegramBotAllowed !== 0 && account.telegramBotAllowed !== false ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px;">
+                <input type="checkbox" name="telegramBotAllowed" value="1" ${accountFlagOn(account.telegramBotAllowed) ? 'checked' : ''} autocomplete="off" style="accent-color:var(--accent);width:16px;height:16px;">
                 ${escapeHtml(t('admin.users.telegramBotAllowed'))}
               </label>
             </div>
             <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;">
               <label class="admin-checkbox-label" style="text-transform:none;letter-spacing:0;">
-                <input type="hidden" name="ereaderEmailAllowed" value="0">
-                <input type="checkbox" name="ereaderEmailAllowed" value="1" ${account.ereaderEmailAllowed !== 0 && account.ereaderEmailAllowed !== false ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px;">
+                <input type="checkbox" name="ereaderEmailAllowed" value="1" ${accountFlagOn(account.ereaderEmailAllowed) ? 'checked' : ''} autocomplete="off" style="accent-color:var(--accent);width:16px;height:16px;">
                 ${escapeHtml(t('admin.users.ereaderEmailAllowed'))}
               </label>
             </div>

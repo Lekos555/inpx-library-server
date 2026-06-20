@@ -51,7 +51,8 @@ function lastFormFieldValue(value) {
 }
 
 function isFormFlagEnabled(value) {
-  return lastFormFieldValue(value) === '1';
+  const raw = lastFormFieldValue(value);
+  return raw === '1' || raw === 1 || raw === true;
 }
 
 // Self-update состояние и логика вынесены в services/self-update.js.
@@ -74,8 +75,21 @@ function isFormFlagEnabled(value) {
  * @param {Function} deps.setSiteName
  * @param {object} deps.templates - render functions
  */
+function adminUserFieldKey(base, username) {
+  return `${base}__${String(username).replace(/[^\w.-]/g, '_')}`;
+}
+
+function readAdminUserField(body, username, base) {
+  const scoped = adminUserFieldKey(base, username);
+  const raw = body?.[scoped] ?? body?.[base];
+  if (Array.isArray(raw)) return String(raw[raw.length - 1] ?? '').trim();
+  return String(raw ?? '').trim();
+}
+
 function readAdminAccountUsername(body) {
-  return String(body?.accountUsername || body?.username || '').trim();
+  const raw = body?.accountUsername ?? body?.username;
+  if (Array.isArray(raw)) return String(raw[0] ?? '').trim();
+  return String(raw ?? '').trim();
 }
 
 export function registerAdminRoutes(app, deps) {
@@ -907,7 +921,7 @@ export function registerAdminRoutes(app, deps) {
   app.post('/admin/users/create', requireAdminWeb, (req, res) => {
     try {
       const username = readAdminAccountUsername(req.body);
-      const password = String(req.body.password || '');
+      const password = String(req.body.newPassword || req.body.password || '');
       const role = req.body.role === 'admin' ? 'admin' : 'user';
       if (!username || !password) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashNeedCredentials')));
@@ -926,7 +940,7 @@ export function registerAdminRoutes(app, deps) {
   app.post('/admin/users/update', requireAdminWeb, (req, res) => {
     try {
       const username = readAdminAccountUsername(req.body);
-      const password = String(req.body.password || '');
+      const password = readAdminUserField(req.body, username, 'newPassword') || String(req.body.password || '');
       const role = req.body.role === 'admin' ? 'admin' : 'user';
       if (!username) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashUpdateMissing')));
@@ -936,14 +950,16 @@ export function registerAdminRoutes(app, deps) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('validation.userNotFound')));
       }
       updateUser({ username, password, role });
-      const rawTelegramId = String(req.body.telegramId ?? '').trim();
+      const rawTelegramId = readAdminUserField(req.body, username, 'accountTelegramId')
+        || readAdminUserField(req.body, username, 'telegramId');
       const prevTelegramId = String(existing.telegramId ?? '').trim();
       if (rawTelegramId !== prevTelegramId) {
         setUserTelegramId(username, rawTelegramId);
       }
       setUserTelegramBotAllowed(username, isFormFlagEnabled(req.body.telegramBotAllowed));
       setUserEreaderEmailAllowed(username, isFormFlagEnabled(req.body.ereaderEmailAllowed));
-      const rawEreaderEmail = String(req.body.ereaderEmail ?? '').trim();
+      const rawEreaderEmail = readAdminUserField(req.body, username, 'accountEreaderEmail')
+        || readAdminUserField(req.body, username, 'ereaderEmail');
       if (rawEreaderEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEreaderEmail)) {
         throw new Error('Invalid email');
       }

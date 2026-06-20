@@ -5036,6 +5036,7 @@ attachSourceDelete();
 attachAddSourceForm();
 attachSourceEdit();
 attachDirtyFormTracking();
+attachAdminUserFormAutofillGuard();
 
 // --- Dirty form tracking ---
 function attachDirtyFormTracking() {
@@ -5068,6 +5069,41 @@ function attachDirtyFormTracking() {
     if (document.querySelector('form.is-dirty')) {
       e.preventDefault();
     }
+  });
+}
+
+function attachAdminUserFormAutofillGuard() {
+  document.querySelectorAll('.user-admin-form').forEach((form) => {
+    const details = form.closest('details');
+    const hydrateScopedFields = () => {
+      form.querySelectorAll('[data-initial-telegram-id]').forEach((input) => {
+        if (input.dataset.hydrated === '1') return;
+        input.value = input.getAttribute('data-initial-telegram-id') || '';
+        input.dataset.hydrated = '1';
+      });
+      form.querySelectorAll('[data-initial-ereader-email]').forEach((input) => {
+        if (input.dataset.hydrated === '1') return;
+        input.value = input.getAttribute('data-initial-ereader-email') || '';
+        input.dataset.hydrated = '1';
+      });
+    };
+    if (details) {
+      details.addEventListener('toggle', () => {
+        if (details.open) hydrateScopedFields();
+      });
+      if (details.open) hydrateScopedFields();
+    } else {
+      hydrateScopedFields();
+    }
+
+    form.querySelectorAll('[data-admin-no-autofill]').forEach((input) => {
+      input.setAttribute('readonly', 'readonly');
+      const unlock = () => {
+        input.removeAttribute('readonly');
+      };
+      input.addEventListener('focus', unlock, { once: true });
+      input.addEventListener('mousedown', unlock, { once: true });
+    });
   });
 }
 
