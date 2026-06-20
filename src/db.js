@@ -150,6 +150,28 @@ function ensureTelegramLinkSchema() {
     CREATE INDEX IF NOT EXISTS idx_telegram_link_tokens_username ON telegram_link_tokens(username);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;
   `);
+  dedupeTelegramIds();
+}
+
+function dedupeTelegramIds() {
+  const duplicateIds = db.prepare(`
+    SELECT telegram_id AS telegramId
+    FROM users
+    WHERE telegram_id IS NOT NULL
+    GROUP BY telegram_id
+    HAVING COUNT(*) > 1
+  `).all();
+  for (const row of duplicateIds) {
+    const owners = db.prepare(`
+      SELECT username
+      FROM users
+      WHERE telegram_id = ?
+      ORDER BY COALESCE(telegram_linked_at, created_at) DESC, username ASC
+    `).all(row.telegramId);
+    for (const owner of owners.slice(1)) {
+      unlinkTelegram(owner.username);
+    }
+  }
 }
 
 function ensureBooksSchema() {
@@ -528,6 +550,8 @@ export function completeTelegramLink(token, telegramId) {
       throw new Error('User already has a different Telegram account linked');
     }
 
+    releaseTelegramIdFromOtherUsers(normalizedTgId, row.username);
+
     db.prepare(`
       UPDATE users
       SET telegram_id = ?, telegram_linked_at = datetime('now')
@@ -554,6 +578,17 @@ export function unlinkTelegramByTelegramId(telegramId) {
   return true;
 }
 
+function releaseTelegramIdFromOtherUsers(telegramId, exceptUsername) {
+  const normalizedId = normalizeTelegramId(telegramId);
+  const normalizedUsername = String(exceptUsername || '').trim();
+  if (!normalizedId || !normalizedUsername) return;
+  db.prepare(`
+    UPDATE users
+    SET telegram_id = NULL, telegram_linked_at = NULL
+    WHERE telegram_id = ? AND username != ?
+  `).run(normalizedId, normalizedUsername);
+}
+
 export function setUserTelegramId(username, telegramId) {
   const normalizedUsername = String(username || '').trim();
   const existing = getUserByUsername(normalizedUsername);
@@ -572,6 +607,8 @@ export function setUserTelegramId(username, telegramId) {
   if (owner && owner.username !== normalizedUsername) {
     throw new Error('This Telegram account is already linked to another user');
   }
+
+  releaseTelegramIdFromOtherUsers(normalized, normalizedUsername);
 
   db.prepare(`
     UPDATE users

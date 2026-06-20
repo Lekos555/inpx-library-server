@@ -379,7 +379,7 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
       <div class="admin-user-row-body">
         <form class="user-admin-form" action="/admin/users/update" method="post">
           ${csrfHiddenField(csrfToken)}
-          <input type="hidden" name="username" value="${escapeHtml(account.username)}">
+          <input type="hidden" name="accountUsername" value="${escapeHtml(account.username)}" autocomplete="off">
           <div class="admin-form-grid">
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.role'))}</label>
@@ -394,12 +394,12 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
             </div>
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.telegramId'))}</label>
-              <input type="text" name="telegramId" value="${escapeHtml(account.telegramId || '')}" placeholder="123456789" inputmode="numeric" pattern="\\d*">
+              <input type="text" name="telegramId" value="${escapeHtml(account.telegramId || '')}" placeholder="123456789" inputmode="numeric" pattern="\\d*" autocomplete="off" data-lpignore="true" data-1p-ignore>
               <span class="admin-field-hint">${escapeHtml(t('admin.users.telegramIdHint'))}</span>
             </div>
             <div class="admin-field-group">
               <label>${escapeHtml(t('admin.users.ereaderEmail'))}</label>
-              <input type="email" name="ereaderEmail" value="${escapeHtml(account.ereaderEmail || '')}" placeholder="kindle@kindle.com">
+              <input type="email" name="ereaderEmail" value="${escapeHtml(account.ereaderEmail || '')}" placeholder="kindle@kindle.com" autocomplete="off" data-lpignore="true" data-1p-ignore>
               <span class="admin-field-hint">${escapeHtml(t('admin.users.ereaderEmailHint'))}</span>
             </div>
             <div class="admin-field-group" style="flex-direction:row;align-items:center;gap:10px;">
@@ -426,13 +426,13 @@ export function renderAdminUsers({ user, stats, indexStatus, users = [], flash =
           <div class="admin-inline-row">
             <form action="/admin/users/block" method="post" class="admin-inline-form">
               ${csrfHiddenField(csrfToken)}
-              <input type="hidden" name="username" value="${escapeHtml(account.username)}">
+              <input type="hidden" name="accountUsername" value="${escapeHtml(account.username)}" autocomplete="off">
               <input type="hidden" name="action" value="${account.blocked ? 'unblock' : 'block'}">
               <button type="submit" class="${account.blocked ? '' : 'button-danger'}">${account.blocked ? escapeHtml(t('admin.users.unblock')) : escapeHtml(t('admin.users.block'))}</button>
             </form>
             <form action="/admin/users/delete" method="post" class="admin-inline-form" data-confirm="${escapeHtml(tp('admin.users.deleteConfirm', { name: account.username }))}" data-confirm-danger>
               ${csrfHiddenField(csrfToken)}
-              <input type="hidden" name="username" value="${escapeHtml(account.username)}">
+              <input type="hidden" name="accountUsername" value="${escapeHtml(account.username)}" autocomplete="off">
               <button type="submit" class="button-danger">${escapeHtml(t('admin.users.deleteUser'))}</button>
             </form>
           </div>

@@ -23,7 +23,7 @@ import {
   setSetting, getSetting, encryptValue, decryptValue, getSources, getSourceById,
   addSource, updateSource, deleteSourceProgressive, forceDetachSourceRowUnsafe,
   getSmtpSettings, setSmtpSettings, getTelegramSettings, setTelegramSettings, resolveTelegramTokenForAdmin, hasAdminUser, listUsers, countAdminUsers,
-  getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser, setUserTelegramId, setUserTelegramBotAllowed, setUserEreaderEmailAllowed, setUserEreaderEmail,
+  getUserByUsername, upsertUser, updateUser, deleteUser, blockUser, unblockUser, setUserTelegramId, setUserTelegramBotAllowed, setUserEreaderEmailAllowed, setUserEreaderEmail, getEreaderEmail,
   db, getDistinctLanguages, getDistinctGenres, rebuildActiveBooksView, refreshCatalogBookCounts,
   getSuppressedBooks, unsuppressBook, unsuppressAll, getScheduleLog
 } from '../db.js';
@@ -74,6 +74,10 @@ function isFormFlagEnabled(value) {
  * @param {Function} deps.setSiteName
  * @param {object} deps.templates - render functions
  */
+function readAdminAccountUsername(body) {
+  return String(body?.accountUsername || body?.username || '').trim();
+}
+
 export function registerAdminRoutes(app, deps) {
   const {
     operationsState,
@@ -902,7 +906,7 @@ export function registerAdminRoutes(app, deps) {
 
   app.post('/admin/users/create', requireAdminWeb, (req, res) => {
     try {
-      const username = String(req.body.username || '').trim();
+      const username = readAdminAccountUsername(req.body);
       const password = String(req.body.password || '');
       const role = req.body.role === 'admin' ? 'admin' : 'user';
       if (!username || !password) {
@@ -921,21 +925,32 @@ export function registerAdminRoutes(app, deps) {
 
   app.post('/admin/users/update', requireAdminWeb, (req, res) => {
     try {
-      const username = String(req.body.username || '').trim();
+      const username = readAdminAccountUsername(req.body);
       const password = String(req.body.password || '');
       const role = req.body.role === 'admin' ? 'admin' : 'user';
       if (!username) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashUpdateMissing')));
       }
+      const existing = getUserByUsername(username);
+      if (!existing) {
+        return res.redirect('/admin/users?flash=' + encodeURIComponent(t('validation.userNotFound')));
+      }
       updateUser({ username, password, role });
-      setUserTelegramId(username, String(req.body.telegramId ?? '').trim());
+      const rawTelegramId = String(req.body.telegramId ?? '').trim();
+      const prevTelegramId = String(existing.telegramId ?? '').trim();
+      if (rawTelegramId !== prevTelegramId) {
+        setUserTelegramId(username, rawTelegramId);
+      }
       setUserTelegramBotAllowed(username, isFormFlagEnabled(req.body.telegramBotAllowed));
       setUserEreaderEmailAllowed(username, isFormFlagEnabled(req.body.ereaderEmailAllowed));
       const rawEreaderEmail = String(req.body.ereaderEmail ?? '').trim();
       if (rawEreaderEmail && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(rawEreaderEmail)) {
         throw new Error('Invalid email');
       }
-      setUserEreaderEmail(username, rawEreaderEmail);
+      const prevEreaderEmail = String(getEreaderEmail(username) || '').trim();
+      if (rawEreaderEmail !== prevEreaderEmail) {
+        setUserEreaderEmail(username, rawEreaderEmail);
+      }
       logSystemEvent('info', 'auth', 'user updated', {
         actor: req.user.username,
         username,
@@ -952,7 +967,7 @@ export function registerAdminRoutes(app, deps) {
 
   app.post('/admin/users/delete', requireAdminWeb, (req, res) => {
     try {
-      const username = String(req.body.username || '').trim();
+      const username = readAdminAccountUsername(req.body);
       if (!username) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashDeleteMissing')));
       }
@@ -969,7 +984,7 @@ export function registerAdminRoutes(app, deps) {
 
   app.post('/admin/users/block', requireAdminWeb, (req, res) => {
     try {
-      const username = String(req.body.username || '').trim();
+      const username = readAdminAccountUsername(req.body);
       const action = String(req.body.action || '');
       if (!username) {
         return res.redirect('/admin/users?flash=' + encodeURIComponent(t('admin.users.flashBlockMissing')));

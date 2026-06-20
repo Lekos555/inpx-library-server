@@ -19,6 +19,8 @@ import {
 } from './cover.js';
 import { logSystemEvent } from './system-events.js';
 import {
+  BOT_MENU_SECTIONS,
+  flattenBotMenuCommands,
   TELEGRAM_DEFAULT_PROFILE_DESCRIPTION,
   TELEGRAM_DEFAULT_PROFILE_SHORT,
   TELEGRAM_DEFAULT_WELCOME,
@@ -307,20 +309,39 @@ async function updateProgress(chatId, session, text) {
 }
 
 async function registerBotCommands() {
-  await tgCall('setMyCommands', {
-    commands: [
-      { command: 'start', description: 'Начало работы' },
-      { command: 'help', description: 'Справка' },
-      { command: 'me', description: 'Статус привязки аккаунта' },
-      { command: 'shelves', description: 'Мои полки' },
-      { command: 'favorites', description: 'Избранное' },
-      { command: 'recommended', description: 'Рекомендации' },
-      { command: 'unlink', description: 'Отвязать аккаунт' },
-      { command: 'author', description: 'Поиск автора' },
-      { command: 'series', description: 'Поиск серии' },
-      { command: 'search', description: 'Поиск книг' },
-    ],
-  });
+  await tgCall('setMyCommands', { commands: flattenBotMenuCommands() });
+}
+
+function buildBotHelpMessage() {
+  const lines = [
+    '🔍 <b>Как пользоваться</b>',
+    '',
+    '<b>Просто напишите запрос</b> — бот найдёт автора, серию или книги.',
+    '',
+    'У автора сначала показываются <b>серии</b>, затем книги серии по номерам.',
+    'Каждая книга — карточка с <b>обложкой</b> и <b>аннотацией</b> (если есть).',
+    'Кнопки 📥 — сразу под каждой книгой. ◀ ▶ — страницы, ⬅️ — назад.',
+    '',
+  ];
+
+  const sectionEmoji = { Поиск: '📚', Личное: '👤', Аккаунт: '⚙️' };
+  for (const section of BOT_MENU_SECTIONS) {
+    if (section.title === 'Основное') continue;
+    const emoji = sectionEmoji[section.title] || '•';
+    const suffix = section.hint ? ` (${section.hint})` : '';
+    lines.push(`${emoji} <b>${section.title}${suffix}:</b>`);
+    for (const { command, description, example } of section.commands) {
+      if (example) {
+        lines.push(`<code>/${command} ${esc(example)}</code> — ${description}`);
+      } else {
+        lines.push(`<code>/${command}</code> — ${description}`);
+      }
+    }
+    lines.push('');
+  }
+
+  lines.push('📥 Кнопки формата под книгой — скачать файл.');
+  return lines.join('\n');
 }
 
 /** Описание в профиле бота (экран «Начать» до первого сообщения). */
@@ -364,9 +385,20 @@ function isAllowed(userId) {
   const linkedUser = getUserByTelegramId(id);
   if (linkedUser) return isTelegramBotAllowedForUser(linkedUser);
 
+  if (_accessMode === 'open') return true;
   if (_accessMode === 'linked_only') return false;
 
-  return !_allowedUsers || _allowedUsers.has(id);
+  // whitelist_or_linked: пустый whitelist = без ограничения для непривязанных
+  return !_allowedUsers || _allowedUsers.size === 0 || _allowedUsers.has(id);
+}
+
+function parseStartLinkToken(text) {
+  const trimmed = String(text || '').trim();
+  if (trimmed === '/start') return null;
+  if (!trimmed.startsWith('/start ')) return null;
+  const payload = trimmed.slice('/start '.length).trim();
+  if (!payload.startsWith('link_')) return null;
+  return payload.slice('link_'.length);
 }
 
 function resolveLinkedUser(userId) {
@@ -390,7 +422,7 @@ async function handleTelegramLink(chatId, telegramUserId, token) {
       `✅ <b>Аккаунт привязан</b>\n\n` +
         `Вы вошли как <b>${esc(result.username)}</b>.\n` +
         `Доступны: <code>/shelves</code> · <code>/favorites</code> · <code>/recommended</code>\n\n` +
-        `Отвязать: <code>/unlink</code> · Статус: <code>/me</code>`,
+        `Справка: <code>/help</code> · Статус: <code>/me</code>`,
     );
     logSystemEvent('info', 'telegram-bot', 'telegram account linked', {
       username: result.username,
@@ -1258,25 +1290,28 @@ async function handleUpdate(upd) {
     const msg = upd.message;
     if (!msg?.text) return;
     const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    const linkToken = parseStartLinkToken(text);
+    if (linkToken) {
+      await handleTelegramLink(chatId, msg.from?.id, linkToken);
+      return;
+    }
+
     if (!isAllowed(msg.from?.id)) {
       await sendText(chatId, telegramAccessDeniedMessage(msg.from?.id));
       return;
     }
-    const text = msg.text.trim();
 
     if (text === '/start' || text.startsWith('/start ')) {
-      const payload = text === '/start' ? '' : text.slice('/start '.length).trim();
-      if (payload.startsWith('link_')) {
-        await handleTelegramLink(chatId, msg.from?.id, payload.slice('link_'.length));
-        return;
-      }
       const linked = resolveLinkedUser(msg.from?.id);
       if (linked) {
         await sendText(
           chatId,
           resolveWelcomeMessage() +
             `\n\n👤 Вы вошли как <b>${esc(linked.username)}</b>.\n` +
-            'Полки: <code>/shelves</code> · Избранное: <code>/favorites</code> · Рекомендации: <code>/recommended</code>',
+            'Поиск: <code>/search</code> · <code>/author</code> · <code>/series</code>\n' +
+            'Личное: <code>/shelves</code> · <code>/favorites</code> · <code>/recommended</code>',
         );
         return;
       }
@@ -1295,23 +1330,7 @@ async function handleUpdate(upd) {
     }
 
     if (text === '/help') {
-      await sendText(
-        chatId,
-        '🔍 <b>Как пользоваться</b>\n\n' +
-          '<b>Просто напишите запрос</b> — бот найдёт автора, серию или книги.\n\n' +
-          'У автора сначала показываются <b>серии</b>, затем книги серии по номерам.\n' +
-          'Каждая книга — карточка с <b>обложкой</b> и <b>аннотацией</b> (если есть).\n' +
-          'Кнопки 📥 — сразу под каждой книгой. ◀ ▶ — страницы, ⬅️ — назад.\n\n' +
-          '<code>/author Кораблев</code> — обзор серий автора\n' +
-          '<code>/series другая сторона</code> — книги серии\n' +
-          '<code>/search …</code> — поиск только по книгам\n\n' +
-          '👤 <b>Личное</b> (нужна привязка аккаунта на сайте):\n' +
-          '<code>/shelves</code> — мои полки\n' +
-          '<code>/favorites</code> — избранные авторы и серии\n' +
-          '<code>/recommended</code> — рекомендации\n' +
-          '<code>/me</code> — статус · <code>/unlink</code> — отвязать\n\n' +
-          '📥 Кнопки формата под книгой — скачать файл.',
-      );
+      await sendText(chatId, buildBotHelpMessage());
       return;
     }
 
@@ -1420,7 +1439,7 @@ async function applyTelegramConfig() {
   if (!enabled || !token) return;
 
   _token = token;
-  _allowedUsers = allowedUsers ? new Set(allowedUsers.map(String)) : null;
+  _allowedUsers = allowedUsers?.length ? new Set(allowedUsers.map(String)) : null;
   _accessMode = accessMode || 'whitelist_or_linked';
   _offset = 0;
   _webhookSecret = config.telegramWebhookSecret || '';
